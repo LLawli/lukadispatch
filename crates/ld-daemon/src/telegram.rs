@@ -13,7 +13,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use teloxide::prelude::*;
 use teloxide::types::{
-    InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, MessageId, ParseMode, ThreadId,
+    InlineKeyboardButton, InlineKeyboardMarkup, InputFile, LinkPreviewOptions, MessageId,
+    ParseMode, ThreadId,
 };
 
 /// Quantos segundos o Telegram segura o `getUpdates` sem novidade. Quanto maior, menos
@@ -125,6 +126,46 @@ impl Tg {
             ultimo = Some(req.await.context("enviando mensagem")?.id);
         }
         ultimo.context("mensagem vazia não é enviável")
+    }
+
+    /// Manda um arquivo do disco para o tópico, como documento (byte a byte, sem recompressão).
+    ///
+    /// A legenda vai sem `parse_mode`, pela mesma razão do texto do agente: ela costuma carregar
+    /// caminho, crase e underscore, e em MarkdownV2 isso vira erro 400 em vez de mensagem.
+    pub async fn send_document(
+        &self,
+        topic: Option<i32>,
+        caminho: &std::path::Path,
+        legenda: Option<&str>,
+    ) -> Result<MessageId> {
+        let mut req = self
+            .bot
+            .send_document(self.chat, InputFile::file(caminho.to_path_buf()));
+        req.caption = legenda.map(str::to_string);
+        if let Some(t) = topic {
+            req.message_thread_id = Some(ThreadId(MessageId(t)));
+        }
+        Ok(req.await.context("enviando documento")?.id)
+    }
+
+    /// Manda uma imagem como foto: o celular mostra na conversa em vez de pedir download.
+    ///
+    /// O Telegram recomprime e tem limite próprio de dimensão, então quem chama precisa estar
+    /// pronto para cair no documento se isto falhar.
+    pub async fn send_photo(
+        &self,
+        topic: Option<i32>,
+        caminho: &std::path::Path,
+        legenda: Option<&str>,
+    ) -> Result<MessageId> {
+        let mut req = self
+            .bot
+            .send_photo(self.chat, InputFile::file(caminho.to_path_buf()));
+        req.caption = legenda.map(str::to_string);
+        if let Some(t) = topic {
+            req.message_thread_id = Some(ThreadId(MessageId(t)));
+        }
+        Ok(req.await.context("enviando foto")?.id)
     }
 
     pub async fn send_html(&self, topic: Option<i32>, html: &str) -> Result<MessageId> {

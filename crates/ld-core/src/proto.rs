@@ -68,6 +68,22 @@ pub enum Request {
         text: String,
     },
 
+    /// A sessão quer devolver um arquivo pelo tópico dela.
+    ///
+    /// Sentido contrário do anexo que chega: aqui quem manda é o agente, com um caminho que ele
+    /// acabou de produzir (um gráfico, um log, um build). O daemon é quem fala com o Telegram,
+    /// então o token continua só do lado dele.
+    SendFile {
+        session_id: String,
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caption: Option<String>,
+        /// Manda como documento mesmo sendo imagem: o Telegram recomprime foto, e às vezes o
+        /// que importa é o arquivo exato.
+        #[serde(default)]
+        como_arquivo: bool,
+    },
+
     /// Troca modelo ou esforço reiniciando a sessão com `--resume` (o contexto fica).
     Relaunch {
         session_id: String,
@@ -187,6 +203,12 @@ pub enum Response {
         at: i64,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         files: Vec<String>,
+    },
+
+    /// Ação concluída que tem o que contar. `Ok` seco basta para quem só precisa saber que deu
+    /// certo; isto é para quando o resultado em si importa (o que foi enviado, e como).
+    Done {
+        detail: String,
     },
 
     /// Encerra um `Listen` de vez: outro monitor assumiu o lugar deste.
@@ -310,6 +332,9 @@ mod tests {
             Response::Ok,
             Response::Error {
                 message: "x".into(),
+            },
+            Response::Done {
+                detail: "grafico.png (12 KB) enviado como foto".into(),
             },
             Response::Message {
                 text: "oi".into(),

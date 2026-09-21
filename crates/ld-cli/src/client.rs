@@ -19,6 +19,10 @@ pub const PRAZO_CURTO: Duration = Duration::from_millis(1500);
 /// parado e entende.
 pub const PRAZO_LOCAL: Duration = Duration::from_secs(5);
 
+/// Subir arquivo para o Telegram depende da rede e do tamanho (o teto é 50 MB), então este
+/// prazo é o do upload, não o de uma conversa com o daemon.
+pub const PRAZO_ENVIO: Duration = Duration::from_secs(180);
+
 /// Abrir sessão envolve criar tópico no Telegram e subir tmux: é a operação mais lenta do
 /// sistema, e falhar por impaciência deixaria tópico órfão.
 pub const PRAZO_NEW: Duration = Duration::from_secs(90);

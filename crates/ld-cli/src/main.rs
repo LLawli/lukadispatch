@@ -24,6 +24,9 @@ lukadispatch
   kill <id>                 fecha uma sessão
   new <projeto> [--continuar]   abre uma sessão (--continuar retoma a última conversa)
   send <id> <texto>         entrega uma mensagem a uma sessão sem passar pelo Telegram
+  send-file <caminho> [--legenda <texto>] [--como-arquivo] [--session <id>]
+                            manda um arquivo do disco para o tópico da sessão (a sessão em si
+                            não precisa do --session: ela já tem LD_SESSION no ambiente)
   model <id> <modelo>       troca o modelo reiniciando com o contexto inteiro
   effort <id> <nível>       idem para o esforço (low, medium, high, xhigh, max)
   install [--global]        escreve os hooks; --global acrescenta a telemetria ao settings do
@@ -45,6 +48,7 @@ fn main() -> ExitCode {
             args.get(1).map(String::as_str),
             args.get(2..).map(|r| r.join(" ")).unwrap_or_default(),
         ),
+        "send-file" | "sendfile" | "enviar" => send_file(&args),
         "model" | "effort" => trocar(
             cmd,
             args.get(1).map(String::as_str),
@@ -189,6 +193,77 @@ fn send(id: Option<&str>, texto: String) -> i32 {
         },
         client::PRAZO_LOCAL,
     ) {
+        Some(Response::Ok) => 0,
+        Some(Response::Error { message }) => {
+            eprintln!("{message}");
+            1
+        }
+        _ => {
+            eprintln!("daemon não respondeu");
+            1
+        }
+    }
+}
+
+/// Devolve um arquivo pelo Telegram, do tópico da própria sessão.
+///
+/// É o sentido contrário do anexo que chega: quem chama é o agente, com um caminho que ele
+/// acabou de produzir. A sessão não precisa dizer quem é, porque o `LD_SESSION` já está no
+/// ambiente do tmux dela; o `--session` existe para você mandar do seu terminal.
+fn send_file(args: &[String]) -> i32 {
+    let legenda = valor(args, "--legenda").or_else(|| valor(args, "--caption"));
+    let como_arquivo = args
+        .iter()
+        .any(|a| a == "--como-arquivo" || a == "--as-file");
+    let sessao = valor(args, "--session").or_else(|| {
+        std::env::var("LD_SESSION")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+    });
+
+    // Sobra tudo o que não é flag nem valor de flag: é o caminho.
+    let mut caminho = None;
+    let mut pular = false;
+    for a in args.iter().skip(1) {
+        if pular {
+            pular = false;
+            continue;
+        }
+        if a.starts_with("--") {
+            pular = matches!(a.as_str(), "--legenda" | "--caption" | "--session");
+            continue;
+        }
+        if caminho.is_none() {
+            caminho = Some(a.clone());
+        }
+    }
+
+    let (Some(caminho), Some(sessao)) = (caminho, sessao) else {
+        eprintln!(
+            "uso: lukadispatch send-file <caminho> [--legenda <texto>] [--como-arquivo] [--session <id>]"
+        );
+        return 2;
+    };
+
+    // O daemon abre o arquivo pelo caminho que receber, e o diretório dele não é o seu: caminho
+    // relativo sem isto viraria "não achei" num lugar que existe.
+    let absoluto = std::fs::canonicalize(&caminho)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or(caminho);
+
+    match client::call(
+        &Request::SendFile {
+            session_id: sessao,
+            path: absoluto,
+            caption: legenda,
+            como_arquivo,
+        },
+        client::PRAZO_ENVIO,
+    ) {
+        Some(Response::Done { detail }) => {
+            println!("{detail}");
+            0
+        }
         Some(Response::Ok) => 0,
         Some(Response::Error { message }) => {
             eprintln!("{message}");

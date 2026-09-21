@@ -660,6 +660,55 @@ impl App {
         Ok(())
     }
 
+    /// A sessão devolvendo um arquivo pelo tópico dela.
+    ///
+    /// Devolve a linha que o agente vê no terminal: ele não enxerga o Telegram, então o retorno
+    /// precisa dizer o que saiu e como.
+    pub async fn send_file(
+        &self,
+        session_id: &str,
+        caminho: &str,
+        legenda: Option<&str>,
+        como_arquivo: bool,
+    ) -> Result<String> {
+        let Some(s) = self.store.get(session_id)? else {
+            bail!("não conheço a sessão {session_id}");
+        };
+        let Some(topic) = s.topic_id else {
+            bail!("esta sessão não tem tópico no Telegram");
+        };
+
+        let pronto = crate::arquivos::para_enviar(std::path::Path::new(caminho), como_arquivo)?;
+        let nome = pronto
+            .caminho
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| caminho.to_string());
+        let tamanho = crate::arquivos::humano_u64(pronto.tamanho);
+
+        if pronto.como_foto {
+            match self
+                .tg
+                .send_photo(Some(topic), &pronto.caminho, legenda)
+                .await
+            {
+                Ok(_) => {
+                    info!(sessao = %session_id, arquivo = %pronto.caminho.display(), "foto enviada");
+                    return Ok(format!("{nome} ({tamanho}) enviado como foto"));
+                }
+                // O Telegram recusa foto por dimensão, proporção e formato que ele não reconhece.
+                // Cair para documento entrega o arquivo do mesmo jeito, que é o que foi pedido.
+                Err(e) => warn!(erro = %e, "sendPhoto recusado; mando como documento"),
+            }
+        }
+
+        self.tg
+            .send_document(Some(topic), &pronto.caminho, legenda)
+            .await?;
+        info!(sessao = %session_id, arquivo = %pronto.caminho.display(), "documento enviado");
+        Ok(format!("{nome} ({tamanho}) enviado como documento"))
+    }
+
     /// `true` quando este prompt é o que o daemon acabou de entregar pelo Telegram.
     fn e_eco(&self, session_id: &str, texto: &str) -> bool {
         const JANELA: std::time::Duration = std::time::Duration::from_secs(120);

@@ -176,6 +176,68 @@ async fn varre_em(raiz: &Path, vivas: &std::collections::HashSet<String>) -> usi
     apagados
 }
 
+/// Teto do Bot API para o bot mandar arquivo. É maior que o de baixar, e não é engano: a
+/// assimetria está na documentação do Telegram.
+pub const LIMITE_ENVIO: u64 = 50 * 1024 * 1024;
+
+/// Teto de uma imagem enviada como foto. Acima disso, mesmo sendo imagem, vai como documento.
+pub const LIMITE_FOTO: u64 = 10 * 1024 * 1024;
+
+/// Um arquivo do disco pronto para sair pelo Telegram.
+pub struct ParaEnviar {
+    pub caminho: PathBuf,
+    pub tamanho: u64,
+    /// Se vale a pena tentar como foto (aparece na conversa em vez de virar download).
+    pub como_foto: bool,
+}
+
+/// Confere o que o agente pediu para mandar, antes de qualquer chamada de rede.
+///
+/// Falha cedo e com o motivo escrito: quem lê o erro é o agente, dentro da sessão, e ele precisa
+/// saber se o caminho está errado, se o arquivo está vazio ou se é grande demais.
+pub fn para_enviar(caminho: &Path, como_arquivo: bool) -> Result<ParaEnviar> {
+    let meta =
+        std::fs::metadata(caminho).with_context(|| format!("não achei {}", caminho.display()))?;
+    if meta.is_dir() {
+        bail!(
+            "{} é um diretório; o Telegram só recebe arquivo (compacte antes)",
+            caminho.display()
+        );
+    }
+    if !meta.is_file() {
+        bail!("{} não é um arquivo comum", caminho.display());
+    }
+    if meta.len() == 0 {
+        bail!("{} está vazio", caminho.display());
+    }
+    if meta.len() > LIMITE_ENVIO {
+        bail!(
+            "{} tem {}, e o Bot API só envia até 50 MB",
+            caminho.display(),
+            humano_u64(meta.len())
+        );
+    }
+    Ok(ParaEnviar {
+        caminho: caminho.to_path_buf(),
+        tamanho: meta.len(),
+        como_foto: !como_arquivo && meta.len() <= LIMITE_FOTO && e_imagem(caminho),
+    })
+}
+
+/// Formato que o Telegram mostra inline como foto. GIF e SVG ficam de fora: o primeiro vira
+/// animação (e perde a animação em `sendPhoto`), o segundo o Telegram nem renderiza.
+fn e_imagem(caminho: &Path) -> bool {
+    caminho
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| {
+            matches!(
+                e.to_ascii_lowercase().as_str(),
+                "jpg" | "jpeg" | "png" | "webp"
+            )
+        })
+}
+
 /// Reduz o que veio da API a um nome de arquivo simples: sem diretório, sem surpresa.
 fn sanitiza(bruto: &str) -> String {
     // `file_name` do Telegram é texto livre. Ficar só com o último componente derruba de uma vez
@@ -238,6 +300,10 @@ fn livre(dir: &Path, nome: &str) -> PathBuf {
 
 /// Tamanho para ler no celular.
 pub fn humano(bytes: u32) -> String {
+    humano_u64(bytes as u64)
+}
+
+pub fn humano_u64(bytes: u64) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = KB * KB;
     let b = bytes as f64;
@@ -315,6 +381,40 @@ mod tests {
             raiz.path().is_dir(),
             "a raiz de todas as sessões continua de pé"
         );
+    }
+
+    #[test]
+    fn diretorio_e_vazio_nao_saem_daqui() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(para_enviar(dir.path(), false).is_err(), "diretório não vai");
+
+        let vazio = dir.path().join("nada.txt");
+        std::fs::write(&vazio, b"").unwrap();
+        assert!(para_enviar(&vazio, false).is_err(), "arquivo vazio não vai");
+
+        assert!(
+            para_enviar(&dir.path().join("nao-existe"), false).is_err(),
+            "caminho inexistente não vai"
+        );
+    }
+
+    #[test]
+    fn imagem_vai_como_foto_a_nao_ser_que_voce_peca_o_arquivo() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("grafico.PNG");
+        std::fs::write(&png, b"x").unwrap();
+        assert!(
+            para_enviar(&png, false).unwrap().como_foto,
+            "extensão não diferencia maiúscula"
+        );
+        assert!(
+            !para_enviar(&png, true).unwrap().como_foto,
+            "pedir o arquivo exato tem que valer mais que a conveniência"
+        );
+
+        let log = dir.path().join("saida.log");
+        std::fs::write(&log, b"x").unwrap();
+        assert!(!para_enviar(&log, false).unwrap().como_foto);
     }
 
     #[test]

@@ -147,6 +147,20 @@ async fn responde(app: &Arc<App>, req: Request) -> Response {
             Err(e) => erro(e),
         },
 
+        Request::SendFile {
+            session_id,
+            path,
+            caption,
+            como_arquivo,
+        } => match app
+            .send_file(&session_id, &path, caption.as_deref(), como_arquivo)
+            .await
+        {
+            // O agente precisa saber o que saiu, e `Ok` seco não diz nada.
+            Ok(descricao) => Response::Done { detail: descricao },
+            Err(e) => erro(e),
+        },
+
         Request::Relaunch {
             session_id,
             model,

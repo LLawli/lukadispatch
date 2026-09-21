@@ -14,6 +14,7 @@ determinísticos:
 | Claude para o Telegram | hook `Stop` manda a resposta; `PreToolUse`/`PostToolUse` editam a mensagem de status |
 | Perguntas e permissões | hooks `PreToolUse:AskUserQuestion` e `PermissionRequest` abrem card no Telegram **e** janela GTK4 no PC; vale quem responder primeiro |
 | PC para o Telegram | o que você digita no `tmux attach` vira mensagem no tópico (hook `UserPromptSubmit`), marcada como vinda do PC |
+| Arquivos | anexo do Telegram é baixado para o disco e entregue como caminho; `lukadispatch send-file` faz o caminho de volta |
 
 Nada disso depende de o agente resolver avisar alguém: quem fala é o hook.
 
@@ -125,6 +126,17 @@ Dentro do tópico de uma sessão, qualquer mensagem vai para o Claude. Além dis
   sessão e sobrevive a um relançamento, então ele não volta ao padrão do projeto sozinho.
 - `/kill` fecha a sessão e apaga o tópico.
 
+**Arquivo nos dois sentidos.** Anexo que você manda no tópico (documento, foto, vídeo, animação,
+nota de vídeo, figurinha) é baixado na hora para
+`~/.local/share/lukadispatch/arquivos/<sessão>/` e chega à sessão como caminho absoluto, no campo
+`files` da linha NDJSON e dentro do texto. A legenda vira a mensagem; sem legenda, o texto é a
+própria linha do arquivo. Áudio e voz ficam de fora enquanto não houver transcrição, e dizem isso
+no tópico. O teto é 20 MB, que é o do Bot API. Os arquivos são apagados junto com a sessão.
+
+No sentido contrário, a sessão devolve arquivo com `lukadispatch send-file <caminho>`: imagem cai
+na conversa como foto, o resto vira documento, e o teto é 50 MB. O token continua só do lado do
+daemon.
+
 Perguntas do Claude viram card com botões, e **também aceitam resposta escrita**: o que você
 digitar no tópico com um card aberto é a resposta dele. Respondido, o card perde os botões e vira
 o registro do que foi perguntado e escolhido; sem resposta (6h ou sessão morta), some.
@@ -142,6 +154,7 @@ lukadispatch ls
 lukadispatch models                  # catálogo lido do binário do Claude Code
 lukadispatch new <projeto> [--continuar]
 lukadispatch send <id> "texto"       # entrega sem passar pelo Telegram
+lukadispatch send-file <caminho> --legenda "..." --session <id>   # devolve arquivo pelo tópico
 lukadispatch model <id> claude-opus-4-8
 lukadispatch effort <id> high
 lukadispatch kill <id>
