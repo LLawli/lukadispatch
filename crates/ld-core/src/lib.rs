@@ -4,8 +4,10 @@
 //! Claude, então tudo que ele carrega entra no caminho quente. Nada de Telegram e nada de GTK
 //! aqui dentro.
 
+pub mod ask;
 pub mod config;
 pub mod context;
+pub mod hooks;
 pub mod labels;
 pub mod paths;
 pub mod proto;

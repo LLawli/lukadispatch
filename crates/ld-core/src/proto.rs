@@ -24,7 +24,9 @@ pub enum Request {
 
     /// Fluxo de entrada da sessão. O daemon responde com um `Response::Message` por mensagem
     /// recebida do Telegram, para sempre, até o cliente sair.
-    Listen { session_id: String },
+    Listen {
+        session_id: String,
+    },
 
     /// O turno acabou (hook Stop). A resposta diz se o Monitor da sessão ainda está armado,
     /// porque é o hook Stop que força o re-arme quando ele expira.
@@ -46,15 +48,25 @@ pub enum Request {
     },
 
     /// A janela nativa respondeu primeiro: cancela o card do Telegram.
-    LocalAnswer { ask_id: String, answer: String },
+    LocalAnswer {
+        ask_id: String,
+        answer: String,
+    },
 
     /// A sessão terminou (hook SessionEnd): apaga o tópico e limpa o estado.
-    SessionEnd { session_id: String, reason: String },
+    SessionEnd {
+        session_id: String,
+        reason: String,
+    },
 
     /// Comandos administrativos, usados pelo CLI local (`lukadispatch ls|kill|new`).
     ListSessions,
-    NewSession { project: String },
-    Kill { session_id: String },
+    NewSession {
+        project: String,
+    },
+    Kill {
+        session_id: String,
+    },
 }
 
 /// O que o hook SessionStart conta ao daemon.
@@ -87,13 +99,23 @@ pub struct SessionEvent {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EventKind {
     /// Uma ferramenta vai rodar. `label` já vem pronto para leitura humana.
-    ToolStart { tool: String, label: String },
-    ToolEnd { tool: String, ok: bool },
+    ToolStart {
+        tool: String,
+        label: String,
+    },
+    ToolEnd {
+        tool: String,
+        ok: bool,
+    },
     /// Texto do assistente em streaming (hook MessageDisplay). Usado só para o status
     /// "escrevendo": a resposta de verdade vem no Stop, que é autoritativo.
     Streaming,
-    Notification { text: String },
-    Failure { text: String },
+    Notification {
+        text: String,
+    },
+    Failure {
+        text: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

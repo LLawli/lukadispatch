@@ -57,8 +57,15 @@ fn cauda(caminho: &Path, bytes: u64) -> Option<String> {
 fn tokens_da_linha(linha: &str) -> Option<u64> {
     let v: serde_json::Value = serde_json::from_str(linha).ok()?;
     let usage = v.get("message")?.get("usage")?;
-    let campo = |k: &str| usage.get(k).and_then(serde_json::Value::as_u64).unwrap_or(0);
-    let total = campo("input_tokens") + campo("cache_read_input_tokens") + campo("cache_creation_input_tokens");
+    let campo = |k: &str| {
+        usage
+            .get(k)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+    };
+    let total = campo("input_tokens")
+        + campo("cache_read_input_tokens")
+        + campo("cache_creation_input_tokens");
     (total > 0).then_some(total)
 }
 
@@ -85,9 +92,7 @@ fn model_id_da_linha(linha: &str) -> Option<String> {
 /// assistente (sessão recém-criada) ou o arquivo não existe.
 pub fn read(transcript: &Path) -> Option<ContextUsage> {
     for bytes in CAUDAS {
-        let Some(texto) = cauda(transcript, bytes) else {
-            return None;
-        };
+        let texto = cauda(transcript, bytes)?;
         let mut tokens = None;
         let mut limite = None;
         // De trás para frente: interessa o estado mais recente dos dois.

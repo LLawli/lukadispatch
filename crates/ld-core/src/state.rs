@@ -78,8 +78,7 @@ fn agora() -> i64 {
 impl Store {
     pub fn open(caminho: &Path) -> Result<Self> {
         if let Some(pai) = caminho.parent() {
-            std::fs::create_dir_all(pai)
-                .with_context(|| format!("criando {}", pai.display()))?;
+            std::fs::create_dir_all(pai).with_context(|| format!("criando {}", pai.display()))?;
         }
         let conn = Connection::open(caminho)
             .with_context(|| format!("abrindo estado em {}", caminho.display()))?;
@@ -272,9 +271,7 @@ impl Store {
             let mut stmt = tx.prepare(
                 "SELECT text, from_name, at FROM queue WHERE session_id = ?1 ORDER BY id",
             )?;
-            let linhas = stmt.query_map([session_id], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-            })?;
+            let linhas = stmt.query_map([session_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
             linhas.flatten().collect()
         };
         tx.execute("DELETE FROM queue WHERE session_id = ?1", [session_id])?;
@@ -284,8 +281,10 @@ impl Store {
 
     pub fn kv_get(&self, key: &str) -> Result<Option<String>> {
         let c = self.conn();
-        Ok(c.query_row("SELECT value FROM kv WHERE key = ?1", [key], |r| r.get(0))
-            .optional()?)
+        Ok(
+            c.query_row("SELECT value FROM kv WHERE key = ?1", [key], |r| r.get(0))
+                .optional()?,
+        )
     }
 
     pub fn kv_set(&self, key: &str, value: &str) -> Result<()> {
