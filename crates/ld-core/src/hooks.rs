@@ -19,6 +19,14 @@
 
 use serde_json::{Value, json};
 
+/// Ferramentas que passam pelo portão de permissão do lukadispatch: todas.
+///
+/// A primeira versão listava só as que escrevem ou executam, e isso tinha um buraco: no modo
+/// remoto a sessão roda em `dontAsk`, que **nega por padrão**, então tudo que ficasse fora da
+/// lista seria recusado em silêncio, sem card e sem você saber. Cobrindo todas, nada é negado
+/// sem decisão: o daemon pergunta para o que merece pergunta e libera o resto na hora.
+pub const GATE_TOOLS: &str = "";
+
 /// Espera de resposta humana, em segundos. Seis horas: o menu nativo do Claude Code espera
 /// indefinidamente, e o sdispath mediu que meia hora deixava card fantasma em sessão abandonada.
 /// O teto existe só para a pendência não viver para sempre.
@@ -86,18 +94,24 @@ pub fn bot_settings(cli: &str) -> Value {
     // A pergunta é o único hook que segura a sessão de propósito: é uma pessoa que precisa
     // responder. O menu do terminal não chega a aparecer, e é isso mesmo: a janela GTK4 é o
     // substituto dele, e assim não existe injeção de teclas em canto nenhum.
+    // O portão de permissão mora no `PreToolUse`, e não no `PermissionRequest`, por medição:
+    // a decisão do `PermissionRequest` é ignorada em todos os modos testados (o prompt do
+    // terminal aparece assim mesmo e a sessão fica esperando teclado), enquanto a do `PreToolUse`
+    // é honrada até no modo mais estrito. Ver `docs/permissoes.md`.
+    //
+    // O matcher é a lista do que vale perguntar. Ferramenta de leitura não entra: card a cada
+    // `Read` tornaria o celular inútil, e negar leitura não protege nada.
     hooks["PreToolUse"] = json!([
         {
             "matcher": "AskUserQuestion",
             "hooks": [ blocking_hook(cli, "ask", ASK_TIMEOUT_SECS, "Perguntando no Telegram...") ]
         },
+        {
+            "matcher": GATE_TOOLS,
+            "hooks": [ blocking_hook(cli, "permission", ASK_TIMEOUT_SECS, "Esperando você liberar...") ]
+        },
         { "matcher": "", "hooks": [ async_hook(cli, "tool-start") ] }
     ]);
-
-    hooks["PermissionRequest"] = json!([ {
-        "matcher": "",
-        "hooks": [ blocking_hook(cli, "permission", ASK_TIMEOUT_SECS, "Esperando você liberar...") ]
-    } ]);
 
     json!({
         "hooks": hooks,
@@ -213,10 +227,10 @@ mod tests {
         assert_eq!(h["Stop"][0]["hooks"][0]["asyncRewake"], true);
         assert_eq!(h["PreToolUse"][0]["matcher"], "AskUserQuestion");
         assert_eq!(h["PreToolUse"][0]["hooks"][0]["timeout"], ASK_TIMEOUT_SECS);
-        assert_eq!(
-            h["PermissionRequest"][0]["hooks"][0]["args"][1],
-            "permission"
-        );
+        // O portão de permissão é o segundo grupo, e mora no PreToolUse porque a decisão do
+        // PermissionRequest é ignorada (medido em todos os modos).
+        assert_eq!(h["PreToolUse"][1]["hooks"][0]["args"][1], "permission");
+        assert_eq!(h["PreToolUse"][2]["hooks"][0]["args"][1], "tool-start");
     }
 
     #[test]

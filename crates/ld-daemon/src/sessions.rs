@@ -117,16 +117,20 @@ Faça só isto, agora:
     )
 }
 
-/// A linha do `--permission-mode`, ou nada.
+/// A linha do `--permission-mode` para o modo pedido.
 ///
-/// "padrao" quer dizer ausência da flag, e é o único modo em que o Claude Code honra a decisão
-/// de um hook de permissão: é ele que faz o card do Telegram valer. Passar `manual` aqui seria
-/// pedir para o prompt ficar esperando teclado no PC.
+/// O modo `perguntar` é nosso, não do Claude Code, e ele vira `dontAsk` aqui. A escolha vem de
+/// medição: `dontAsk` é o único modo em que o terminal **nunca** abre prompt (o que travaria a
+/// sessão para quem está longe), e a decisão do nosso portão, que vive no `PreToolUse`, é
+/// honrada mesmo dentro dele. O que o portão não cobrir é negado em vez de ficar esperando
+/// teclado, e o agente relata a negativa em vez de emudecer.
 fn modo_flag(modo: &str) -> String {
-    match modo {
-        "padrao" | "" => String::new(),
-        outro => format!("  --permission-mode {outro} \\\n"),
-    }
+    let efetivo = match modo {
+        "perguntar" => "dontAsk",
+        "" | "padrao" => return String::new(),
+        outro => outro,
+    };
+    format!("  --permission-mode {efetivo} \\\n")
 }
 
 /// Nome do workstream gerenciado do ai-memory.
@@ -386,10 +390,11 @@ mod tests {
     }
 
     #[test]
-    fn modo_padrao_nao_passa_flag_nenhuma() {
-        // A ausência da flag é o que faz o card de permissão do Telegram ser honrado.
-        assert_eq!(modo_flag("padrao"), "");
+    fn perguntar_vira_dontask() {
+        // `dontAsk` é o que garante que o terminal nunca abre prompt; quem decide é o portão.
+        assert!(modo_flag("perguntar").contains("--permission-mode dontAsk"));
         assert!(modo_flag("auto").contains("--permission-mode auto"));
+        assert_eq!(modo_flag("padrao"), "");
     }
 
     #[test]

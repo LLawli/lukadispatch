@@ -32,6 +32,13 @@ pub struct Config {
     /// Caminho do binário do Claude Code, quando a descoberta automática não servir.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claude_binary: Option<String>,
+    /// Ferramentas que pedem card no modo "perguntar no celular".
+    ///
+    /// O portão é consultado para TODA ferramenta (senão o `dontAsk` por baixo negaria em
+    /// silêncio o que ficasse de fora); esta lista é o que vira pergunta. O resto é liberado na
+    /// hora, sem card. Prefixo `mcp__` cobre servidor MCP inteiro.
+    pub ask_tools: Vec<String>,
+
     /// Passar os servidores MCP pelo proxy, para o diálogo deles caber no celular.
     ///
     /// Desligue se algum servidor seu não gostar de ter um processo no meio do cano: as sessões
@@ -49,6 +56,18 @@ impl Default for Config {
             trust_projects: true,
             history_lines: 8,
             claude_binary: None,
+            ask_tools: [
+                "Bash",
+                "Write",
+                "Edit",
+                "MultiEdit",
+                "NotebookEdit",
+                "WebFetch",
+                "mcp__",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
             wrap_mcp: true,
         }
     }
@@ -124,6 +143,13 @@ impl Config {
 
     pub fn allows(&self, user_id: i64) -> bool {
         self.telegram.allowed_user_ids.contains(&user_id)
+    }
+
+    /// `true` quando esta ferramenta merece um card no modo de perguntar.
+    pub fn pergunta_por(&self, ferramenta: &str) -> bool {
+        self.ask_tools
+            .iter()
+            .any(|regra| ferramenta == regra || ferramenta.starts_with(regra.as_str()))
     }
 
     pub fn permission_mode_for(&self, path: &str) -> String {
@@ -228,6 +254,20 @@ mod tests {
         let c = Config::load(Path::new("/nao/existe/config.toml")).unwrap();
         assert_eq!(c.default_permission_mode, "auto");
         assert!(c.scan.enabled);
+    }
+
+    #[test]
+    fn a_lista_de_perguntar_cobre_escrita_e_mcp_mas_nao_leitura() {
+        let c = Config::default();
+        assert!(c.pergunta_por("Bash"));
+        assert!(c.pergunta_por("Write"));
+        assert!(c.pergunta_por("mcp__wamux-omarchy__whatsapp_send"));
+        assert!(!c.pergunta_por("Read"));
+        assert!(!c.pergunta_por("Glob"));
+        assert!(
+            !c.pergunta_por("TodoWrite"),
+            "TodoWrite não escreve no disco"
+        );
     }
 
     #[test]

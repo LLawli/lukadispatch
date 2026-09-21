@@ -160,7 +160,10 @@ async fn em_topico(
                     if let Err(e) = app.relaunch_modo(&s.session_id, modo).await {
                         let _ = app
                             .tg
-                            .send_html(Some(topic), &format!("⚠️ {}", escape_html(&e.to_string())))
+                            .send_html(
+                                Some(topic),
+                                &format!("⚠️ {}", escape_html(&format!("{e:#}"))),
+                            )
                             .await;
                     }
                 }
@@ -237,7 +240,10 @@ async fn em_topico(
             if let Err(e) = app.relaunch(&s.session_id, model, effort).await {
                 let _ = app
                     .tg
-                    .send_html(Some(topic), &format!("⚠️ {}", escape_html(&e.to_string())))
+                    .send_html(
+                        Some(topic),
+                        &format!("⚠️ {}", escape_html(&format!("{e:#}"))),
+                    )
                     .await;
             }
             Ok(())
@@ -259,7 +265,10 @@ async fn em_topico(
             if let Err(e) = app.on_incoming(topic, texto, de).await {
                 let _ = app
                     .tg
-                    .send_html(Some(topic), &format!("⚠️ {}", escape_html(&e.to_string())))
+                    .send_html(
+                        Some(topic),
+                        &format!("⚠️ {}", escape_html(&format!("{e:#}"))),
+                    )
                     .await;
             }
             Ok(())
@@ -491,7 +500,10 @@ async fn botao(
         if let Err(e) = app.relaunch_modo(&s.session_id, modo).await {
             let _ = app
                 .tg
-                .send_html(Some(topico), &format!("⚠️ {}", escape_html(&e.to_string())))
+                .send_html(
+                    Some(topico),
+                    &format!("⚠️ {}", escape_html(&format!("{e:#}"))),
+                )
                 .await;
         }
         return Ok(());
@@ -535,7 +547,10 @@ async fn troca(
     if let Err(e) = app.relaunch(&s.session_id, model, effort).await {
         let _ = app
             .tg
-            .send_html(Some(topico), &format!("⚠️ {}", escape_html(&e.to_string())))
+            .send_html(
+                Some(topico),
+                &format!("⚠️ {}", escape_html(&format!("{e:#}"))),
+            )
             .await;
     }
     Ok(())
@@ -628,7 +643,7 @@ async fn abrir(
                 &format!(
                     "❌ Não consegui abrir <b>{}</b>: {}",
                     escape_html(&p.name),
-                    escape_html(&e.to_string())
+                    escape_html(&format!("{e:#}"))
                 ),
                 TTL_TECLADO,
             )
@@ -639,15 +654,13 @@ async fn abrir(
 
 /// Modos de permissão oferecidos no Telegram, com nome legível.
 ///
-/// `padrao` é a ausência do `--permission-mode`, e é ELE que significa "perguntar sempre" aqui.
-/// O modo `manual` do Claude Code parece ser isso pelo nome, mas não é para quem está longe:
-/// medido nesta versão, ele **ignora a decisão do hook** e exige o teclado, então o card do
-/// Telegram aparece, você responde, e o prompt continua de pé no terminal. Ele ficou de fora da
-/// lista por isso, e `dontAsk` também, porque nunca perguntar e nunca avisar é o pior dos
-/// mundos para quem não está na frente da tela.
+/// `perguntar` é modo do lukadispatch, não do Claude Code: por baixo ele é `dontAsk` (o terminal
+/// nunca abre prompt) mais o nosso portão no `PreToolUse`, que é quem pergunta no celular. Os
+/// modos nativos que parecem servir para isso não servem: `manual` mostra o prompt e ignora a
+/// decisão do hook, e `dontAsk` sozinho nega tudo sem perguntar a ninguém. Ver `docs/permissoes.md`.
 const MODOS: [(&str, &str); 4] = [
     ("auto", "🤖 auto (classificador decide)"),
-    ("padrao", "🙋 perguntar (card no celular)"),
+    ("perguntar", "🙋 perguntar no celular"),
     ("plan", "📋 plano (só propõe)"),
     ("bypassPermissions", "⚠️ liberar tudo"),
 ];

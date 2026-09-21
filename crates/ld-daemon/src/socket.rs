@@ -233,7 +233,7 @@ async fn responde(app: &Arc<App>, req: Request) -> Response {
 fn erro(e: anyhow::Error) -> Response {
     warn!(erro = %e, "requisição falhou");
     Response::Error {
-        message: e.to_string(),
+        message: format!("{e:#}"),
     }
 }
 
@@ -307,10 +307,18 @@ async fn permissao(
     {
         Ok(x) => x,
         Err(e) => {
-            // Sem card não há decisão: o Claude Code decide como decidiria sem nós.
-            let resp = Response::Decision {
-                decision: PermissionDecision::Undecided,
-                reason: Some(e.to_string()),
+            // Ferramenta fora da lista de perguntar: no modo remoto ela PRECISA ser liberada
+            // explicitamente, porque o `dontAsk` por baixo nega quem não recebe decisão.
+            let resp = match e.downcast_ref::<crate::app::SemCard>() {
+                Some(crate::app::SemCard::Libera) => Response::Decision {
+                    decision: PermissionDecision::Allow,
+                    reason: Some("liberada sem perguntar (fora da lista)".into()),
+                },
+                // Sem card por outro motivo: o Claude Code decide como decidiria sem nós.
+                None => Response::Decision {
+                    decision: PermissionDecision::Undecided,
+                    reason: Some(e.to_string()),
+                },
             };
             escrita.write_all(line(&resp).as_bytes()).await?;
             return Ok(());

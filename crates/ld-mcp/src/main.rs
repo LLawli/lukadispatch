@@ -60,6 +60,15 @@ struct Config {
 }
 
 impl Config {
+    /// Nome do servidor, para o diário dizer de qual cano a linha veio.
+    fn nome_curto(&self) -> String {
+        self.comando
+            .rsplit('/')
+            .next()
+            .unwrap_or(&self.comando)
+            .to_string()
+    }
+
     fn parse(args: &[String]) -> Option<Self> {
         let sessao = args.iter().position(|a| a == "--session")?;
         let session_id = args.get(sessao + 1)?.clone();
@@ -71,6 +80,29 @@ impl Config {
             comando: comando.clone(),
             args: args.to_vec(),
         })
+    }
+}
+
+/// Diário do que passou pelo cano, uma linha por mensagem.
+///
+/// Existe porque um proxy que "não interceptou" é indistinguível de um proxy que nem viu a
+/// mensagem, e sem isso a diferença só dá para adivinhar. Fica ao lado do script de partida da
+/// sessão, junto do resto do rastro dela.
+fn diario(cfg: &Config, texto: &str) {
+    let caminho = ld_core::paths::state_dir()
+        .join("sessions")
+        .join(&cfg.session_id)
+        .join("mcp.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(caminho)
+    {
+        let agora = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(f, "{agora} {} {texto}", cfg.nome_curto());
     }
 }
 
@@ -101,13 +133,26 @@ fn roda(cfg: Config) -> std::io::Result<u8> {
         });
     }
 
+    diario(&cfg, "proxy no ar");
+
     // Servidor -> cliente: tudo passa, menos o pedido de confirmação.
     let mut saida = std::io::stdout();
     for linha in BufReader::new(saida_filho).lines() {
         let linha = linha?;
+        if let Ok(v) = serde_json::from_str::<Value>(&linha)
+            && let Some(m) = v.get("method").and_then(Value::as_str)
+        {
+            diario(&cfg, &format!("do servidor: {m}"));
+        }
         match pedido_de_confirmacao(&linha) {
             Some((id, params)) => {
+                diario(&cfg, "pedido de confirmação interceptado");
                 let resposta = decide(&cfg.session_id, &params);
+                let nota = match &resposta {
+                    Some(r) => format!("respondi: {r}"),
+                    None => "não consegui perguntar; repassando ao Claude Code".to_string(),
+                };
+                diario(&cfg, &nota);
                 match resposta {
                     Some(resultado) => {
                         let msg = json!({"jsonrpc": "2.0", "id": id, "result": resultado});
@@ -278,8 +323,24 @@ fn primeira_resposta(a: &Answer) -> Option<String> {
     a.items.first()?.answers.first().cloned()
 }
 
-/// Sonda o daemon antes de prometer que consegue perguntar.
+/// Sonda o daemon antes de prometer que consegue perguntar, com paciência.
+///
+/// Uma sonda única de meio segundo era apressada demais: o daemon reiniciando (atualização,
+/// `systemctl restart`) falha nela, e a consequência é o diálogo cair no terminal, onde ninguém
+/// está olhando. O pedido do servidor MCP espera segundos sem problema, então vale insistir.
 fn daemon_responde() -> bool {
+    for tentativa in 0..6 {
+        if sonda() {
+            return true;
+        }
+        if tentativa < 5 {
+            std::thread::sleep(std::time::Duration::from_millis(600));
+        }
+    }
+    false
+}
+
+fn sonda() -> bool {
     use std::io::Read;
     let Ok(mut s) = std::os::unix::net::UnixStream::connect(ld_core::paths::socket()) else {
         return false;

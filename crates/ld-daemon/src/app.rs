@@ -27,6 +27,26 @@ use crate::sessions;
 use crate::status::{Ctx, StatusBoard};
 use crate::telegram::{Tg, escape_html};
 
+/// Por que o portão não abriu card.
+///
+/// Vira erro de propósito: o caminho de "não abri card" já existia (sessão sem tópico, sessão
+/// desconhecida), e o socket sabe traduzir. O que muda é a resposta ao Claude Code: liberar é uma
+/// decisão, e no modo remoto ela precisa ser dita, porque o `dontAsk` por baixo nega o silêncio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SemCard {
+    Libera,
+}
+
+impl std::fmt::Display for SemCard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Libera => write!(f, "ferramenta liberada sem perguntar"),
+        }
+    }
+}
+
+impl std::error::Error for SemCard {}
+
 /// De onde veio o pedido de encerrar a sessão.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Fim {
@@ -354,7 +374,8 @@ impl App {
     /// Monitor, e o prompt de re-arme cuida disso.
     /// Troca só o modo de permissão, pela mesma mecânica do modelo.
     pub async fn relaunch_modo(&self, session_id: &str, modo: &str) -> Result<()> {
-        const VALIDOS: [&str; 7] = [
+        const VALIDOS: [&str; 8] = [
+            "perguntar",
             "padrao",
             "auto",
             "manual",
@@ -369,7 +390,8 @@ impl App {
         if modo == "manual" {
             bail!(
                 "o modo manual ignora a decisão do hook: o card aparece aqui, você responde, e o \
-                 prompt continua esperando teclado no PC. Para perguntar pelo celular, use padrao"
+                 prompt continua esperando teclado no PC. Para perguntar pelo celular, use \
+                 perguntar"
             );
         }
         self.store.set_permission_mode(session_id, modo)?;
@@ -915,6 +937,20 @@ impl App {
         let Some(topic) = s.topic_id else {
             bail!("sessão sem tópico");
         };
+        // O portão dispara para TODA ferramenta; a política mora aqui.
+        //
+        // Fora do modo remoto: "não decidi", e a sessão segue o caminho normal do Claude Code.
+        if s.permission_mode.as_deref() != Some("perguntar") {
+            bail!("sessão não está no modo de perguntar");
+        }
+        // No modo remoto, a sessão roda em `dontAsk`, que nega por padrão. Por isso o que não
+        // merece pergunta precisa ser LIBERADO aqui, e não deixado passar: deixar passar seria
+        // negar em silêncio.
+        if !self.cfg.pergunta_por(ferramenta) {
+            info!(sessao = %session_id, ferramenta, "portão liberou sem perguntar");
+            return Err(SemCard::Libera.into());
+        }
+        info!(sessao = %session_id, ferramenta, "portão pedindo decisão no celular");
 
         let (ask_id, rx) = self.hub.open_ask(session_id);
         let detalhe = ld_core::labels::label_for_tool(ferramenta, entrada);

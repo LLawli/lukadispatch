@@ -21,7 +21,7 @@ pub const PRAZO_LOCAL: Duration = Duration::from_secs(5);
 
 /// Abrir sessão envolve criar tópico no Telegram e subir tmux: é a operação mais lenta do
 /// sistema, e falhar por impaciência deixaria tópico órfão.
-pub const PRAZO_NEW: Duration = Duration::from_secs(30);
+pub const PRAZO_NEW: Duration = Duration::from_secs(90);
 
 pub fn connect(prazo: Duration) -> Option<UnixStream> {
     let stream = UnixStream::connect(paths::socket()).ok()?;

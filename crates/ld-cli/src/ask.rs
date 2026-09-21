@@ -64,7 +64,13 @@ pub fn ask(ev: &Value, session_id: String) -> i32 {
     0
 }
 
-/// Hook `PermissionRequest`.
+/// O portão de permissão, no `PreToolUse`.
+///
+/// Fica neste evento por medição, não por gosto: a decisão do `PermissionRequest` é ignorada
+/// (o prompt do terminal aparece assim mesmo), e a do `PreToolUse` é honrada até no modo mais
+/// estrito. Como `PreToolUse` dispara antes de existir pergunta, quem decide se vale perguntar é
+/// o daemon, que conhece o modo da sessão: fora do modo remoto ele responde "não decidi" na hora
+/// e a sessão segue o caminho normal.
 pub fn permission(ev: &Value, session_id: String) -> i32 {
     let ferramenta = ev
         .get("tool_name")
@@ -123,7 +129,7 @@ pub fn permission(ev: &Value, session_id: String) -> i32 {
         "{}",
         json!({
             "hookSpecificOutput": {
-                "hookEventName": "PermissionRequest",
+                "hookEventName": "PreToolUse",
                 "permissionDecision": if permitir { "allow" } else { "deny" },
                 "permissionDecisionReason": if permitir {
                     "Liberado por você no lukadispatch."
