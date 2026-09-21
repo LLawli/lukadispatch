@@ -10,6 +10,15 @@ use std::sync::Mutex;
 
 use tokio::sync::{mpsc, oneshot};
 
+/// O que trafega no canal de um `Listen`.
+#[derive(Debug, Clone)]
+pub enum Aviso {
+    /// Mensagem para a sessão.
+    Mensagem(Incoming),
+    /// Outro monitor assumiu: este deve sair sem reconectar.
+    Substituido,
+}
+
 /// Uma mensagem do Telegram a caminho da sessão.
 #[derive(Debug, Clone)]
 pub struct Incoming {
@@ -24,9 +33,21 @@ struct Pending {
     responder: oneshot::Sender<String>,
 }
 
+/// Registro de um `Listen` aberto.
+///
+/// O `token` é o que impede o bug do monitor que se auto-derruba: quando o agente re-arma antes
+/// de o monitor antigo morrer, o antigo chamava `unlisten` e apagava o registro do NOVO. O
+/// daemon então dizia "sem monitor armado", o hook Stop mandava re-armar, e a sessão entrava num
+/// laço de re-armar para sempre. Com token, cada conexão só remove a si mesma.
+struct Registro {
+    token: u64,
+    tx: mpsc::UnboundedSender<Aviso>,
+}
+
 #[derive(Default)]
 pub struct Hub {
-    listeners: Mutex<HashMap<String, mpsc::UnboundedSender<Incoming>>>,
+    listeners: Mutex<HashMap<String, Registro>>,
+    proximo_token: Mutex<u64>,
     pending: Mutex<HashMap<String, Pending>>,
     /// Quantas vezes seguidas pedimos que a sessão re-armasse o Monitor. Zera quando um
     /// `Listen` novo aparece. Serve para desistir em vez de insistir para sempre.
@@ -38,22 +59,45 @@ impl Hub {
         Self::default()
     }
 
-    /// Registra o canal de entrada de uma sessão. Substituir um registro anterior é o certo: se
-    /// o Monitor foi re-armado, o `listen` velho já está morto do outro lado.
-    pub fn listen(&self, session_id: &str) -> mpsc::UnboundedReceiver<Incoming> {
+    /// Registra o canal de entrada de uma sessão e devolve o token desse registro.
+    ///
+    /// Um registro novo substitui o anterior, e o anterior é avisado para sair sem reconectar.
+    pub fn listen(&self, session_id: &str) -> (u64, mpsc::UnboundedReceiver<Aviso>) {
         let (tx, rx) = mpsc::unbounded_channel();
-        self.listeners
+        let token = {
+            let mut n = self.proximo_token.lock().unwrap_or_else(|e| e.into_inner());
+            *n += 1;
+            *n
+        };
+
+        let anterior = self
+            .listeners
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(session_id.to_string(), tx);
+            .insert(session_id.to_string(), Registro { token, tx });
+        if let Some(velho) = anterior {
+            let _ = velho.tx.send(Aviso::Substituido);
+        }
+
         self.rearm
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(session_id);
-        rx
+        (token, rx)
     }
 
-    pub fn unlisten(&self, session_id: &str) {
+    /// Tira o registro, mas só se ele ainda for o desta conexão.
+    pub fn unlisten(&self, session_id: &str, token: u64) {
+        let mut listeners = self.listeners.lock().unwrap_or_else(|e| e.into_inner());
+        if listeners.get(session_id).is_some_and(|r| r.token == token) {
+            listeners.remove(session_id);
+        }
+    }
+
+    /// Tira o registro seja qual for o token. Só para quando a sessão acaba de vez (fim,
+    /// relançamento, remapeamento de `/clear`): aí não existe mais monitor legítimo para
+    /// preservar.
+    pub fn unlisten_qualquer(&self, session_id: &str) {
         self.listeners
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -65,7 +109,7 @@ impl Hub {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(session_id)
-            .is_some_and(|tx| !tx.is_closed())
+            .is_some_and(|r| !r.tx.is_closed())
     }
 
     /// Entrega imediata: `true` quando a sessão estava ouvindo. `false` quer dizer que o
@@ -73,7 +117,7 @@ impl Hub {
     pub fn deliver(&self, session_id: &str, msg: Incoming) -> bool {
         let mut listeners = self.listeners.lock().unwrap_or_else(|e| e.into_inner());
         match listeners.get(session_id) {
-            Some(tx) => match tx.send(msg) {
+            Some(r) => match r.tx.send(Aviso::Mensagem(msg)) {
                 Ok(()) => true,
                 Err(_) => {
                     // Receptor morreu sem passar pelo `unlisten` (processo do Monitor morto).
@@ -164,7 +208,7 @@ mod tests {
     #[tokio::test]
     async fn entrega_chega_no_listener() {
         let hub = Hub::new();
-        let mut rx = hub.listen("s1");
+        let (_t, mut rx) = hub.listen("s1");
         assert!(hub.has_listener("s1"));
         assert!(hub.deliver(
             "s1",
@@ -174,13 +218,35 @@ mod tests {
                 at: 0
             }
         ));
-        assert_eq!(rx.recv().await.unwrap().text, "oi");
+        match rx.recv().await.unwrap() {
+            Aviso::Mensagem(m) => assert_eq!(m.text, "oi"),
+            Aviso::Substituido => panic!("não houve substituição"),
+        }
+    }
+
+    #[tokio::test]
+    async fn monitor_novo_avisa_o_velho_e_fica_com_o_registro() {
+        // O bug que isto trava: o velho, ao morrer, apagava o registro do novo, o daemon dizia
+        // "sem monitor armado" e o hook Stop mandava re-armar para sempre.
+        let hub = Hub::new();
+        let (token_velho, mut rx_velho) = hub.listen("s1");
+        let (_token_novo, _rx_novo) = hub.listen("s1");
+
+        assert!(
+            matches!(rx_velho.recv().await, Some(Aviso::Substituido)),
+            "o velho precisa saber que saiu"
+        );
+        hub.unlisten("s1", token_velho);
+        assert!(
+            hub.has_listener("s1"),
+            "o registro do novo tem que sobreviver à saída do velho"
+        );
     }
 
     #[test]
     fn listener_morto_e_removido_na_entrega() {
         let hub = Hub::new();
-        let rx = hub.listen("s1");
+        let (_t, rx) = hub.listen("s1");
         drop(rx);
         assert!(!hub.deliver(
             "s1",

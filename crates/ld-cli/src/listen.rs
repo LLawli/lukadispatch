@@ -15,7 +15,7 @@ use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 use ld_core::paths;
-use ld_core::proto::{Request, line};
+use ld_core::proto::{Request, Response, line};
 
 /// Quantas falhas seguidas de conexão antes de desistir. O daemon reiniciando leva uns
 /// segundos; passar de meio minuto já é outra coisa, e aí é melhor o monitor morrer e o hook
@@ -32,7 +32,13 @@ pub fn run(session: Option<&str>) -> i32 {
     let mut falhas = 0;
     loop {
         match ouvir(sid) {
-            Ok(mensagens) => {
+            // Substituído por um monitor mais novo: sair é o certo. Reconectar aqui derrubaria o
+            // registro do novo e a sessão entraria num laço de re-armar.
+            Ok(Fim::Substituido) => {
+                eprintln!("outro monitor assumiu esta sessão; saindo");
+                return 0;
+            }
+            Ok(Fim::ConexaoCaiu(mensagens)) => {
                 // Conexão encerrada pelo daemon (restart, por exemplo). Reconectar é o certo:
                 // perder o canal por causa de um `systemctl restart` deixaria a sessão surda.
                 falhas = 0;
@@ -51,7 +57,15 @@ pub fn run(session: Option<&str>) -> i32 {
     }
 }
 
-fn ouvir(session_id: &str) -> std::io::Result<u64> {
+/// Por que o `ouvir` terminou.
+enum Fim {
+    /// O daemon fechou (restart, por exemplo). Vale reconectar.
+    ConexaoCaiu(u64),
+    /// Outro monitor assumiu o lugar deste. Não vale reconectar.
+    Substituido,
+}
+
+fn ouvir(session_id: &str) -> std::io::Result<Fim> {
     let mut stream = UnixStream::connect(paths::socket())?;
     // Sem prazo de leitura: esta conexão existe justamente para ficar esperando.
     stream.set_read_timeout(None)?;
@@ -71,9 +85,13 @@ fn ouvir(session_id: &str) -> std::io::Result<u64> {
         if linha.trim().is_empty() {
             continue;
         }
+        // A despedida não é evento para a sessão: é ordem de sair.
+        if let Ok(Response::Bye { .. }) = serde_json::from_str::<Response>(&linha) {
+            return Ok(Fim::Substituido);
+        }
         writeln!(saida, "{linha}")?;
         saida.flush()?;
         contador += 1;
     }
-    Ok(contador)
+    Ok(Fim::ConexaoCaiu(contador))
 }

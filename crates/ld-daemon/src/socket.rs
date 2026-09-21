@@ -354,7 +354,7 @@ async fn escuta(
     mut linhas: tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
 ) -> Result<()> {
     info!(sessao = %session_id, "monitor armado");
-    let mut rx = app.hub.listen(&session_id);
+    let (token, mut rx) = app.hub.listen(&session_id);
 
     if let Ok(guardadas) = app.store.drain(&session_id) {
         for (texto, de, at) in guardadas {
@@ -370,10 +370,22 @@ async fn escuta(
     loop {
         tokio::select! {
             recebida = rx.recv() => {
-                let Some(m) = recebida else { break };
-                let msg = Response::Message { text: m.text, from: m.from, at: m.at };
-                if escrita.write_all(line(&msg).as_bytes()).await.is_err() {
-                    break;
+                match recebida {
+                    Some(crate::hub::Aviso::Mensagem(m)) => {
+                        let msg = Response::Message { text: m.text, from: m.from, at: m.at };
+                        if escrita.write_all(line(&msg).as_bytes()).await.is_err() {
+                            break;
+                        }
+                    }
+                    // Outro monitor assumiu: manda o cliente sair de vez, senão ele reconecta e
+                    // os dois ficam se derrubando.
+                    Some(crate::hub::Aviso::Substituido) => {
+                        let bye = Response::Bye { reason: "outro monitor assumiu esta sessão".into() };
+                        let _ = escrita.write_all(line(&bye).as_bytes()).await;
+                        info!(sessao = %session_id, "monitor substituído");
+                        return Ok(());
+                    }
+                    None => break,
                 }
             }
             fim = linhas.next_line() => {
@@ -385,7 +397,7 @@ async fn escuta(
         }
     }
 
-    app.hub.unlisten(&session_id);
+    app.hub.unlisten(&session_id, token);
     info!(sessao = %session_id, "monitor caiu");
     Ok(())
 }

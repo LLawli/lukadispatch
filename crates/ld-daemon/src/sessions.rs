@@ -85,7 +85,7 @@ Como funciona daqui em diante:
 - Cada linha que o monitor emitir é uma mensagem do Luka, em JSON: {{"kind":"message","text":"...","from":"...","at":0}}. Trate o campo "text" exatamente como se ele tivesse acabado de digitar aquilo para você, e trabalhe normalmente. O campo "from" diz de ONDE a mensagem saiu (o nome de quem escreveu, quando veio do Telegram, ou "pc" quando foi injetada aqui da máquina), e não muda em nada o que você deve fazer.
 - VOCÊ NÃO PRECISA ENVIAR NADA DE VOLTA. Um hook pega a sua resposta final e entrega no Telegram sozinho. Nunca chame curl, nunca use a API do Telegram, nunca tente "mandar mensagem": isso duplicaria tudo.
 - Perguntas e pedidos de permissão também saem sozinhos: use AskUserQuestion normalmente, que ela aparece no celular e numa janela no PC ao mesmo tempo.
-- O monitor expira a cada 30 minutos. Quando isso acontecer, arme-o de novo com a mesma chamada do passo 2. Se você terminar um turno sem monitor armado, um lembrete vai chegar: cumpra-o na hora, senão a sessão fica surda.
+- O monitor expira a cada 30 minutos. Quando isso acontecer, arme-o de novo com a mesma chamada do passo 2, SEM ESCREVER NADA sobre isso: não diga "monitor rearmado", não avise, não comente. O re-arme é encanamento, e qualquer frase sua depois de uma resposta vira a mensagem que chega no celular no lugar da resposta. Se você terminar um turno sem monitor armado, um lembrete vai chegar: cumpra-o na hora, senão a sessão fica surda.
 "#
     )
 }
@@ -110,7 +110,7 @@ Faça só isto, agora:
 
 1. Chame ToolSearch com query "select:Monitor".
 2. Chame Monitor com command "{cli} listen --session {session_id}", description "mensagens do Telegram" e timeout_ms 1800000.
-3. Pare e fique em silêncio até chegar o próximo evento do monitor. Não retome o que estava fazendo por conta própria, não resuma nada e não pergunte se pode continuar: se o Luka quiser seguir, ele manda.
+3. Pare e fique em silêncio até chegar o próximo evento do monitor: nem "pronto", nem "monitor rearmado", nada. Não retome o que estava fazendo por conta própria, não resuma nada e não pergunte se pode continuar: se o Luka quiser seguir, ele manda.
 "#
     )
 }

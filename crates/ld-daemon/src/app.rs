@@ -216,7 +216,7 @@ impl App {
         for ask in self.hub.asks_of(session_id) {
             self.hub.close_ask(&ask);
         }
-        self.hub.unlisten(session_id);
+        self.hub.unlisten_qualquer(session_id);
         self.status.forget(session_id);
 
         if let Some(tmux) = &s.tmux
@@ -352,7 +352,7 @@ impl App {
             // Sem esta pausa o `--resume` pode esbarrar no processo anterior ainda saindo.
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
-        self.hub.unlisten(session_id);
+        self.hub.unlisten_qualquer(session_id);
         self.status.forget(session_id);
 
         let spec = sessions::Spec {
@@ -603,7 +603,7 @@ impl App {
         {
             self.store.upsert(&nova_sessao(r))?;
             self.store.rekey(&anterior.session_id, &r.session_id)?;
-            self.hub.unlisten(&anterior.session_id);
+            self.hub.unlisten_qualquer(&anterior.session_id);
             self.status.forget(&anterior.session_id);
             info!(de = %anterior.session_id, para = %r.session_id, "sessão remapeada depois de /clear");
             return Ok(());
@@ -718,16 +718,15 @@ impl App {
         if let Some(topic) = s.topic_id {
             self.status.clear(&self.ctx(), &r.session_id, topic);
             let pedida = self.tinha_pedido(&r.session_id);
-            let tem_texto = r
-                .last_assistant_message
-                .as_deref()
-                .is_some_and(|t| !t.trim().is_empty());
-            info!(sessao = %r.session_id, pedida, tem_texto, "fim de turno");
-            if pedida
-                && let Some(texto) = r.last_assistant_message.as_deref()
-                && tem_texto
-            {
-                self.tg.send(Some(topic), texto).await?;
+            let resposta = self.resposta_do_turno(r, &s);
+            info!(
+                sessao = %r.session_id,
+                pedida,
+                tem_texto = resposta.is_some(),
+                "fim de turno"
+            );
+            if pedida && let Some(texto) = resposta {
+                self.tg.send(Some(topic), &texto).await?;
             }
         }
 
@@ -911,6 +910,38 @@ impl App {
             Ok(a) => a.to_claude(),
             // Veio da janela do PC em formato livre: repassa como está, avisando que é resposta.
             Err(_) => format!("O usuário respondeu pelo lukadispatch: {bruta}"),
+        }
+    }
+
+    /// A fala que de fato responde ao turno.
+    ///
+    /// O hook entrega a ÚLTIMA mensagem do assistente, e o agente costuma continuar falando
+    /// depois de responder: entrega o resultado e anuncia que re-armou o monitor. Quando a
+    /// última é só esse anúncio, a resposta boa é a anterior do mesmo turno, que sai do
+    /// transcript.
+    fn resposta_do_turno(&self, r: &StopReport, s: &Session) -> Option<String> {
+        let ultima = r
+            .last_assistant_message
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty());
+
+        match ultima {
+            Some(t) if !ld_core::transcript::e_recado_de_monitor(t) => Some(t.to_string()),
+            _ => {
+                let caminho = r
+                    .transcript_path
+                    .as_deref()
+                    .or(s.transcript_path.as_deref())?;
+                let falas =
+                    ld_core::transcript::respostas_do_ultimo_turno(std::path::Path::new(caminho));
+                falas
+                    .into_iter()
+                    .rev()
+                    .find(|f| !ld_core::transcript::e_recado_de_monitor(f))
+                    // Turno que só teve anúncio de monitor não tem resposta nenhuma a dar.
+                    .or(None)
+            }
         }
     }
 

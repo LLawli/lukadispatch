@@ -145,6 +145,51 @@ pub fn historico(caminho: &Path, limite: usize) -> Vec<Fala> {
     falas
 }
 
+/// As falas do assistente no último turno, da mais antiga para a mais nova.
+///
+/// "Último turno" é o que veio depois da última entrada do usuário (mensagem, evento do Monitor
+/// ou prompt injetado). Serve para o caso em que o agente responde e **continua falando**: ele
+/// entrega o resultado e depois anuncia que re-armou o monitor, e é esse anúncio que o hook
+/// `Stop` entrega como "última mensagem".
+pub fn respostas_do_ultimo_turno(caminho: &Path) -> Vec<String> {
+    let Ok(conteudo) = std::fs::read_to_string(caminho) else {
+        return Vec::new();
+    };
+    let mut falas: Vec<String> = Vec::new();
+    for linha in conteudo.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(linha) else {
+            continue;
+        };
+        if v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        match v.get("type").and_then(Value::as_str) {
+            // Entrada de usuário fecha o turno anterior, inclusive resultado de ferramenta: é o
+            // único marcador de fronteira que o transcript oferece.
+            Some("user") => falas.clear(),
+            Some("assistant") => {
+                if let Some(msg) = v.get("message") {
+                    let texto = texto_da_mensagem(msg);
+                    if !texto.trim().is_empty() {
+                        falas.push(texto.trim().to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    falas
+}
+
+/// `true` quando a fala é o agente comentando o próprio encanamento ("Monitor rearmado").
+///
+/// Curta e falando de monitor: é o formato do anúncio. O teto de tamanho evita engolir uma
+/// resposta de verdade que por acaso fale de monitor.
+pub fn e_recado_de_monitor(texto: &str) -> bool {
+    let t = texto.trim();
+    t.chars().count() < 120 && t.to_lowercase().contains("monitor")
+}
+
 /// Primeira linha de todo prompt que o daemon injeta na sessão.
 ///
 /// Mora aqui, e não no daemon, porque quem filtra por ela é este módulo: se as duas pontas
@@ -313,6 +358,36 @@ mod tests {
         assert_eq!(falas.len(), 2, "só a conversa de verdade: {falas:?}");
         assert_eq!(falas[0].texto, "agora sim, roda os testes");
         assert_eq!(falas[1].texto, "rodei");
+    }
+
+    #[test]
+    fn ultimo_turno_ignora_o_que_veio_antes_da_ultima_entrada() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = transcript(
+            dir.path(),
+            "a.jsonl",
+            &[
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"de um turno velho"}]}}"#,
+                r#"{"type":"user","message":{"content":"liste os arquivos"}}"#,
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"tem só o README."}]}}"#,
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Monitor rearmado."}]}}"#,
+            ],
+        );
+        let falas = respostas_do_ultimo_turno(&p);
+        assert_eq!(falas, vec!["tem só o README.", "Monitor rearmado."]);
+    }
+
+    #[test]
+    fn recado_de_monitor_e_reconhecido_sem_engolir_resposta_longa() {
+        assert!(e_recado_de_monitor("Monitor rearmado."));
+        assert!(e_recado_de_monitor("Monitor armado. Aguardando mensagens."));
+        assert!(!e_recado_de_monitor("tem só o README."));
+        // Resposta de verdade que fala de monitor, mas é longa demais para ser o anúncio.
+        let longa = format!(
+            "O monitor do projeto {} está configurado assim: ",
+            "x".repeat(120)
+        );
+        assert!(!e_recado_de_monitor(&longa));
     }
 
     #[test]

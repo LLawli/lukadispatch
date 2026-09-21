@@ -171,6 +171,15 @@ pub enum Response {
         at: i64,
     },
 
+    /// Encerra um `Listen` de vez: outro monitor assumiu o lugar deste.
+    ///
+    /// Existe porque o cliente reconecta sozinho quando a conexão cai (um restart do daemon não
+    /// pode deixar a sessão surda). Sem uma despedida explícita, o monitor substituído voltaria
+    /// e os dois ficariam se desbancando em laço.
+    Bye {
+        reason: String,
+    },
+
     /// Resposta ao `Stop`: o daemon diz se ainda existe um `Listen` aberto para a sessão.
     /// Sem listener, o Monitor expirou e o hook precisa mandar o agente re-armar.
     Listener {
@@ -305,6 +314,9 @@ mod tests {
             },
             Response::AskOpened {
                 ask_id: "abc".into(),
+            },
+            Response::Bye {
+                reason: "outro monitor assumiu".into(),
             },
             Response::Sessions {
                 sessions: vec![SessionSummary {
