@@ -61,6 +61,14 @@ async fn main() -> Result<()> {
 
     let app = Arc::new(App::new(cfg, store, tg));
 
+    // Lê o catálogo já na partida: assim um binário do Claude Code que não dá para varrer
+    // aparece no log do serviço, e não seis horas depois, quando você mandar /model e o teclado
+    // vier vazio.
+    let quantos = app.modelos().len();
+    if quantos == 0 {
+        tracing::warn!("sem catálogo de modelos: /model vai pedir o nome inteiro");
+    }
+
     // Antes de qualquer coisa: o que sobrou de antes do restart pode já estar morto.
     match app.reconcile().await {
         Ok(n) if n > 0 => info!(mortas = n, "sessões órfãs encerradas na partida"),
