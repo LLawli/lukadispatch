@@ -99,7 +99,16 @@ pub fn bot_settings(cli: &str) -> Value {
         "hooks": [ blocking_hook(cli, "permission", ASK_TIMEOUT_SECS, "Esperando você liberar...") ]
     } ]);
 
-    json!({ "hooks": hooks })
+    json!({
+        "hooks": hooks,
+        // O canal da sessão é infraestrutura deste sistema, não iniciativa do agente. Sem esta
+        // regra, o modo "perguntar sempre" pede autorização para o `listen` a cada re-arme, e a
+        // sessão trava esperando uma tecla que ninguém vai apertar: quem está no celular não vê
+        // o prompt, e o próprio canal que levaria a pergunta até lá é o que está bloqueado.
+        "permissions": {
+            "allow": [format!("Bash({cli} listen *)")]
+        }
+    })
 }
 
 /// Um hook é nosso quando ele chama o binário `lukadispatch`. Serve para instalar e desinstalar
@@ -207,6 +216,21 @@ mod tests {
         assert_eq!(
             h["PermissionRequest"][0]["hooks"][0]["args"][1],
             "permission"
+        );
+    }
+
+    #[test]
+    fn o_canal_da_sessao_nao_pede_permissao() {
+        // Sem isto, no modo "perguntar sempre" a sessão trava no re-arme do monitor: o prompt
+        // aparece só no terminal, e o canal que levaria a pergunta ao celular é justamente o que
+        // está esperando autorização.
+        let s = bot_settings("/usr/bin/lukadispatch");
+        let regras = s["permissions"]["allow"].as_array().unwrap();
+        assert!(
+            regras
+                .iter()
+                .any(|r| r.as_str() == Some("Bash(/usr/bin/lukadispatch listen *)")),
+            "regra ausente: {regras:?}"
         );
     }
 
