@@ -138,6 +138,11 @@ sozinha com `@arquivo:` seguido do caminho absoluto (e, se quiser, ` | legenda`)
 manda o arquivo antes do texto e tira a linha da mensagem. `@documento:` força documento quando os
 bytes exatos importam; sem isso, imagem até 10 MB vai como foto e aparece na conversa.
 
+Chave, credencial, token e `.env` não saem em claro: o prompt inicial manda a sessão cifrar para
+uma chave pública sua antes de enviar, e recusar o envio enquanto você não tiver fornecido essa
+chave na conversa. O tópico é um grupo do Telegram, e o Telegram guarda o arquivo nos servidores
+dele.
+
 Acima de 50 MB (o teto do Bot API) o arquivo não é recusado: o daemon divide em volumes de 45 MB
 com o 7z, manda um por um com `parte i/n` na legenda e fecha com a instrução de juntar. No celular
 o ZArchiver ou o RAR remontam a partir do `.001`, e no PC é `7z x nome.7z.001`. O envio dividido
