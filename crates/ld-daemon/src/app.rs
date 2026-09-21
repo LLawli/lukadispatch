@@ -919,7 +919,16 @@ impl App {
                 "fim de turno"
             );
             if pedida && let Some(texto) = resposta {
-                self.tg.send(Some(topic), &texto).await?;
+                // Arquivo marcado na resposta sai ANTES do texto: no celular, ler "segue o
+                // gráfico" e só depois ver o gráfico chegar é a ordem certa.
+                let (texto, envios) = crate::arquivos::separa_marcadores(&texto);
+                for envio in &envios {
+                    self.envia_marcado(&r.session_id, topic, envio).await;
+                }
+                // Resposta que era só o marcador não vira mensagem vazia.
+                if !texto.trim().is_empty() {
+                    self.tg.send(Some(topic), &texto).await?;
+                }
             }
         }
 
@@ -953,6 +962,34 @@ impl App {
             rearm_attempts: tentativas,
             rearm_command: Some(format!("lukadispatch listen --session {}", r.session_id)),
         })
+    }
+
+    /// Manda um arquivo que o agente marcou na resposta.
+    ///
+    /// Falha aqui não derruba o fim de turno: o texto ainda tem que chegar. O que não pode é o
+    /// arquivo sumir calado, então o motivo vai para o tópico, com o caminho que falhou.
+    async fn envia_marcado(&self, session_id: &str, topic: i32, envio: &crate::arquivos::Marcado) {
+        match self
+            .send_file(
+                session_id,
+                &envio.caminho,
+                envio.legenda.as_deref(),
+                envio.como_arquivo,
+            )
+            .await
+        {
+            Ok(_) => {}
+            Err(e) => {
+                warn!(sessao = %session_id, erro = %e, "marcador de arquivo falhou");
+                let _ = self
+                    .tg
+                    .send_html(
+                        Some(topic),
+                        &format!("⚠️ {}", escape_html(&format!("{e:#}"))),
+                    )
+                    .await;
+            }
+        }
     }
 
     // ---------------------------------------------------------------- perguntas

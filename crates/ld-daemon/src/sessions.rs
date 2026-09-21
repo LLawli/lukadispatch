@@ -60,10 +60,11 @@ pub fn tmux_name(projeto: &str, session_id: &str) -> String {
 
 /// O que a sessão lê antes de qualquer outra coisa.
 ///
-/// Ele precisa ser explícito em três pontos, e cada um deles já foi motivo de bug em ponte de
+/// Ele precisa ser explícito em quatro pontos, e cada um deles já foi motivo de bug em ponte de
 /// agente: (1) o Monitor é ferramenta diferida, então sem `ToolSearch` antes o agente não
 /// consegue chamá-lo; (2) a resposta vai sozinha pelo hook, senão o agente tenta "mandar" a
-/// mensagem por conta própria e inventa um curl; (3) o monitor expira e precisa voltar.
+/// mensagem por conta própria e inventa um curl; (3) o monitor expira e precisa voltar; (4)
+/// arquivo se manda escrevendo um marcador na resposta, não chamando ferramenta.
 pub fn bootstrap_prompt(session_id: &str, projeto: &str) -> String {
     let cli = paths::cli();
     // A marca é a primeira linha de todo prompt injetado: é por ela que o replay sabe que este
@@ -86,7 +87,7 @@ Como funciona daqui em diante:
 
 - Cada linha que o monitor emitir é uma mensagem do Luka, em JSON: {{"kind":"message","text":"...","from":"...","at":0}}. Trate o campo "text" exatamente como se ele tivesse acabado de digitar aquilo para você, e trabalhe normalmente. O campo "from" diz de ONDE a mensagem saiu (o nome de quem escreveu, quando veio do Telegram, ou "pc" quando foi injetada aqui da máquina), e não muda em nada o que você deve fazer.
 - Quando ele manda um arquivo (foto, PDF, vídeo), a linha vem com um campo a mais: "files":["/caminho/absoluto"]. O arquivo JÁ ESTÁ em disco nesse caminho, e o mesmo caminho aparece no "text" como "[arquivo recebido: ...]". Abra com Read (ou a ferramenta que couber) antes de responder: ele mandou o arquivo porque quer que você olhe. Não tente baixar nada do Telegram por conta própria.
-- Para DEVOLVER um arquivo (um gráfico que você gerou, um log, um screenshot, um build), rode com o Bash: {cli} send-file /caminho/absoluto --legenda "o que é isso". Ele cai neste tópico. Imagem aparece na conversa; o resto vira documento; use --como-arquivo quando os bytes exatos importarem. Não precisa de token nem de curl, e não precisa dizer qual é a sessão.
+- Para DEVOLVER um arquivo (um gráfico que você gerou, um log, um screenshot, um build), não rode comando nenhum: escreva na sua resposta final uma linha SOZINHA, contendo só isto, com caminho absoluto: "@arquivo: /caminho/do/arquivo.png". Pode ter legenda depois de " | ". O hook manda o arquivo antes do texto e tira essa linha da mensagem. Use "@documento:" no lugar de "@arquivo:" quando os bytes exatos importarem (imagem vai como foto, e o Telegram recomprime foto). A linha precisa ser a linha inteira: marcador no meio de uma frase, dentro de crase ou depois de hífen de lista é ignorado de propósito, para você poder FALAR do formato sem disparar envio.
 - VOCÊ NÃO PRECISA ENVIAR NADA DE VOLTA em texto. Um hook pega a sua resposta final e entrega no Telegram sozinho. Nunca chame curl, nunca use a API do Telegram, nunca tente "mandar mensagem": isso duplicaria tudo.
 - Perguntas e pedidos de permissão também saem sozinhos: use AskUserQuestion normalmente, que ela aparece no celular e numa janela no PC ao mesmo tempo.
 - O monitor expira a cada 30 minutos. Quando isso acontecer, arme-o de novo com a mesma chamada do passo 2, SEM ESCREVER NADA sobre isso: não diga "monitor rearmado", não avise, não comente. O re-arme é encanamento, e qualquer frase sua depois de uma resposta vira a mensagem que chega no celular no lugar da resposta. Se você terminar um turno sem monitor armado, um lembrete vai chegar: cumpra-o na hora, senão a sessão fica surda.

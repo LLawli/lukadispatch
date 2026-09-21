@@ -238,6 +238,101 @@ fn e_imagem(caminho: &Path) -> bool {
         })
 }
 
+/// O que o agente escreve na resposta para mandar um arquivo junto.
+///
+/// Duas formas, e a segunda existe porque imagem sai recomprimida quando vai como foto:
+///
+/// ```text
+/// @arquivo: /caminho/grafico.png | o gasto por dia
+/// @documento: /caminho/grafico.png
+/// ```
+pub const MARCA_ARQUIVO: &str = "@arquivo:";
+pub const MARCA_DOCUMENTO: &str = "@documento:";
+
+/// Um envio pedido dentro da resposta do agente.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Marcado {
+    pub caminho: String,
+    pub legenda: Option<String>,
+    pub como_arquivo: bool,
+}
+
+/// Separa os marcadores do texto: devolve o texto sem eles e o que há para enviar.
+///
+/// O reconhecimento é deliberadamente estreito, porque o custo de errar é alto nos dois sentidos:
+/// um falso positivo manda um arquivo que ninguém pediu, e um falso negativo deixa uma linha de
+/// sintaxe crua aparecendo no celular. Por isso a linha precisa ser **só** o marcador, do começo
+/// ao fim: um `@arquivo:` no meio de uma frase, dentro de crase ou depois de um hífen de lista é
+/// o agente FALANDO do formato, não usando ele.
+pub fn separa_marcadores(texto: &str) -> (String, Vec<Marcado>) {
+    let mut linhas = Vec::new();
+    let mut achados = Vec::new();
+
+    for linha in texto.lines() {
+        match marcador(linha) {
+            Some(m) => achados.push(m),
+            None => linhas.push(linha),
+        }
+    }
+
+    if achados.is_empty() {
+        return (texto.to_string(), achados);
+    }
+    (linhas.join("\n").trim().to_string(), achados)
+}
+
+fn marcador(linha: &str) -> Option<Marcado> {
+    let t = linha.trim();
+    let (resto, como_arquivo) = match (
+        t.strip_prefix(MARCA_ARQUIVO),
+        t.strip_prefix(MARCA_DOCUMENTO),
+    ) {
+        (Some(r), _) => (r, false),
+        (_, Some(r)) => (r, true),
+        _ => return None,
+    };
+
+    // " | " separa caminho e legenda. Caminho de verdade não tem essa sequência, e exigir os
+    // espaços evita quebrar um nome que por acaso contenha barra vertical.
+    let (caminho, legenda) = match resto.split_once(" | ") {
+        Some((c, l)) => (
+            c.trim(),
+            Some(l.trim().to_string()).filter(|l| !l.is_empty()),
+        ),
+        None => (resto.trim(), None),
+    };
+
+    // Marcador sem caminho não é marcador: é uma linha de texto que por acaso começa assim, e
+    // engoli-la esconderia do Luka o que o agente escreveu.
+    if caminho.is_empty() {
+        return None;
+    }
+
+    let caminho = expande_til(caminho);
+    // Só caminho absoluto. O daemon roda com outro diretório atual, então relativo aqui não
+    // significa nada, e adivinhar a base seria pior que recusar.
+    if !caminho.starts_with('/') {
+        return None;
+    }
+
+    Some(Marcado {
+        caminho,
+        legenda,
+        como_arquivo,
+    })
+}
+
+/// `~/x` vira `$HOME/x`. O til é do shell, e aqui não passa shell nenhum.
+fn expande_til(caminho: &str) -> String {
+    match caminho.strip_prefix("~/") {
+        Some(resto) => match std::env::var_os("HOME") {
+            Some(h) => Path::new(&h).join(resto).to_string_lossy().into_owned(),
+            None => caminho.to_string(),
+        },
+        None => caminho.to_string(),
+    }
+}
+
 /// Reduz o que veio da API a um nome de arquivo simples: sem diretório, sem surpresa.
 fn sanitiza(bruto: &str) -> String {
     // `file_name` do Telegram é texto livre. Ficar só com o último componente derruba de uma vez
@@ -415,6 +510,76 @@ mod tests {
         let log = dir.path().join("saida.log");
         std::fs::write(&log, b"x").unwrap();
         assert!(!para_enviar(&log, false).unwrap().como_foto);
+    }
+
+    #[test]
+    fn marcador_sozinho_na_linha_e_um_envio() {
+        let (texto, envios) = separa_marcadores("olha o gráfico\n\n@arquivo: /tmp/g.png\n");
+        assert_eq!(texto, "olha o gráfico");
+        assert_eq!(
+            envios,
+            vec![Marcado {
+                caminho: "/tmp/g.png".into(),
+                legenda: None,
+                como_arquivo: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn falar_do_formato_nao_manda_arquivo() {
+        // Isto é o que trava o pior bug possível daqui: o agente explicando o marcador e, com
+        // isso, disparando um envio.
+        for linha in [
+            "use @arquivo: /tmp/g.png no fim da resposta",
+            "- `@arquivo: /tmp/g.png`",
+            "escreva **@arquivo:** e o caminho",
+            "@arquivo:",
+            "@arquivo: relativo/g.png",
+            "@arquivos: /tmp/g.png",
+        ] {
+            let (texto, envios) = separa_marcadores(linha);
+            assert!(envios.is_empty(), "{linha:?} não podia virar envio");
+            assert_eq!(texto, linha, "e o texto tem que sair intacto");
+        }
+    }
+
+    #[test]
+    fn legenda_e_documento_forcado() {
+        let (texto, envios) = separa_marcadores("  @documento: /tmp/dados.csv | a planilha crua  ");
+        assert!(texto.is_empty(), "sobrou {texto:?}");
+        assert_eq!(envios[0].caminho, "/tmp/dados.csv");
+        assert_eq!(envios[0].legenda.as_deref(), Some("a planilha crua"));
+        assert!(envios[0].como_arquivo);
+    }
+
+    #[test]
+    fn varios_arquivos_na_mesma_resposta() {
+        let (texto, envios) = separa_marcadores(
+            "antes\n@arquivo: /tmp/a.png\nmeio\n@arquivo: /tmp/b.log | o log\ndepois",
+        );
+        assert_eq!(envios.len(), 2);
+        assert_eq!(texto, "antes\nmeio\ndepois");
+    }
+
+    #[test]
+    fn til_vira_home() {
+        // Sem mexer no HOME do processo: outros testes leem o mesmo env, e trocá-lo aqui
+        // quebraria quem estivesse rodando ao lado.
+        let home = std::env::var("HOME").expect("HOME");
+        let (_, envios) = separa_marcadores("@arquivo: ~/nota.pdf");
+        assert_eq!(envios[0].caminho, format!("{home}/nota.pdf"));
+    }
+
+    #[test]
+    fn resposta_sem_marcador_nao_e_tocada() {
+        let original = "uma resposta normal\n\ncom duas linhas\n";
+        let (texto, envios) = separa_marcadores(original);
+        assert!(envios.is_empty());
+        assert_eq!(
+            texto, original,
+            "sem envio, o texto não pode nem perder o \\n"
+        );
     }
 
     #[test]

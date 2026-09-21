@@ -14,7 +14,7 @@ determinísticos:
 | Claude para o Telegram | hook `Stop` manda a resposta; `PreToolUse`/`PostToolUse` editam a mensagem de status |
 | Perguntas e permissões | hooks `PreToolUse:AskUserQuestion` e `PermissionRequest` abrem card no Telegram **e** janela GTK4 no PC; vale quem responder primeiro |
 | PC para o Telegram | o que você digita no `tmux attach` vira mensagem no tópico (hook `UserPromptSubmit`), marcada como vinda do PC |
-| Arquivos | anexo do Telegram é baixado para o disco e entregue como caminho; `lukadispatch send-file` faz o caminho de volta |
+| Arquivos | anexo do Telegram é baixado para o disco e entregue como caminho; no sentido contrário, um marcador na resposta faz o hook `Stop` enviar o arquivo |
 
 Nada disso depende de o agente resolver avisar alguém: quem fala é o hook.
 
@@ -133,9 +133,16 @@ nota de vídeo, figurinha) é baixado na hora para
 própria linha do arquivo. Áudio e voz ficam de fora enquanto não houver transcrição, e dizem isso
 no tópico. O teto é 20 MB, que é o do Bot API. Os arquivos são apagados junto com a sessão.
 
-No sentido contrário, a sessão devolve arquivo com `lukadispatch send-file <caminho>`: imagem cai
-na conversa como foto, o resto vira documento, e o teto é 50 MB. O token continua só do lado do
-daemon.
+No sentido contrário, o agente **não chama ferramenta nenhuma**: ele escreve na resposta uma linha
+sozinha com `@arquivo:` seguido do caminho absoluto (e, se quiser, ` | legenda`). O hook `Stop`
+manda o arquivo antes do texto e tira a linha da mensagem. `@documento:` força documento quando os
+bytes exatos importam; sem isso, imagem até 10 MB vai como foto e aparece na conversa. O teto é
+50 MB, que é o do Bot API para enviar.
+
+O reconhecimento é estreito de propósito: a linha precisa ser só o marcador, do começo ao fim.
+Marcador no meio de uma frase, dentro de crase ou depois de hífen de lista é o agente falando do
+formato, e não é envio. `lukadispatch send-file <caminho>` faz a mesma coisa pela linha de
+comando, para quando você quer mandar algo do PC. O token continua só do lado do daemon.
 
 Perguntas do Claude viram card com botões, e **também aceitam resposta escrita**: o que você
 digitar no tópico com um card aberto é a resposta dele. Respondido, o card perde os botões e vira
