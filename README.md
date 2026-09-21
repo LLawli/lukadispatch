@@ -13,6 +13,7 @@ determinísticos:
 | Telegram para o Claude | um `Monitor` armado dentro da sessão lê `lukadispatch listen`; cada mensagem vira um evento no meio do turno |
 | Claude para o Telegram | hook `Stop` manda a resposta; `PreToolUse`/`PostToolUse` editam a mensagem de status |
 | Perguntas e permissões | hooks `PreToolUse:AskUserQuestion` e `PermissionRequest` abrem card no Telegram **e** janela GTK4 no PC; vale quem responder primeiro |
+| PC para o Telegram | o que você digita no `tmux attach` vira mensagem no tópico (hook `UserPromptSubmit`), marcada como vinda do PC |
 
 Nada disso depende de o agente resolver avisar alguém: quem fala é o hook.
 
@@ -105,22 +106,40 @@ Para sair sem deixar rastro: `lukadispatch uninstall` (ele faz backup `.bak` ant
 
 ## Usar
 
-No tópico General:
+No tópico General (que se limpa sozinho: comando, resposta e teclado somem, e só o painel fica):
 
-- `/new` mostra os projetos em botões; `/new <projeto>` abre direto.
-- `/ls` lista as sessões vivas.
-- `/kill <id>` fecha uma.
+- `/new` mostra os projetos em botões. Quando o projeto já tem conversa anterior, ele pergunta
+  entre **continuar de onde parou** e **começar do zero**; ao continuar, as últimas falas são
+  despejadas no tópico, separadas por quem falou.
+- `/new <projeto> [opus|claude-opus-4-8[1m]] [high|max]` abre direto, já com modelo e esforço.
+- `/ls` redesenha o painel.
+- `/kill <id>` fecha uma sessão.
 
-Dentro do tópico de uma sessão, qualquer mensagem vai para o Claude. `/kill` ali fecha a sessão e
-apaga o tópico.
+Dentro do tópico de uma sessão, qualquer mensagem vai para o Claude. Além disso:
+
+- `/model` abre a escolha em duas etapas (família, depois versão), com o catálogo lido do próprio
+  binário do Claude Code: aparecem também os modelos que o menu `/model` dele não mostra, e as
+  variantes de janela de 1M. `/model claude-opus-4-8[1m]` funciona direto, sem menu.
+- `/effort` faz o mesmo para o nível de esforço.
+- `/kill` fecha a sessão e apaga o tópico.
+
+**Como a troca de modelo funciona, e por que ela não perde nada.** `/model` e `/effort` são
+comandos do frontend do Claude Code: nenhum evento consegue dispará-los, e digitar no terminal
+está fora de questão aqui. O daemon reinicia o processo com `--resume <id>`, que volta com o
+mesmo transcript e o mesmo id. A conversa continua exatamente de onde estava; o que se perde é o
+Monitor, e a sessão recebe um prompt curto mandando armá-lo de novo.
 
 No PC:
 
 ```bash
 lukadispatch ls
-lukadispatch send <id> "texto"     # entrega sem passar pelo Telegram
+lukadispatch models                  # catálogo lido do binário do Claude Code
+lukadispatch new <projeto> [--continuar]
+lukadispatch send <id> "texto"       # entrega sem passar pelo Telegram
+lukadispatch model <id> claude-opus-4-8
+lukadispatch effort <id> high
 lukadispatch kill <id>
-tmux attach -t ld-<projeto>-<id>   # a sessão é um tmux de verdade
+tmux attach -t ld-<projeto>-<id>     # a sessão é um tmux de verdade
 ```
 
 ## Coisas que mordem (e já morderam)
@@ -141,6 +160,15 @@ tmux attach -t ld-<projeto>-<id>   # a sessão é um tmux de verdade
   desiste e avisa no tópico em vez de insistir para sempre.
 - **Caminho de socket unix tem limite de tamanho** (`SUN_LEN`, ~108 bytes). O padrão
   (`$XDG_RUNTIME_DIR/lukadispatch.sock`) cabe folgado; um caminho de teste muito fundo não.
+- **O campo do `UserPromptSubmit` é `prompt`, não `user_prompt`.** A documentação diz o
+  contrário, e o hook falha em silêncio se você seguir a documentação: o payload real traz `cwd`,
+  `hook_event_name`, `permission_mode`, `prompt`, `prompt_id`, `session_id` e `transcript_path`.
+- **`ai-memory run` só aceita um workstream ativo, e `--new` recusa nome repetido.** Por isso o
+  workstream de um relançamento leva carimbo de tempo no nome.
+- **Matar o tmux para relançar dispara o `SessionEnd`.** Sem uma marca de "relançando", o daemon
+  entende isso como fim de sessão e apaga o tópico no meio da própria troca de modelo.
+- **O cliente HTTP do teloxide tem timeout de 17s**, menor que um long polling de 30s. O daemon
+  constrói o cliente com um teto maior; com o padrão, toda janela ociosa morre em erro de rede.
 - **Texto do agente vai sem `parse_mode`.** Resposta de Claude tem crase, asterisco e colchete o
   tempo todo; em MarkdownV2 isso vira erro 400 e a mensagem não chega.
 
