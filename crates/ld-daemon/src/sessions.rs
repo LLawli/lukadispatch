@@ -17,6 +17,23 @@ pub struct Launched {
     pub tmux: String,
 }
 
+/// Como subir uma sessão.
+///
+/// `resume` é o que permite trocar o modelo de uma sessão viva sem perder a conversa: mata-se o
+/// processo e sobe-se de novo com `--resume <id>`, que continua o mesmo transcript. É a única
+/// forma de atender `/model` e `/effort` pelo Telegram, porque esses comandos são do frontend do
+/// Claude Code e nenhum evento consegue dispará-los.
+pub struct Spec<'a> {
+    pub projeto: &'a Project,
+    pub permission_mode: &'a str,
+    pub model: Option<&'a str>,
+    pub effort: Option<&'a str>,
+    pub resume: Option<&'a str>,
+    /// `true` quando o `resume` é "continuar de onde parou" (e não uma troca de modelo). Muda só
+    /// a primeira frase do prompt, para a sessão saber por que voltou.
+    pub retomada: bool,
+}
+
 /// Nome de sessão tmux: previsível para você achar no `tmux ls`, e único para dois projetos com
 /// o mesmo nome (ou o mesmo projeto duas vezes) não colidirem.
 pub fn tmux_name(projeto: &str, session_id: &str) -> String {
@@ -69,6 +86,29 @@ Como funciona daqui em diante:
     )
 }
 
+/// O que a sessão lê quando volta por `--resume` (troca de modelo ou de esforço).
+///
+/// Curto de propósito: o contexto todo já está de volta com ela, e a única coisa que se perdeu
+/// no caminho foi o Monitor, que morre junto com o processo anterior.
+pub fn rearm_prompt(session_id: &str, retomada: bool) -> String {
+    let cli = paths::cli();
+    let abertura = if retomada {
+        "Esta conversa foi retomada pelo lukadispatch e agora está ligada a um tópico do Telegram. Tudo o que vocês já conversaram continua aqui; o Luka acabou de receber as últimas falas no celular."
+    } else {
+        "A sua sessão foi reiniciada pelo lukadispatch (troca de modelo ou de esforço). O contexto continua o mesmo; o que se perdeu foi o canal do Telegram."
+    };
+    format!(
+        r#"{abertura}
+
+Faça só isto, agora:
+
+1. Chame ToolSearch com query "select:Monitor".
+2. Chame Monitor com command "{cli} listen --session {session_id}", description "mensagens do Telegram" e timeout_ms 1800000.
+3. Pare e fique em silêncio até chegar o próximo evento do monitor. Não retome o que estava fazendo por conta própria, não resuma nada e não pergunte se pode continuar: se o Luka quiser seguir, ele manda.
+"#
+    )
+}
+
 /// Nome do workstream gerenciado do ai-memory.
 ///
 /// Precisa ser único por sessão: o `ai-memory run` recusa com 409 quando o workstream do projeto
@@ -78,50 +118,87 @@ pub fn workstream_name(session_id: &str) -> String {
     format!("lukadispatch-{}", &session_id[..8])
 }
 
+/// Igual ao de cima, mais um carimbo de tempo.
+///
+/// Uma sessão pode subir mais de uma vez (troca de modelo por `--resume`), e `--new` recusa nome
+/// repetido. Sem o carimbo, a segunda partida da mesma sessão morreria com 409.
+fn workstream_name_unico(session_id: &str) -> String {
+    let agora = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("{}-{agora}", workstream_name(session_id))
+}
+
 /// Escreve o script de partida da sessão e devolve o caminho.
 ///
 /// Existe um script em vez de uma linha de comando montada na hora por dois motivos: o prompt
 /// sai do `ps` (ele é longo e vaza o nome do projeto para qualquer um que liste processos), e dá
 /// para ler depois exatamente o que foi lançado quando algo der errado.
-fn write_launch_script(
-    session_id: &str,
-    projeto: &Project,
-    permission_mode: &str,
-) -> Result<PathBuf> {
+fn write_launch_script(session_id: &str, spec: &Spec<'_>) -> Result<PathBuf> {
     let dir = paths::state_dir().join("sessions").join(session_id);
     std::fs::create_dir_all(&dir).with_context(|| format!("criando {}", dir.display()))?;
 
     let prompt = dir.join("prompt.txt");
-    std::fs::write(&prompt, bootstrap_prompt(session_id, &projeto.name))?;
+    let texto = match spec.resume {
+        Some(_) => rearm_prompt(session_id, spec.retomada),
+        None => bootstrap_prompt(session_id, &spec.projeto.name),
+    };
+    std::fs::write(&prompt, texto)?;
 
     let script = dir.join("launch.sh");
     let settings = paths::bot_settings_file();
+
+    // `--session-id` cria; `--resume` continua. Os dois juntos o Claude Code recusa.
+    let selecao = match spec.resume {
+        Some(id) => format!("--resume {id}"),
+        None => format!("--session-id {session_id}"),
+    };
+    let mut extras = String::new();
+    if let Some(m) = spec.model {
+        extras.push_str(&format!("  --model {m} \\\n"));
+    }
+    if let Some(e) = spec.effort {
+        extras.push_str(&format!("  --effort {e} \\\n"));
+    }
+
     std::fs::write(
         &script,
         format!(
             r#"#!/usr/bin/env bash
 # Gerado pelo lukadispatch para a sessão {session_id}. Editar aqui não muda nada:
-# o arquivo é reescrito a cada sessão nova.
+# o arquivo é reescrito a cada partida da sessão.
 set -u
 exec ai-memory run --new {workstream} claude \
-  --session-id {session_id} \
+  {selecao} \
   --settings {settings} \
   --permission-mode {permission_mode} \
+{extras}  -n {nome} \
   "$(cat {prompt})"
 "#,
             settings = settings.display(),
             prompt = prompt.display(),
-            workstream = workstream_name(session_id),
+            permission_mode = spec.permission_mode,
+            workstream = workstream_name_unico(session_id),
+            nome = shell_quote(&spec.projeto.name),
         ),
     )?;
     Ok(script)
 }
 
+/// Aspas simples para um argumento de shell, com o truque padrão para a própria aspa.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// Sobe a sessão. Devolve erro sem deixar lixo se o tmux não vingar.
-pub async fn launch(projeto: &Project, permission_mode: &str) -> Result<Launched> {
-    let session_id = uuid::Uuid::new_v4().to_string();
-    let tmux = tmux_name(&projeto.name, &session_id);
-    let script = write_launch_script(&session_id, projeto, permission_mode)?;
+pub async fn launch(spec: &Spec<'_>) -> Result<Launched> {
+    let session_id = match spec.resume {
+        Some(id) => id.to_string(),
+        None => uuid::Uuid::new_v4().to_string(),
+    };
+    let tmux = tmux_name(&spec.projeto.name, &session_id);
+    let script = write_launch_script(&session_id, spec)?;
 
     let saida = Command::new("tmux")
         .args([
@@ -130,7 +207,7 @@ pub async fn launch(projeto: &Project, permission_mode: &str) -> Result<Launched
             "-s",
             &tmux,
             "-c",
-            &projeto.path,
+            &spec.projeto.path,
             "-e",
             &format!("LD_SESSION={session_id}"),
             // O hook roda dentro desta sessão e precisa achar o socket. O servidor tmux pode
@@ -204,6 +281,22 @@ pub async fn has_session(tmux: &str) -> bool {
         .await
         .map(|s| s.status.success())
         .unwrap_or(false)
+}
+
+/// Sessões tmux que este projeto criou (prefixo `ld-`).
+pub async fn nossas_sessoes() -> Vec<String> {
+    let Ok(saida) = Command::new("tmux")
+        .args(["list-sessions", "-F", "#S"])
+        .output()
+        .await
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&saida.stdout)
+        .lines()
+        .filter(|l| l.starts_with("ld-"))
+        .map(str::to_string)
+        .collect()
 }
 
 pub async fn kill(tmux: &str) -> Result<()> {
@@ -284,6 +377,27 @@ mod tests {
         );
         assert!(p.contains("listen --session sid-123"));
         assert!(p.contains("1800000"));
+    }
+
+    #[test]
+    fn prompt_de_rearme_nao_manda_continuar_sozinho() {
+        // Voltar de um --resume com a sessão retomando tarefa sozinha seria surpresa ruim: quem
+        // decide continuar é quem está do outro lado.
+        let p = rearm_prompt("sid", false);
+        assert!(p.contains("Monitor"));
+        assert!(p.contains("não retome") || p.contains("Não retome"));
+    }
+
+    #[test]
+    fn workstream_de_relancamento_nao_repete() {
+        let a = workstream_name_unico("abcd1234-0000-0000-0000-000000000000");
+        assert!(a.starts_with("lukadispatch-abcd1234-"));
+        assert_ne!(a, workstream_name("abcd1234-0000-0000-0000-000000000000"));
+    }
+
+    #[test]
+    fn nome_com_aspa_nao_quebra_o_script() {
+        assert_eq!(shell_quote("meu'projeto"), "'meu'\\''projeto'");
     }
 
     #[test]

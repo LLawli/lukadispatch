@@ -146,6 +146,18 @@ async fn responde(app: &Arc<App>, req: Request) -> Response {
             Err(e) => erro(e),
         },
 
+        Request::Relaunch {
+            session_id,
+            model,
+            effort,
+        } => match app
+            .relaunch(&session_id, model.as_deref(), effort.as_deref())
+            .await
+        {
+            Ok(()) => Response::Ok,
+            Err(e) => erro(e),
+        },
+
         Request::ListSessions => match app.summaries() {
             Ok(sessions) => Response::Sessions { sessions },
             Err(e) => erro(e),
@@ -156,17 +168,48 @@ async fn responde(app: &Arc<App>, req: Request) -> Response {
             Err(e) => erro(e),
         },
 
-        Request::NewSession { project } => {
+        Request::NewSession {
+            project,
+            resume_last,
+        } => {
             let achado = app
                 .cfg
                 .projects_available()
                 .into_iter()
                 .find(|p| p.name == project || p.path == project);
             match achado {
-                Some(p) => match app.create_session(&p).await {
-                    Ok(_) => Response::Ok,
-                    Err(e) => erro(e),
-                },
+                Some(p) => {
+                    // A última conversa daquele diretório, quando houver e quando não estiver
+                    // aberta em outro lugar.
+                    let retomar = resume_last
+                        .then(|| {
+                            ld_core::transcript::ultima_sessao(
+                                &ld_core::paths::claude_dir(),
+                                &p.path,
+                            )
+                        })
+                        .flatten()
+                        .filter(|a| {
+                            app.store
+                                .get(&a.session_id)
+                                .ok()
+                                .flatten()
+                                .is_none_or(|s| s.ended_at.is_some())
+                        })
+                        .map(|a| a.session_id);
+                    match app
+                        .create_session(
+                            &p,
+                            p.model.as_deref(),
+                            p.effort.as_deref(),
+                            retomar.as_deref(),
+                        )
+                        .await
+                    {
+                        Ok(_) => Response::Ok,
+                        Err(e) => erro(e),
+                    }
+                }
                 None => Response::Error {
                     message: format!("projeto desconhecido: {project}"),
                 },

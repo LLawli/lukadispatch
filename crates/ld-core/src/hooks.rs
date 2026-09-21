@@ -49,10 +49,15 @@ pub fn telemetry_hooks(cli: &str) -> Value {
     json!({
         "SessionStart": [ { "hooks": [ async_hook(cli, "session-start") ] } ],
         "SessionEnd":   [ { "hooks": [ async_hook(cli, "session-end")   ] } ],
+        // Prompt digitado no teclado do PC (tmux attach): vira mensagem no tópico, para quem
+        // está no celular não ver só a resposta, sem a pergunta.
+        "UserPromptSubmit": [ { "hooks": [ async_hook(cli, "prompt") ] } ],
         "PreToolUse":   [ { "matcher": "", "hooks": [ async_hook(cli, "tool-start") ] } ],
         "PostToolUse":  [ { "matcher": "", "hooks": [ async_hook(cli, "tool-end")   ] } ],
         "PostToolUseFailure": [ { "matcher": "", "hooks": [ async_hook(cli, "tool-failed") ] } ],
         "Notification": [ { "hooks": [ async_hook(cli, "notification") ] } ],
+        // Troca de modelo feita no teclado do PC (`/model`): sem isto o painel mentiria.
+        "PostModelSwitch": [ { "hooks": [ async_hook(cli, "model-switch") ] } ],
     })
 }
 

@@ -5,7 +5,8 @@
 //! estado. Assim existe um só lugar onde "sessão morreu" quer dizer as quatro coisas que ela
 //! precisa querer dizer (matar o tmux, apagar o tópico, fechar as perguntas, marcar no banco).
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
 use ld_core::ask::{Answer, Ask};
@@ -41,6 +42,30 @@ pub struct App {
     pub status: StatusBoard,
     pub cards: Cards,
     pub panel: Panel,
+    /// Último aviso de ociosidade ("Claude is waiting for your input") por sessão.
+    ///
+    /// Ele é útil quando chega, e vira lixo assim que você responde: some na próxima mensagem
+    /// entregue à sessão, para o tópico não acumular uma fila deles.
+    avisos: Arc<Mutex<HashMap<String, teloxide::types::MessageId>>>,
+    /// Catálogo de modelos lido do binário do Claude Code, com a data dele.
+    ///
+    /// A leitura varre 200 MB e leva uns 300 ms: rápida para fazer uma vez, cara para repetir a
+    /// cada toque de botão. A data de modificação do binário é a chave: atualizar o Claude Code
+    /// derruba o cache sozinho, e modelos novos aparecem sem reiniciar o daemon.
+    catalogo: Mutex<Option<(std::time::SystemTime, Vec<ld_core::models::Modelo>)>>,
+    /// Sessões que estão trocando de modelo agora, com a hora em que a troca começou.
+    ///
+    /// Relançar exige matar o processo, e matar dispara o hook `SessionEnd`. Sem esta marca o
+    /// daemon trataria a troca como fim de sessão: apagaria o tópico e encerraria tudo no meio
+    /// do caminho. A janela é por tempo, e não por evento, porque o hook é `async` e pode chegar
+    /// depois de a sessão nova já estar de pé.
+    relancando: Mutex<HashMap<String, std::time::Instant>>,
+    /// Última mensagem entregue a cada sessão pelo Telegram, com a hora.
+    ///
+    /// O hook `UserPromptSubmit` não distingue o que você digitou no PC do que chegou pelo
+    /// celular, e republicar o segundo no tópico seria eco. A comparação é por texto e por
+    /// tempo: só o que acabou de sair daqui é descartado.
+    entregues: Mutex<HashMap<String, (String, std::time::Instant)>>,
 }
 
 impl App {
@@ -57,6 +82,10 @@ impl App {
             status: StatusBoard::new(),
             cards: Cards::new(),
             panel,
+            avisos: Arc::new(Mutex::new(HashMap::new())),
+            catalogo: Mutex::new(None),
+            relancando: Mutex::new(HashMap::new()),
+            entregues: Mutex::new(HashMap::new()),
         }
     }
 
@@ -73,7 +102,13 @@ impl App {
     ///
     /// Ordem importa: o tópico vem antes do tmux para a sessão já nascer com para onde falar. Se
     /// o tmux falhar, o tópico recém-criado é apagado, senão sobra tópico órfão a cada tentativa.
-    pub async fn create_session(&self, projeto: &Project) -> Result<String> {
+    pub async fn create_session(
+        &self,
+        projeto: &Project,
+        model: Option<&str>,
+        effort: Option<&str>,
+        retomar: Option<&str>,
+    ) -> Result<String> {
         let topic = match self.offline {
             true => None,
             false => Some(self.tg.create_topic(&projeto.name).await?),
@@ -89,7 +124,15 @@ impl App {
         }
 
         let modo = self.cfg.permission_mode_for(&projeto.path);
-        let lancada = match sessions::launch(projeto, &modo).await {
+        let spec = sessions::Spec {
+            projeto,
+            permission_mode: &modo,
+            model,
+            effort,
+            resume: retomar,
+            retomada: true,
+        };
+        let lancada = match sessions::launch(&spec).await {
             Ok(l) => l,
             Err(e) => {
                 if let Some(t) = topic {
@@ -108,6 +151,8 @@ impl App {
             topic_id: topic,
             status: "iniciando".into(),
             status_message_id: None,
+            model: model.map(str::to_string),
+            effort: effort.map(str::to_string),
             created_at: 0,
             ended_at: None,
         })?;
@@ -118,17 +163,22 @@ impl App {
             .send_html(
                 Some(topic),
                 &format!(
-                    "🟢 <b>{}</b>\n<code>{}</code>\nmodo: {modo} · tmux: <code>{}</code>\n\nPode falar. Para fechar, mande /kill.",
+                    "🟢 <b>{}</b>\n<code>{}</code>\n{}\n\nPode falar. Para fechar, mande /kill.",
                     escape_html(&projeto.name),
                     escape_html(&projeto.path),
-                    escape_html(&lancada.tmux),
+                    escape_html(&ficha(model, effort, &modo, &lancada.tmux)),
                 ),
             )
             .await;
         }
 
         self.panel.refresh();
-        info!(sessao = %lancada.session_id, topico = ?topic, projeto = %projeto.name, "sessão criada");
+        // Retomando: o tópico nasce com o que já foi conversado, senão você continua às cegas.
+        if let (Some(topic), Some(_)) = (topic, retomar) {
+            self.publica_historico(topic, &lancada.session_id).await;
+        }
+
+        info!(sessao = %lancada.session_id, topico = ?topic, projeto = %projeto.name, retomada = retomar.is_some(), "sessão criada");
         Ok(lancada.session_id)
     }
 
@@ -140,6 +190,11 @@ impl App {
             return Ok(());
         };
         if s.ended_at.is_some() {
+            return Ok(());
+        }
+        // Troca de modelo em andamento: este fim é do processo velho, não da sessão.
+        if self.em_relancamento(session_id) {
+            info!(sessao = %session_id, "fim ignorado: a sessão está sendo relançada");
             return Ok(());
         }
 
@@ -159,17 +214,186 @@ impl App {
             warn!(sessao = %session_id, erro = %e, "não consegui matar o tmux");
         }
 
-        if apagar_topico
-            && let Some(topic) = s.topic_id
-            && let Err(e) = self.tg.delete_topic(topic).await
-        {
-            warn!(topico = topic, erro = %e, "não consegui apagar o tópico");
+        if apagar_topico && let Some(topic) = s.topic_id {
+            match self.tg.delete_topic(topic).await {
+                // Só esquece o tópico depois de apagá-lo: enquanto ele estiver no banco, a
+                // varredura de tópico vazado sabe que ainda há o que limpar.
+                Ok(()) => self.store.clear_topic(session_id)?,
+                Err(e) => warn!(topico = topic, erro = %e, "não consegui apagar o tópico"),
+            }
         }
 
         self.store.end(session_id)?;
         self.panel.refresh();
         info!(sessao = %session_id, "sessão encerrada");
         Ok(())
+    }
+
+    /// Uma troca de modelo em andamento silencia o fim da sessão antiga por esta janela.
+    const JANELA_RELANCAMENTO: std::time::Duration = std::time::Duration::from_secs(90);
+
+    fn marca_relancamento(&self, session_id: &str) {
+        self.relancando
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(session_id.to_string(), std::time::Instant::now());
+    }
+
+    /// `true` enquanto a sessão está no meio de uma troca de modelo.
+    pub fn em_relancamento(&self, session_id: &str) -> bool {
+        let mut mapa = self.relancando.lock().unwrap_or_else(|e| e.into_inner());
+        mapa.retain(|_, quando| quando.elapsed() < Self::JANELA_RELANCAMENTO);
+        mapa.contains_key(session_id)
+    }
+
+    /// Catálogo de modelos, relido só quando o binário do Claude Code muda.
+    pub fn modelos(&self) -> Vec<ld_core::models::Modelo> {
+        let Some(bin) = ld_core::models::claude_binary() else {
+            return Vec::new();
+        };
+        let data = std::fs::metadata(&bin)
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+
+        let mut cache = self.catalogo.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((quando, modelos)) = cache.as_ref()
+            && *quando == data
+        {
+            return modelos.clone();
+        }
+        let modelos = ld_core::models::catalog(&bin);
+        info!(quantos = modelos.len(), binario = %bin.display(), "catálogo de modelos lido");
+        *cache = Some((data, modelos.clone()));
+        modelos
+    }
+
+    /// Troca modelo ou esforço de uma sessão viva, sem perder a conversa.
+    ///
+    /// `/model` e `/effort` são comandos do frontend do Claude Code: nenhum evento consegue
+    /// dispará-los, e digitar no terminal está fora de questão neste projeto. O que dá para
+    /// fazer sem trapaça é reiniciar o processo com `--resume <id>`, que volta com o mesmo
+    /// transcript e o mesmo id, só que com a flag nova. A conversa continua; o que se perde é o
+    /// Monitor, e o prompt de re-arme cuida disso.
+    pub async fn relaunch(
+        &self,
+        session_id: &str,
+        model: Option<&str>,
+        effort: Option<&str>,
+    ) -> Result<()> {
+        let Some(s) = self.store.get(session_id)? else {
+            bail!("sessão desconhecida");
+        };
+        if !s.owned_by_bot() {
+            bail!("esta sessão foi aberta no terminal; troque por lá");
+        }
+        // Reiniciar no meio de um turno jogaria fora o trabalho em andamento sem aviso.
+        if matches!(s.status.as_str(), "pensando" | "ferramenta" | "perguntando") {
+            bail!("a sessão está trabalhando; espere o turno acabar e mande de novo");
+        }
+
+        let projeto = Project {
+            name: s.project.clone(),
+            path: s.cwd.clone(),
+            permission_mode: None,
+            model: None,
+            effort: None,
+        };
+        let modo = self.cfg.permission_mode_for(&s.cwd);
+        // O que não foi pedido agora continua valendo: trocar só o esforço não derruba o modelo.
+        let model_final = model.map(str::to_string).or_else(|| s.model.clone());
+        let effort_final = effort.map(str::to_string).or_else(|| s.effort.clone());
+
+        self.marca_relancamento(session_id);
+        if let Some(tmux) = &s.tmux {
+            sessions::kill(tmux).await?;
+            // Sem esta pausa o `--resume` pode esbarrar no processo anterior ainda saindo.
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        self.hub.unlisten(session_id);
+        self.status.forget(session_id);
+
+        let spec = sessions::Spec {
+            projeto: &projeto,
+            permission_mode: &modo,
+            model: model_final.as_deref(),
+            effort: effort_final.as_deref(),
+            resume: Some(session_id),
+            retomada: false,
+        };
+        let lancada = sessions::launch(&spec).await?;
+
+        self.store
+            .set_model(session_id, model_final.as_deref(), effort_final.as_deref())?;
+        self.store.set_status(session_id, "iniciando")?;
+        if let Some(topic) = s.topic_id {
+            let _ = self
+                .tg
+                .send_html(
+                    Some(topic),
+                    &format!(
+                        "♻️ Sessão reiniciada com o contexto inteiro.\n{}",
+                        escape_html(&ficha(
+                            model_final.as_deref(),
+                            effort_final.as_deref(),
+                            &modo,
+                            &lancada.tmux
+                        ))
+                    ),
+                )
+                .await;
+        }
+        self.panel.refresh();
+        info!(sessao = %session_id, modelo = ?model_final, esforco = ?effort_final, "sessão relançada");
+        Ok(())
+    }
+
+    /// Despeja no tópico as últimas falas da conversa retomada.
+    ///
+    /// Vai em mensagens separadas por papel, e não num bloco só, porque no celular um muro de
+    /// texto misturando pergunta e resposta não se lê. O que não é diálogo (ferramenta,
+    /// raciocínio) fica de fora: aqui interessa o fio da conversa.
+    async fn publica_historico(&self, topic: i32, session_id: &str) {
+        let Some(s) = self.store.get(session_id).ok().flatten() else {
+            return;
+        };
+        let caminho = match s.transcript_path.as_deref() {
+            Some(p) => std::path::PathBuf::from(p),
+            None => ld_core::transcript::dir_do_projeto(&paths::claude_dir(), &s.cwd)
+                .join(format!("{session_id}.jsonl")),
+        };
+        let falas = ld_core::transcript::historico(&caminho, self.cfg.history_lines);
+        if falas.is_empty() {
+            return;
+        }
+
+        let _ = self
+            .tg
+            .send_html(
+                Some(topic),
+                &format!(
+                    "📜 <b>Retomando a conversa</b> <i>(últimas {} falas)</i>",
+                    falas.len()
+                ),
+            )
+            .await;
+        for f in falas {
+            let (marca, texto) = match f.papel {
+                ld_core::transcript::Papel::Usuario => ("👤", f.texto),
+                ld_core::transcript::Papel::Assistente => ("🤖", f.texto),
+            };
+            let corpo = corta(&texto, 1200);
+            let _ = self
+                .tg
+                .send_html(Some(topic), &format!("{marca} {}", escape_html(&corpo)))
+                .await;
+        }
+        let _ = self
+            .tg
+            .send_html(
+                Some(topic),
+                "— <i>fim do histórico; pode continuar daqui</i>",
+            )
+            .await;
     }
 
     /// Encerra as sessões cujo tmux não existe mais.
@@ -183,12 +407,41 @@ impl App {
             let Some(tmux) = &s.tmux else {
                 continue; // sessão do terminal: quem cuida dela é o hook SessionEnd.
             };
-            if sessions::has_session(tmux).await {
+            if sessions::has_session(tmux).await || self.em_relancamento(&s.session_id) {
                 continue;
             }
             warn!(sessao = %s.session_id, tmux = %tmux, "tmux sumiu; encerrando a sessão");
             self.end_session(&s.session_id, true).await?;
             mortas += 1;
+        }
+
+        // Tópico de sessão encerrada que sobrou no grupo (daemon caiu no meio do fechamento,
+        // API fora do ar na hora): vira um canal que não responde a ninguém.
+        for (sessao, topico) in self.store.topicos_vazados().unwrap_or_default() {
+            if self.em_relancamento(&sessao) {
+                continue;
+            }
+            match self.tg.delete_topic_sweep(topico).await {
+                crate::telegram::Resolvido::Apagado => {
+                    warn!(topico, sessao = %sessao, "tópico vazado; apagado");
+                    let _ = self.store.clear_topic(&sessao);
+                }
+                // Já não existe: o objetivo era não ter esse tópico, e ele não está lá.
+                crate::telegram::Resolvido::JaNaoExiste => {
+                    let _ = self.store.clear_topic(&sessao);
+                }
+                crate::telegram::Resolvido::TenteDepois => {}
+            }
+        }
+
+        // O contrário também acontece: o tmux ficou vivo com a sessão já encerrada no banco (um
+        // relançamento interrompido no meio, por exemplo). Ninguém mais fala com ele, e o tópico
+        // dele já foi apagado, então é lixo que só consome memória.
+        for tmux in sessions::nossas_sessoes().await {
+            if self.store.tmux_de_sessao_morta(&tmux).unwrap_or(false) {
+                warn!(tmux = %tmux, "tmux órfão de sessão encerrada; matando");
+                let _ = sessions::kill(&tmux).await;
+            }
         }
         Ok(mortas)
     }
@@ -220,10 +473,47 @@ impl App {
             return Ok(());
         }
 
+        self.entregues
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                s.session_id.clone(),
+                (texto.to_string(), std::time::Instant::now()),
+            );
+
+        // Você respondeu: o aviso de "esperando a sua resposta" virou passado.
+        if let Some(id) = self.tira_aviso(&s.session_id) {
+            self.tg.delete(id).await;
+        }
+
         self.store.set_status(&s.session_id, "pensando")?;
         self.status
             .set(&self.ctx(), &s.session_id, topic, "Pensando...".into());
         Ok(())
+    }
+
+    /// `true` quando este prompt é o que o daemon acabou de entregar pelo Telegram.
+    fn e_eco(&self, session_id: &str, texto: &str) -> bool {
+        const JANELA: std::time::Duration = std::time::Duration::from_secs(120);
+        let mut mapa = self.entregues.lock().unwrap_or_else(|e| e.into_inner());
+        mapa.retain(|_, (_, quando)| quando.elapsed() < JANELA);
+        match mapa.get(session_id) {
+            Some((entregue, _)) => entregue.trim() == texto.trim(),
+            None => false,
+        }
+    }
+
+    fn tira_aviso(&self, session_id: &str) -> Option<teloxide::types::MessageId> {
+        self.avisos
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(session_id)
+    }
+
+    fn avisos_handle(&self) -> Arc<Mutex<HashMap<String, teloxide::types::MessageId>>> {
+        // O mapa é consultado de dentro de uma tarefa que sobrevive a esta chamada, então ele
+        // precisa ser compartilhado por Arc, e não emprestado.
+        self.avisos.clone()
     }
 
     /// Entrega uma mensagem direto a uma sessão, sem Telegram no caminho.
@@ -277,13 +567,25 @@ impl App {
         let Some(s) = self.store.get(&ev.session_id)? else {
             return Ok(());
         };
+        // Troca de modelo conta para o painel mesmo em sessão sem tópico (as do seu terminal).
+        if let EventKind::ModelSwitch { model } = &ev.event {
+            self.store.set_model(&ev.session_id, Some(model), None)?;
+            self.panel.refresh();
+            return Ok(());
+        }
         let Some(topic) = s.topic_id else {
             // Sessão de terminal: conta para o painel, não tem onde escrever.
             return Ok(());
         };
 
         match &ev.event {
-            EventKind::ToolStart { label, .. } => {
+            EventKind::ToolStart { label, effort, .. } => {
+                // Só escreve quando muda: isto roda a cada ferramenta.
+                if effort.is_some() && effort.as_deref() != s.effort.as_deref() {
+                    self.store
+                        .set_model(&ev.session_id, None, effort.as_deref())?;
+                    self.panel.refresh();
+                }
                 self.store.set_status(&ev.session_id, "ferramenta")?;
                 self.status
                     .set(&self.ctx(), &ev.session_id, topic, label.clone());
@@ -297,13 +599,42 @@ impl App {
                 self.status
                     .set(&self.ctx(), &ev.session_id, topic, "Escrevendo...".into());
             }
+            EventKind::UserPrompt { text } => {
+                if self.e_eco(&ev.session_id, text) {
+                    return Ok(());
+                }
+                info!(sessao = %ev.session_id, "prompt digitado no PC, espelhado no tópico");
+                self.store.set_status(&ev.session_id, "pensando")?;
+                let corpo = format!("👤 <i>do PC</i>\n{}", escape_html(&corta(text, 1200)));
+                let tg = self.tg.clone();
+                tokio::spawn(async move {
+                    let _ = tg.send_html(Some(topic), &corpo).await;
+                });
+            }
+            EventKind::ModelSwitch { model } => {
+                self.store.set_model(&ev.session_id, Some(model), None)?;
+                self.panel.refresh();
+            }
             EventKind::Notification { text } | EventKind::Failure { text } => {
                 let texto = text.clone();
                 let tg = self.tg.clone();
+                let anterior = self.tira_aviso(&ev.session_id);
+                let sessao = ev.session_id.clone();
+                let app_avisos = self.avisos_handle();
                 tokio::spawn(async move {
-                    let _ = tg
+                    // Dois avisos seguidos não se acumulam: o novo substitui o velho.
+                    if let Some(id) = anterior {
+                        tg.delete(id).await;
+                    }
+                    if let Ok(id) = tg
                         .send_html(Some(topic), &format!("⚠️ {}", escape_html(&texto)))
-                        .await;
+                        .await
+                    {
+                        app_avisos
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(sessao, id);
+                    }
                 });
             }
         }
@@ -544,6 +875,15 @@ impl App {
     }
 }
 
+/// Linha de identificação da sessão: modelo, esforço, modo de permissão e tmux.
+fn ficha(model: Option<&str>, effort: Option<&str>, modo: &str, tmux: &str) -> String {
+    format!(
+        "modelo: {} · esforço: {} · permissão: {modo} · tmux: {tmux}",
+        model.unwrap_or("padrão"),
+        effort.unwrap_or("padrão"),
+    )
+}
+
 fn nova_sessao(r: &RegisterSession) -> Session {
     Session {
         session_id: r.session_id.clone(),
@@ -554,9 +894,22 @@ fn nova_sessao(r: &RegisterSession) -> Session {
         topic_id: None,
         status: "ocioso".into(),
         status_message_id: None,
+        model: r.model.clone(),
+        effort: None,
         created_at: 0,
         ended_at: None,
     }
+}
+
+/// Corta preservando o começo, que é onde está o assunto da fala.
+fn corta(texto: &str, teto: usize) -> String {
+    if texto.chars().count() <= teto {
+        return texto.to_string();
+    }
+    format!(
+        "{}\n[…]",
+        texto.chars().take(teto).collect::<String>().trim_end()
+    )
 }
 
 fn nome_do_cwd(cwd: &str) -> String {

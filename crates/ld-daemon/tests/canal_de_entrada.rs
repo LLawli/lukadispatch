@@ -26,6 +26,8 @@ fn sessao_de_teste() -> Session {
         topic_id: Some(7),
         status: "ocioso".into(),
         status_message_id: None,
+        model: Some("opus".into()),
+        effort: None,
         created_at: 0,
         ended_at: None,
     }

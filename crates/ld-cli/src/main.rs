@@ -20,9 +20,12 @@ lukadispatch
   listen --session <uuid>   fluxo de mensagens do Telegram (é o que o Monitor da sessão lê)
   hook <evento>             ponte de hook do Claude Code (lê o evento no stdin)
   ls                        sessões vivas
+  models                    catálogo de modelos lido do binário do Claude Code
   kill <id>                 fecha uma sessão
-  new <projeto>             abre uma sessão
+  new <projeto> [--continuar]   abre uma sessão (--continuar retoma a última conversa)
   send <id> <texto>         entrega uma mensagem a uma sessão sem passar pelo Telegram
+  model <id> <modelo>       troca o modelo reiniciando com o contexto inteiro
+  effort <id> <nível>       idem para o esforço (low, medium, high, xhigh, max)
   install [--global]        escreve os hooks; --global acrescenta a telemetria ao settings do
                             Claude Code, para as suas sessões de terminal entrarem no painel
   uninstall                 remove os hooks do settings do Claude Code
@@ -36,12 +39,26 @@ fn main() -> ExitCode {
         "listen" => listen::run(valor(&args, "--session").as_deref()),
         "hook" => hook::run(args.get(1).map(String::as_str).unwrap_or("")),
         "ls" => ls(),
+        "models" | "modelos" => modelos(),
         "kill" => kill(args.get(1).map(String::as_str)),
         "send" => send(
             args.get(1).map(String::as_str),
             args.get(2..).map(|r| r.join(" ")).unwrap_or_default(),
         ),
-        "new" => new(args.get(1..).map(|r| r.join(" ")).unwrap_or_default()),
+        "model" | "effort" => trocar(
+            cmd,
+            args.get(1).map(String::as_str),
+            args.get(2).map(String::as_str),
+        ),
+        "new" => {
+            let continuar = args.iter().any(|a| a == "--continuar");
+            let nome: Vec<String> = args[1..]
+                .iter()
+                .filter(|a| *a != "--continuar")
+                .cloned()
+                .collect();
+            new(nome.join(" "), continuar)
+        }
         "install" => install(args.iter().any(|a| a == "--global")),
         "uninstall" => uninstall(),
         "-h" | "--help" | "help" | "" => {
@@ -92,6 +109,27 @@ fn ls() -> i32 {
     }
 }
 
+/// Mostra o catálogo extraído do binário do Claude Code, para conferir o que o bot vai oferecer.
+fn modelos() -> i32 {
+    let Some(bin) = ld_core::models::claude_binary() else {
+        eprintln!("não achei o binário `claude` no PATH");
+        return 1;
+    };
+    let catalogo = ld_core::models::catalog(&bin);
+    if catalogo.is_empty() {
+        eprintln!("nenhum modelo encontrado em {}", bin.display());
+        return 1;
+    }
+    println!("{} ({} modelos)", bin.display(), catalogo.len());
+    for (familia, modelos) in ld_core::models::por_familia(&catalogo) {
+        println!("\n{familia}:");
+        for m in modelos {
+            println!("  {:<22} {}", m.id, m.rotulo());
+        }
+    }
+    0
+}
+
 fn kill(id: Option<&str>) -> i32 {
     let Some(id) = id else {
         eprintln!("uso: lukadispatch kill <id>");
@@ -115,12 +153,18 @@ fn kill(id: Option<&str>) -> i32 {
     }
 }
 
-fn new(projeto: String) -> i32 {
+fn new(projeto: String, continuar: bool) -> i32 {
     if projeto.is_empty() {
         eprintln!("uso: lukadispatch new <projeto>");
         return 2;
     }
-    match client::call(&Request::NewSession { project: projeto }, client::PRAZO_NEW) {
+    match client::call(
+        &Request::NewSession {
+            project: projeto,
+            resume_last: continuar,
+        },
+        client::PRAZO_NEW,
+    ) {
         Some(Response::Ok) => 0,
         Some(Response::Error { message }) => {
             eprintln!("{message}");
@@ -144,6 +188,40 @@ fn send(id: Option<&str>, texto: String) -> i32 {
             text: texto,
         },
         client::PRAZO_LOCAL,
+    ) {
+        Some(Response::Ok) => 0,
+        Some(Response::Error { message }) => {
+            eprintln!("{message}");
+            1
+        }
+        _ => {
+            eprintln!("daemon não respondeu");
+            1
+        }
+    }
+}
+
+/// Troca modelo ou esforço de uma sessão viva.
+///
+/// `/model` e `/effort` são comandos do frontend do Claude Code: nada nem ninguém consegue
+/// dispará-los por evento. O daemon reinicia a sessão com `--resume`, que volta com o mesmo
+/// transcript, então na prática a conversa não sente.
+fn trocar(qual: &str, id: Option<&str>, valor: Option<&str>) -> i32 {
+    let (Some(id), Some(valor)) = (id, valor) else {
+        eprintln!("uso: lukadispatch {qual} <id> <valor>");
+        return 2;
+    };
+    let (model, effort) = match qual {
+        "model" => (Some(valor.to_string()), None),
+        _ => (None, Some(valor.to_string())),
+    };
+    match client::call(
+        &Request::Relaunch {
+            session_id: id.to_string(),
+            model,
+            effort,
+        },
+        client::PRAZO_NEW,
     ) {
         Some(Response::Ok) => 0,
         Some(Response::Error { message }) => {

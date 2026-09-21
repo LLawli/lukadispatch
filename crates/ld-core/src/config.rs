@@ -27,6 +27,8 @@ pub struct Config {
     /// Code, e do celular isso aparece como uma sessão muda. Vale só para os projetos que este
     /// config oferece, nunca para um caminho arbitrário.
     pub trust_projects: bool,
+    /// Quantas falas do histórico o tópico recebe ao retomar uma conversa.
+    pub history_lines: usize,
 }
 
 impl Default for Config {
@@ -37,6 +39,7 @@ impl Default for Config {
             projects: Vec::new(),
             default_permission_mode: "auto".into(),
             trust_projects: true,
+            history_lines: 8,
         }
     }
 }
@@ -77,6 +80,11 @@ pub struct Project {
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
+    /// Modelo e esforço padrão deste projeto. O `/new` sem argumento usa estes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 impl Config {
@@ -128,6 +136,8 @@ impl Config {
                     name: p.name.clone(),
                     path: caminho,
                     permission_mode: p.permission_mode.clone(),
+                    model: p.model.clone(),
+                    effort: p.effort.clone(),
                 });
             }
         }
@@ -143,6 +153,8 @@ impl Config {
                         name: nome,
                         path: caminho,
                         permission_mode: None,
+                        model: None,
+                        effort: None,
                     });
                 }
             }
@@ -275,6 +287,8 @@ permission_mode = "bypassPermissions"
                 name: "apelido".into(),
                 path: caminho_a.clone(),
                 permission_mode: None,
+                model: None,
+                effort: None,
             }],
             scan: Scan {
                 enabled: true,

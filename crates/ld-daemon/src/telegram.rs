@@ -29,6 +29,13 @@ pub const TTL_TECLADO: u64 = 300;
 /// continuação sem estourar na virada.
 const LIMITE_MSG: usize = 3900;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolvido {
+    Apagado,
+    JaNaoExiste,
+    TenteDepois,
+}
+
 #[derive(Clone)]
 pub struct Tg {
     bot: Bot,
@@ -77,6 +84,24 @@ impl Tg {
             .await
             .context("criando tópico (o bot é admin com 'Gerenciar tópicos'?)")?;
         Ok(t.thread_id.0.0)
+    }
+
+    /// Resultado de uma tentativa de apagar tópico na varredura de limpeza.
+    ///
+    /// A distinção importa: o Telegram recusa com erro de API quando o tópico já não existe (e aí
+    /// o trabalho está feito), mas uma queda de rede é temporária e merece nova tentativa. Sem
+    /// separar os dois, ou o daemon insiste para sempre num tópico que já sumiu, ou desiste de um
+    /// que ainda está lá.
+    pub async fn delete_topic_sweep(&self, topic: i32) -> Resolvido {
+        match self
+            .bot
+            .delete_forum_topic(self.chat, ThreadId(MessageId(topic)))
+            .await
+        {
+            Ok(_) => Resolvido::Apagado,
+            Err(teloxide::RequestError::Api(_)) => Resolvido::JaNaoExiste,
+            Err(_) => Resolvido::TenteDepois,
+        }
     }
 
     pub async fn delete_topic(&self, topic: i32) -> Result<()> {

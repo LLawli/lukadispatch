@@ -9,9 +9,11 @@ pub mod config;
 pub mod context;
 pub mod hooks;
 pub mod labels;
+pub mod models;
 pub mod paths;
 pub mod proto;
 pub mod state;
+pub mod transcript;
 pub mod trust;
 pub mod usage;
 

@@ -28,6 +28,10 @@ pub struct Session {
     pub topic_id: Option<i32>,
     pub status: String,
     pub status_message_id: Option<i32>,
+    /// Modelo e esforço em vigor. Vêm do hook `SessionStart`, da troca pedida no Telegram ou do
+    /// `PostModelSwitch` (quando você troca pelo `/model` no teclado do PC).
+    pub model: Option<String>,
+    pub effort: Option<String>,
     pub created_at: i64,
     pub ended_at: Option<i64>,
 }
@@ -53,6 +57,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     topic_id          INTEGER,
     status            TEXT NOT NULL DEFAULT 'idle',
     status_message_id INTEGER,
+    model             TEXT,
+    effort            TEXT,
     created_at        INTEGER NOT NULL,
     updated_at        INTEGER NOT NULL,
     ended_at          INTEGER
@@ -67,6 +73,20 @@ CREATE TABLE IF NOT EXISTS queue (
 CREATE INDEX IF NOT EXISTS queue_por_sessao ON queue(session_id, id);
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 "#;
+
+/// Colunas acrescentadas depois que bancos já existiam por aí.
+///
+/// `CREATE TABLE IF NOT EXISTS` não altera tabela que já existe, então um banco criado antes
+/// destas colunas ficaria sem elas. O erro de coluna duplicada é o caminho normal aqui (banco
+/// novo já nasce com tudo), por isso ele é ignorado em silêncio.
+fn migra(conn: &Connection) {
+    for coluna in ["model", "effort"] {
+        let _ = conn.execute(
+            &format!("ALTER TABLE sessions ADD COLUMN {coluna} TEXT"),
+            [],
+        );
+    }
+}
 
 fn agora() -> i64 {
     std::time::SystemTime::now()
@@ -83,6 +103,7 @@ impl Store {
         let conn = Connection::open(caminho)
             .with_context(|| format!("abrindo estado em {}", caminho.display()))?;
         conn.execute_batch(ESQUEMA).context("criando esquema")?;
+        migra(&conn);
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -107,14 +128,21 @@ impl Store {
     pub fn upsert(&self, s: &Session) -> Result<()> {
         let c = self.conn();
         c.execute(
-            "INSERT INTO sessions (session_id, project, cwd, transcript_path, tmux, topic_id, status, status_message_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+            "INSERT INTO sessions (session_id, project, cwd, transcript_path, tmux, topic_id, status, status_message_id, model, effort, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)
              ON CONFLICT(session_id) DO UPDATE SET
                 project         = excluded.project,
                 cwd             = excluded.cwd,
                 transcript_path = COALESCE(excluded.transcript_path, sessions.transcript_path),
                 tmux            = COALESCE(excluded.tmux, sessions.tmux),
                 topic_id        = COALESCE(excluded.topic_id, sessions.topic_id),
+                model           = COALESCE(excluded.model, sessions.model),
+                effort          = COALESCE(excluded.effort, sessions.effort),
+                status          = excluded.status,
+                -- Retomar uma conversa reusa o id da sessão anterior, que estava encerrada. Sem
+                -- limpar isto aqui, ela voltaria viva no tmux e morta no banco: sem tópico, sem
+                -- painel e sem ninguém para entregar mensagem.
+                ended_at        = NULL,
                 updated_at      = excluded.updated_at",
             params![
                 s.session_id,
@@ -125,6 +153,8 @@ impl Store {
                 s.topic_id,
                 s.status,
                 s.status_message_id,
+                s.model,
+                s.effort,
                 agora(),
             ],
         )?;
@@ -135,7 +165,7 @@ impl Store {
         let c = self.conn();
         let s = c
             .query_row(
-                "SELECT session_id, project, cwd, transcript_path, tmux, topic_id, status, status_message_id, created_at, ended_at
+                "SELECT session_id, project, cwd, transcript_path, tmux, topic_id, status, status_message_id, model, effort, created_at, ended_at
                  FROM sessions WHERE session_id = ?1",
                 [session_id],
                 linha_para_sessao,
@@ -150,7 +180,7 @@ impl Store {
         let c = self.conn();
         let s = c
             .query_row(
-                "SELECT session_id, project, cwd, transcript_path, tmux, topic_id, status, status_message_id, created_at, ended_at
+                "SELECT session_id, project, cwd, transcript_path, tmux, topic_id, status, status_message_id, model, effort, created_at, ended_at
                  FROM sessions WHERE topic_id = ?1 AND ended_at IS NULL
                  ORDER BY created_at DESC LIMIT 1",
                 [topic_id],
@@ -170,7 +200,7 @@ impl Store {
         let c = self.conn();
         let s = c
             .query_row(
-                "SELECT session_id, project, cwd, transcript_path, tmux, topic_id, status, status_message_id, created_at, ended_at
+                "SELECT session_id, project, cwd, transcript_path, tmux, topic_id, status, status_message_id, model, effort, created_at, ended_at
                  FROM sessions WHERE cwd = ?1 AND session_id <> ?2 AND ended_at IS NULL
                  ORDER BY created_at DESC LIMIT 1",
                 params![cwd, exceto],
@@ -223,6 +253,24 @@ impl Store {
         Ok(())
     }
 
+    /// Grava o modelo e o esforço em vigor. `None` não apaga o que já estava.
+    pub fn set_model(
+        &self,
+        session_id: &str,
+        model: Option<&str>,
+        effort: Option<&str>,
+    ) -> Result<()> {
+        self.conn().execute(
+            "UPDATE sessions SET
+                model      = COALESCE(?2, model),
+                effort     = COALESCE(?3, effort),
+                updated_at = ?4
+             WHERE session_id = ?1",
+            params![session_id, model, effort, agora()],
+        )?;
+        Ok(())
+    }
+
     pub fn set_transcript(&self, session_id: &str, transcript: &str) -> Result<()> {
         self.conn().execute(
             "UPDATE sessions SET transcript_path = ?2, updated_at = ?3 WHERE session_id = ?1",
@@ -247,7 +295,7 @@ impl Store {
     pub fn live(&self) -> Result<Vec<Session>> {
         let c = self.conn();
         let mut stmt = c.prepare(
-            "SELECT session_id, project, cwd, transcript_path, tmux, topic_id, status, status_message_id, created_at, ended_at
+            "SELECT session_id, project, cwd, transcript_path, tmux, topic_id, status, status_message_id, model, effort, created_at, ended_at
              FROM sessions WHERE ended_at IS NULL ORDER BY created_at DESC",
         )?;
         let linhas = stmt.query_map([], linha_para_sessao)?;
@@ -279,6 +327,44 @@ impl Store {
         Ok(itens)
     }
 
+    /// `true` quando este tmux é de uma sessão que já foi encerrada.
+    ///
+    /// Serve para varrer painel de tmux órfão: um relançamento interrompido no meio pode deixar
+    /// o processo vivo com a sessão já morta no banco, e aí ele é lixo que ninguém mais alcança.
+    /// Sessões encerradas que ainda carregam tópico: o tópico não foi apagado (daemon caiu no
+    /// meio, API fora do ar) e virou um canal morto no grupo.
+    pub fn topicos_vazados(&self) -> Result<Vec<(String, i32)>> {
+        let c = self.conn();
+        let mut stmt = c.prepare(
+            "SELECT session_id, topic_id FROM sessions
+             WHERE ended_at IS NOT NULL AND topic_id IS NOT NULL",
+        )?;
+        let linhas = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(linhas.flatten().collect())
+    }
+
+    /// Esquece o tópico de uma sessão. Chamado depois de apagá-lo de verdade, para a varredura
+    /// de tópico vazado saber o que já foi resolvido.
+    pub fn clear_topic(&self, session_id: &str) -> Result<()> {
+        self.conn().execute(
+            "UPDATE sessions SET topic_id = NULL, updated_at = ?2 WHERE session_id = ?1",
+            params![session_id, agora()],
+        )?;
+        Ok(())
+    }
+
+    pub fn tmux_de_sessao_morta(&self, tmux: &str) -> Result<bool> {
+        let c = self.conn();
+        let achou: Option<i64> = c
+            .query_row(
+                "SELECT 1 FROM sessions WHERE tmux = ?1 AND ended_at IS NOT NULL LIMIT 1",
+                [tmux],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(achou.is_some())
+    }
+
     pub fn kv_get(&self, key: &str) -> Result<Option<String>> {
         let c = self.conn();
         Ok(
@@ -306,8 +392,10 @@ fn linha_para_sessao(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
         topic_id: row.get(5)?,
         status: row.get(6)?,
         status_message_id: row.get(7)?,
-        created_at: row.get(8)?,
-        ended_at: row.get(9)?,
+        model: row.get(8)?,
+        effort: row.get(9)?,
+        created_at: row.get(10)?,
+        ended_at: row.get(11)?,
     })
 }
 
@@ -322,6 +410,8 @@ impl Session {
             context_tokens: context.map(|c| c.tokens),
             context_limit: context.map(|c| c.limit),
             owned_by_bot: self.owned_by_bot(),
+            model: self.model.clone(),
+            effort: self.effort.clone(),
         }
     }
 }
@@ -340,6 +430,8 @@ mod tests {
             topic_id: Some(7),
             status: "idle".into(),
             status_message_id: None,
+            model: Some("opus".into()),
+            effort: None,
             created_at: 0,
             ended_at: None,
         }
@@ -370,6 +462,19 @@ mod tests {
     }
 
     #[test]
+    fn retomar_uma_sessao_encerrada_a_traz_de_volta() {
+        let st = Store::open_memory().unwrap();
+        st.upsert(&sessao("s1")).unwrap();
+        st.end("s1").unwrap();
+        assert!(st.live().unwrap().is_empty());
+
+        st.upsert(&sessao("s1")).unwrap();
+        let viva = st.get("s1").unwrap().unwrap();
+        assert!(viva.ended_at.is_none(), "a sessão precisa voltar viva");
+        assert_eq!(st.live().unwrap().len(), 1);
+    }
+
+    #[test]
     fn busca_por_topico_ignora_encerrada() {
         let st = Store::open_memory().unwrap();
         st.upsert(&sessao("s1")).unwrap();
@@ -397,6 +502,20 @@ mod tests {
         assert!(v.ended_at.is_some() && v.topic_id.is_none());
         assert_eq!(st.by_topic(7).unwrap().unwrap().session_id, "nova");
         assert_eq!(st.drain("nova").unwrap().len(), 1, "a fila seguiu junto");
+    }
+
+    #[test]
+    fn topico_vazado_aparece_ate_ser_limpo() {
+        let st = Store::open_memory().unwrap();
+        st.upsert(&sessao("s1")).unwrap();
+        assert!(
+            st.topicos_vazados().unwrap().is_empty(),
+            "sessão viva não vaza"
+        );
+        st.end("s1").unwrap();
+        assert_eq!(st.topicos_vazados().unwrap(), vec![("s1".to_string(), 7)]);
+        st.clear_topic("s1").unwrap();
+        assert!(st.topicos_vazados().unwrap().is_empty());
     }
 
     #[test]

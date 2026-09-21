@@ -93,6 +93,14 @@ async fn trata(app: Arc<App>, u: Update) -> anyhow::Result<()> {
             // Responder sempre, mesmo em erro: sem isso o botão fica rodando no celular.
             let _ = app.tg.bot().answer_callback_query(q.id.clone()).await;
             let dado = q.data.clone();
+            // O tópico da mensagem do teclado diz de qual sessão se trata, então o dado do botão
+            // não precisa carregar o id (e não caberia: o limite é 64 bytes).
+            let topico = q
+                .message
+                .as_ref()
+                .and_then(|m| m.regular_message())
+                .and_then(|m| m.thread_id)
+                .map(|t| t.0.0);
             // Teclado do General já cumpriu o papel ao ser tocado: some na hora. O card de
             // pergunta e o de permissão NÃO entram aqui: quem os apaga é o `cleanup_ask`, e só
             // depois que a resposta chega ao Claude.
@@ -102,7 +110,7 @@ async fn trata(app: Arc<App>, u: Update) -> anyhow::Result<()> {
                 app.tg.delete(msg.id()).await;
             }
             if let Some(dado) = dado.as_deref() {
-                botao(&app, dado).await?;
+                botao(&app, dado, topico, q.message.as_ref().map(|m| m.id())).await?;
             }
             Ok(())
         }
@@ -127,6 +135,51 @@ async fn em_topico(app: &Arc<App>, topic: i32, texto: &str, de: &str) -> anyhow:
         }
         "/ls" | "/sessoes" => {
             let _ = app.tg.send_html(Some(topic), &lista(app)?).await;
+            Ok(())
+        }
+        // `/model` e `/effort` são comandos do frontend do Claude Code, e nenhum evento consegue
+        // dispará-los. O que dá para fazer sem digitar no terminal é reiniciar a sessão com
+        // `--resume`, que volta com o mesmo contexto e a flag nova.
+        "/model" | "/modelo" | "/effort" | "/esforco" | "/esforço" => {
+            let Some(s) = app.session_for_topic(topic).await? else {
+                let _ = app
+                    .tg
+                    .send_html(Some(topic), "Este tópico não tem sessão viva.")
+                    .await;
+                return Ok(());
+            };
+            let e_modelo = comando.starts_with("/mod");
+            let valor = texto.split_whitespace().nth(1);
+            let Some(valor) = valor else {
+                // Sem argumento, a escolha vira teclado: família e depois versão.
+                if e_modelo {
+                    let _ = app
+                        .tg
+                        .send_keyboard(Some(topic), ESCOLHA_FAMILIA, teclado_familias(app))
+                        .await;
+                } else {
+                    let botoes = ESFORCOS
+                        .iter()
+                        .map(|n| (n.to_string(), format!("ef:{n}")))
+                        .collect();
+                    let _ = app
+                        .tg
+                        .send_keyboard(Some(topic), "⚡ Qual nível de esforço?", coluna(botoes))
+                        .await;
+                }
+                return Ok(());
+            };
+            let (model, effort) = if e_modelo {
+                (Some(valor), None)
+            } else {
+                (None, Some(valor))
+            };
+            if let Err(e) = app.relaunch(&s.session_id, model, effort).await {
+                let _ = app
+                    .tg
+                    .send_html(Some(topic), &format!("⚠️ {}", escape_html(&e.to_string())))
+                    .await;
+            }
             Ok(())
         }
         _ => {
@@ -159,11 +212,13 @@ async fn no_general(app: &Arc<App>, texto: &str) -> anyhow::Result<()> {
                     .await;
                 return Ok(());
             }
-            // Com argumento, abre direto; sem, mostra o seletor.
+            // Com argumento, abre direto; sem, mostra o seletor. Palavra que for nome de
+            // modelo ou nível de esforço sai do nome do projeto e vira flag.
             if !resto.is_empty() {
-                let alvo = resto.join(" ");
+                let (alvo, model, effort) = separa_flags(&resto);
+                let (model, effort) = (model.as_deref(), effort.as_deref());
                 match achar(&projetos, &alvo) {
-                    Some(p) => return abrir(app, &p).await,
+                    Some(p) => return escolhe_retomada(app, &p, model, effort).await,
                     None => {
                         let _ = app
                             .tg
@@ -237,10 +292,11 @@ async fn no_general(app: &Arc<App>, texto: &str) -> anyhow::Result<()> {
                     None,
                     "<b>lukadispatch</b>\n\n\
                      /new: abre uma sessão (mostra os projetos)\n\
-                     /new &lt;projeto&gt;: abre direto\n\
+                     /new &lt;projeto&gt; [opus|sonnet|fable] [high|max]: abre direto\n\
                      /ls: lista as sessões vivas\n\
                      /kill &lt;id&gt;: fecha uma sessão\n\n\
-                     Cada sessão vira um tópico. Fale com ela lá dentro; /kill no tópico fecha e apaga.",
+                     Cada sessão vira um tópico. Fale com ela lá dentro; /kill no tópico fecha e apaga.\n\
+                     Dentro do tópico: /model e /effort reiniciam a sessão com o contexto inteiro.",
                     TTL_TECLADO,
                 )
                 .await;
@@ -260,7 +316,12 @@ async fn no_general(app: &Arc<App>, texto: &str) -> anyhow::Result<()> {
     }
 }
 
-async fn botao(app: &Arc<App>, dado: &str) -> anyhow::Result<()> {
+async fn botao(
+    app: &Arc<App>,
+    dado: &str,
+    topico: Option<i32>,
+    msg: Option<teloxide::types::MessageId>,
+) -> anyhow::Result<()> {
     if let Some(idx) = dado.strip_prefix("n:") {
         // O dado do botão é índice, e não caminho, porque callback_data do Telegram só tem 64
         // bytes: caminho de projeto não cabe.
@@ -272,18 +333,204 @@ async fn botao(app: &Arc<App>, dado: &str) -> anyhow::Result<()> {
                 .await;
             return Ok(());
         };
-        return abrir(app, p).await;
+        if let Some(msg) = msg {
+            app.tg.delete(msg).await;
+        }
+        return escolhe_retomada(app, p, None, None).await;
+    }
+
+    // Segunda etapa do /new: continuar a conversa anterior, ou começar do zero.
+    if let Some(resto) = dado.strip_prefix("c:") {
+        let (idx, sessao) = resto.split_once(':').unwrap_or((resto, ""));
+        let projetos = app.cfg.projects_available();
+        let Some(p) = idx.parse::<usize>().ok().and_then(|i| projetos.get(i)) else {
+            return Ok(());
+        };
+        if let Some(msg) = msg {
+            app.tg.delete(msg).await;
+        }
+        return abrir(app, p, None, None, Some(sessao)).await;
+    }
+    if let Some(idx) = dado.strip_prefix("z:") {
+        let projetos = app.cfg.projects_available();
+        let Some(p) = idx.parse::<usize>().ok().and_then(|i| projetos.get(i)) else {
+            return Ok(());
+        };
+        if let Some(msg) = msg {
+            app.tg.delete(msg).await;
+        }
+        return abrir(app, p, None, None, None).await;
     }
     // Card de pergunta ou de permissão.
     if dado.starts_with("a:") || dado.starts_with("p:") {
         return app.on_card_touch(dado).await;
     }
+
+    // Escolha de modelo, primeira etapa: a família vira a lista de versões, na mesma mensagem.
+    if let Some(familia) = dado.strip_prefix("mf:") {
+        let (Some(topico), Some(msg)) = (topico, msg) else {
+            return Ok(());
+        };
+        if familia == "*" {
+            let _ = app
+                .tg
+                .edit_keyboard(msg, ESCOLHA_FAMILIA, teclado_familias(app))
+                .await;
+            return Ok(());
+        }
+        let modelos = app.modelos();
+        let botoes: Vec<(String, String)> = modelos
+            .iter()
+            .filter(|m| m.familia == familia)
+            .map(|m| (m.rotulo(), format!("mv:{}", m.id)))
+            .chain(std::iter::once(("« famílias".into(), "mf:*".into())))
+            .collect();
+        let _ = app
+            .tg
+            .edit_keyboard(
+                msg,
+                &format!(
+                    "🧠 <b>{}</b>: qual versão?\n<i>o tópico continua o mesmo, o contexto também</i>",
+                    escape_html(familia)
+                ),
+                coluna(botoes),
+            )
+            .await;
+        let _ = topico;
+        return Ok(());
+    }
+
+    // Segunda etapa: a versão escolhida reinicia a sessão.
+    if let Some(id) = dado.strip_prefix("mv:") {
+        return troca(app, topico, msg, Some(id), None).await;
+    }
+    if let Some(nivel) = dado.strip_prefix("ef:") {
+        return troca(app, topico, msg, None, Some(nivel)).await;
+    }
     Ok(())
 }
 
-async fn abrir(app: &Arc<App>, p: &Project) -> anyhow::Result<()> {
-    info!(projeto = %p.name, "abrindo sessão a pedido do Telegram");
-    if let Err(e) = app.create_session(p).await {
+const ESCOLHA_FAMILIA: &str = "🧠 Qual família?\n<i>ou mande o nome inteiro, por exemplo</i> <code>/model claude-opus-4-8[1m]</code>";
+
+fn teclado_familias(app: &Arc<App>) -> teloxide::types::InlineKeyboardMarkup {
+    let modelos = app.modelos();
+    let botoes: Vec<(String, String)> = ld_core::models::por_familia(&modelos)
+        .into_iter()
+        .map(|(familia, _)| {
+            let rotulo = familia
+                .chars()
+                .next()
+                .map(|c| c.to_uppercase().to_string() + &familia[1..])
+                .unwrap_or_else(|| familia.clone());
+            (rotulo, format!("mf:{familia}"))
+        })
+        .collect();
+    coluna(botoes)
+}
+
+/// Aplica a troca e limpa o teclado.
+async fn troca(
+    app: &Arc<App>,
+    topico: Option<i32>,
+    msg: Option<teloxide::types::MessageId>,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> anyhow::Result<()> {
+    let Some(topico) = topico else { return Ok(()) };
+    if let Some(msg) = msg {
+        app.tg.delete(msg).await;
+    }
+    let Some(s) = app.session_for_topic(topico).await? else {
+        return Ok(());
+    };
+    if let Err(e) = app.relaunch(&s.session_id, model, effort).await {
+        let _ = app
+            .tg
+            .send_html(Some(topico), &format!("⚠️ {}", escape_html(&e.to_string())))
+            .await;
+    }
+    Ok(())
+}
+
+/// Pergunta se a sessão continua a conversa anterior daquele projeto ou começa do zero.
+///
+/// Só pergunta quando há o que continuar, e quando a conversa anterior não está aberta em outro
+/// lugar: retomar uma sessão que já está rodando geraria duas cópias da mesma conversa.
+async fn escolhe_retomada(
+    app: &Arc<App>,
+    p: &Project,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> anyhow::Result<()> {
+    let anterior = ld_core::transcript::ultima_sessao(&ld_core::paths::claude_dir(), &p.path);
+    let idx = app
+        .cfg
+        .projects_available()
+        .iter()
+        .position(|x| x.path == p.path);
+
+    match (anterior, idx) {
+        (Some(a), Some(idx))
+            if app
+                .store
+                .get(&a.session_id)
+                .ok()
+                .flatten()
+                .is_none_or(|s| s.ended_at.is_some()) =>
+        {
+            let botoes = vec![
+                (
+                    format!("▶️ Continuar ({})", ha_quanto(a.quando)),
+                    format!("c:{idx}:{}", a.session_id),
+                ),
+                ("🆕 Começar do zero".to_string(), format!("z:{idx}")),
+            ];
+            let _ = app
+                .tg
+                .send_keyboard(
+                    None,
+                    &format!(
+                        "<b>{}</b> tem conversa anterior:\n<i>{}</i>",
+                        escape_html(&p.name),
+                        escape_html(&a.resumo)
+                    ),
+                    coluna(botoes),
+                )
+                .await;
+            Ok(())
+        }
+        // Sem histórico (ou com a conversa anterior já aberta): não há escolha a fazer.
+        _ => abrir(app, p, model, effort, None).await,
+    }
+}
+
+fn ha_quanto(epoch: i64) -> String {
+    let agora = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let s = (agora - epoch).max(0);
+    if s < 3600 {
+        return format!("há {}min", s / 60);
+    }
+    if s < 86400 {
+        return format!("há {}h", s / 3600);
+    }
+    format!("há {}d", s / 86400)
+}
+
+async fn abrir(
+    app: &Arc<App>,
+    p: &Project,
+    model: Option<&str>,
+    effort: Option<&str>,
+    retomar: Option<&str>,
+) -> anyhow::Result<()> {
+    // O que veio no comando ganha do padrão do projeto, que ganha do padrão do Claude Code.
+    let model = model.or(p.model.as_deref());
+    let effort = effort.or(p.effort.as_deref());
+    info!(projeto = %p.name, ?model, ?effort, "abrindo sessão a pedido do Telegram");
+    if let Err(e) = app.create_session(p, model, effort, retomar).await {
         // Falha de abertura precisa ser lida com calma (costuma trazer o motivo do ai-memory ou
         // do tmux), então vive mais que uma resposta comum antes de sumir.
         app.tg
@@ -299,6 +546,31 @@ async fn abrir(app: &Arc<App>, p: &Project) -> anyhow::Result<()> {
             .await;
     }
     Ok(())
+}
+
+/// Modelos e níveis de esforço que o Claude Code aceita como apelido.
+const MODELOS: [&str; 4] = ["opus", "sonnet", "haiku", "fable"];
+const ESFORCOS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+/// Separa `<projeto> [modelo] [esforço]`, em qualquer ordem depois do nome.
+///
+/// Sem isto, `/new tintim opus` procuraria um projeto chamado "tintim opus". Um projeto que se
+/// chame literalmente "opus" ainda funciona pelo seletor de botões.
+fn separa_flags(palavras: &[&str]) -> (String, Option<String>, Option<String>) {
+    let mut nome = Vec::new();
+    let (mut model, mut effort) = (None, None);
+    for p in palavras {
+        let baixo = p.to_lowercase();
+        // Apelido ("opus") ou nome inteiro ("claude-opus-4-8[1m]"): os dois valem em --model.
+        if model.is_none() && (MODELOS.contains(&baixo.as_str()) || baixo.starts_with("claude-")) {
+            model = Some(baixo);
+        } else if effort.is_none() && ESFORCOS.contains(&baixo.as_str()) {
+            effort = Some(baixo);
+        } else {
+            nome.push(*p);
+        }
+    }
+    (nome.join(" "), model, effort)
 }
 
 fn achar(projetos: &[Project], alvo: &str) -> Option<Project> {
@@ -326,10 +598,16 @@ fn lista(app: &Arc<App>) -> anyhow::Result<String> {
             _ => String::new(),
         };
         let dono = if x.owned_by_bot { "🤖" } else { "💻" };
+        let modelo = x
+            .model
+            .as_deref()
+            .map(|m| format!(" · {}", escape_html(m)))
+            .unwrap_or_default();
         s.push_str(&format!(
-            "\n{dono} <b>{}</b> · {}{}\n<code>{}</code>",
+            "\n{dono} <b>{}</b> · {}{}{}\n<code>{}</code>",
             escape_html(&x.project),
             escape_html(&x.status),
+            modelo,
             ctx,
             &x.session_id[..8.min(x.session_id.len())],
         ));
@@ -346,7 +624,39 @@ mod tests {
             name: nome.into(),
             path: caminho.into(),
             permission_mode: None,
+            model: None,
+            effort: None,
         }
+    }
+
+    #[test]
+    fn separa_modelo_e_esforco_do_nome() {
+        let (nome, m, e) = separa_flags(&["tintim", "opus", "high"]);
+        assert_eq!(nome, "tintim");
+        assert_eq!(m.as_deref(), Some("opus"));
+        assert_eq!(e.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn ordem_das_flags_nao_importa() {
+        let (nome, m, e) = separa_flags(&["max", "meu", "projeto", "Sonnet"]);
+        assert_eq!(nome, "meu projeto");
+        assert_eq!(m.as_deref(), Some("sonnet"));
+        assert_eq!(e.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn aceita_nome_inteiro_de_modelo() {
+        let (nome, m, _) = separa_flags(&["tintim", "claude-opus-4-8[1m]"]);
+        assert_eq!(nome, "tintim");
+        assert_eq!(m.as_deref(), Some("claude-opus-4-8[1m]"));
+    }
+
+    #[test]
+    fn sem_flag_o_nome_fica_inteiro() {
+        let (nome, m, e) = separa_flags(&["site", "energia", "vital"]);
+        assert_eq!(nome, "site energia vital");
+        assert!(m.is_none() && e.is_none());
     }
 
     #[test]

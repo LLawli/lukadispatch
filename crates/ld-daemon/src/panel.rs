@@ -114,6 +114,14 @@ fn desenha(store: &Store) -> anyhow::Result<String> {
         ));
 
         let mut detalhe = Vec::new();
+        if let Some(m) = &sessao.model {
+            let esforco = sessao
+                .effort
+                .as_deref()
+                .map(|e| format!("/{e}"))
+                .unwrap_or_default();
+            detalhe.push(format!("{}{esforco}", escape_html(m)));
+        }
         if let Some(ctx) = sessao
             .transcript_path
             .as_deref()

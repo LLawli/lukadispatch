@@ -54,6 +54,7 @@ pub fn run(evento: &str) -> i32 {
                 event: EventKind::ToolStart {
                     label: label_for_tool(&tool, &entrada),
                     tool,
+                    effort: texto(&ev, "effort"),
                 },
             }));
         }
@@ -80,6 +81,26 @@ pub fn run(evento: &str) -> i32 {
             client::send(&Request::Event(SessionEvent {
                 session_id,
                 event: EventKind::Notification { text: texto_ev },
+            }));
+        }
+
+        "prompt" => {
+            let Some(texto_prompt) = texto(&ev, "user_prompt") else {
+                return 0;
+            };
+            client::send(&Request::Event(SessionEvent {
+                session_id,
+                event: EventKind::UserPrompt { text: texto_prompt },
+            }));
+        }
+
+        "model-switch" => {
+            let Some(para) = texto(&ev, "to_model") else {
+                return 0;
+            };
+            client::send(&Request::Event(SessionEvent {
+                session_id,
+                event: EventKind::ModelSwitch { model: para },
             }));
         }
 

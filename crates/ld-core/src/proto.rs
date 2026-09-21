@@ -68,10 +68,20 @@ pub enum Request {
         text: String,
     },
 
+    /// Troca modelo ou esforço reiniciando a sessão com `--resume` (o contexto fica).
+    Relaunch {
+        session_id: String,
+        model: Option<String>,
+        effort: Option<String>,
+    },
+
     /// Comandos administrativos, usados pelo CLI local (`lukadispatch ls|kill|new`).
     ListSessions,
     NewSession {
         project: String,
+        /// Continuar a última conversa daquele projeto em vez de começar do zero.
+        #[serde(default)]
+        resume_last: bool,
     },
     Kill {
         session_id: String,
@@ -108,9 +118,14 @@ pub struct SessionEvent {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EventKind {
     /// Uma ferramenta vai rodar. `label` já vem pronto para leitura humana.
+    ///
+    /// `effort` vem junto porque o evento de ferramenta é o único que carrega o nível em vigor,
+    /// e é assim que o painel percebe um `/effort` digitado no teclado do PC.
     ToolStart {
         tool: String,
         label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort: Option<String>,
     },
     ToolEnd {
         tool: String,
@@ -124,6 +139,18 @@ pub enum EventKind {
     },
     Failure {
         text: String,
+    },
+    /// Você digitou direto no terminal da sessão (hook `UserPromptSubmit`).
+    ///
+    /// Sem isto, quem está no celular vê a resposta aparecer do nada, sem a pergunta. O daemon
+    /// descarta o eco do que ele mesmo acabou de entregar pelo Telegram.
+    UserPrompt {
+        text: String,
+    },
+    /// O modelo da sessão mudou (hook `PostModelSwitch`). Acontece quando você usa `/model` no
+    /// teclado do PC; a troca pedida pelo Telegram já passa pelo banco antes.
+    ModelSwitch {
+        model: String,
     },
 }
 
@@ -200,6 +227,8 @@ pub struct SessionSummary {
     pub context_tokens: Option<u64>,
     pub context_limit: Option<u64>,
     pub owned_by_bot: bool,
+    pub model: Option<String>,
+    pub effort: Option<String>,
 }
 
 /// Serializa uma mensagem do protocolo como uma linha NDJSON (com o `\n` no fim).
@@ -230,6 +259,7 @@ mod tests {
                 event: EventKind::ToolStart {
                     tool: "Bash".into(),
                     label: "cargo test".into(),
+                    effort: Some("high".into()),
                 },
             }),
         ];
@@ -286,6 +316,8 @@ mod tests {
                     context_tokens: Some(10),
                     context_limit: Some(200_000),
                     owned_by_bot: true,
+                    model: Some("opus".into()),
+                    effort: None,
                 }],
             },
         ];
