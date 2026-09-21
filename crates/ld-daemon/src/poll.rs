@@ -48,8 +48,15 @@ async fn trata(app: Arc<App>, u: Update) -> anyhow::Result<()> {
     match u.kind {
         UpdateKind::Message(msg) => {
             // Autorização primeiro, sempre. Sem remetente conhecido, nem lemos o texto.
-            let autor = msg.from.as_ref().map(|u| u.id.0 as i64);
-            let Some(autor) = autor else { return Ok(()) };
+            let Some(quem) = msg.from.as_ref() else {
+                return Ok(());
+            };
+            // Mensagem de serviço do próprio bot (criar tópico gera uma). Sai em silêncio: cair
+            // no aviso de allowlist encheria o log de alarme falso a cada sessão nova.
+            if quem.is_bot {
+                return Ok(());
+            }
+            let autor = quem.id.0 as i64;
             if !app.cfg.allows(autor) {
                 warn!(autor, "update de usuário fora da allowlist, descartado");
                 return Ok(());
@@ -60,11 +67,7 @@ async fn trata(app: Arc<App>, u: Update) -> anyhow::Result<()> {
             let Some(texto) = msg.text() else {
                 return Ok(());
             };
-            let nome = msg
-                .from
-                .as_ref()
-                .map(|u| u.first_name.clone())
-                .unwrap_or_else(|| "luka".into());
+            let nome = quem.first_name.clone();
 
             match msg.thread_id {
                 Some(t) => em_topico(&app, t.0.0, texto, &nome).await,
