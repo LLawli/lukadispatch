@@ -106,6 +106,10 @@ pub fn historico(caminho: &Path, limite: usize) -> Vec<Fala> {
         return Vec::new();
     };
     let mut falas: Vec<Fala> = Vec::new();
+    // A resposta a um prompt do sistema também não é diálogo: é o agente respondendo a algo que
+    // você nunca escreveu ("Monitor rearmado. Aguardando."). Some junto com o prompt que a
+    // provocou, senão o replay mostra resposta sem pergunta.
+    let mut pular_proxima_resposta = false;
     for linha in conteudo.lines() {
         let Ok(v) = serde_json::from_str::<Value>(linha) else {
             continue;
@@ -121,16 +125,90 @@ pub fn historico(caminho: &Path, limite: usize) -> Vec<Fala> {
         let Some(msg) = v.get("message") else {
             continue;
         };
-        let texto = texto_da_mensagem(msg);
-        if texto.trim().is_empty() {
+        let bruto = texto_da_mensagem(msg);
+        let Some(texto) = limpa(&bruto) else {
+            // Só prompt do sistema silencia a resposta seguinte; entrada vazia ou ruído interno
+            // não, porque eles não provocam resposta nenhuma.
+            pular_proxima_resposta = papel == Papel::Usuario && e_do_sistema(&bruto);
+            continue;
+        };
+        if papel == Papel::Assistente && pular_proxima_resposta {
+            pular_proxima_resposta = false;
             continue;
         }
+        pular_proxima_resposta = false;
         falas.push(Fala { papel, texto });
     }
     if falas.len() > limite {
         falas.drain(..falas.len() - limite);
     }
     falas
+}
+
+/// Primeira linha de todo prompt que o daemon injeta na sessão.
+///
+/// Mora aqui, e não no daemon, porque quem filtra por ela é este módulo: se as duas pontas
+/// tivessem cópias separadas do texto, uma mudança de redação faria os prompts voltarem a
+/// aparecer no replay como se fossem fala sua, e em silêncio.
+pub const MARCA_SISTEMA: &str =
+    "«lukadispatch: mensagem automática do sistema, não é o Luka falando»";
+
+/// O prefixo basta para reconhecer a marca, mesmo que o resto da frase mude.
+const PREFIXO_MARCA: &str = "«lukadispatch:";
+
+/// Aberturas dos prompts injetados antes de a marca existir.
+///
+/// Transcript é histórico: uma conversa gravada semana passada não ganha marca retroativa. Sem
+/// esta lista, retomar uma sessão antiga mostraria os prompts do daemon como se fossem fala sua.
+const ABERTURAS_ANTIGAS: [&str; 3] = [
+    "Você está rodando dentro do lukadispatch",
+    "A sua sessão foi reiniciada pelo lukadispatch",
+    "Esta conversa foi retomada pelo lukadispatch",
+];
+
+/// Texto que o próprio lukadispatch injetou como prompt.
+fn e_do_sistema(bruto: &str) -> bool {
+    let texto = bruto.trim();
+    texto.starts_with(PREFIXO_MARCA) || ABERTURAS_ANTIGAS.iter().any(|a| texto.starts_with(a))
+}
+
+/// Transforma o texto bruto de uma entrada em fala de gente, ou descarta.
+///
+/// Três coisas entram no transcript como se fossem fala do usuário e não são:
+///
+/// 1. Os prompts que o próprio lukadispatch injeta (bootstrap, re-arme). Saem pela marca.
+/// 2. As notificações de evento do Monitor. Essas, na verdade, CARREGAM a mensagem que você
+///    mandou pelo Telegram, dentro de um `<event>` em JSON: o texto é extraído de lá, senão o
+///    replay de uma sessão do bot não teria nenhuma fala sua.
+/// 3. Avisos internos do harness (`<system-reminder>`, outras `<task-notification>`), que são
+///    ruído para quem lê no celular.
+fn limpa(bruto: &str) -> Option<String> {
+    let texto = bruto.trim();
+    if texto.is_empty() || texto.starts_with(PREFIXO_MARCA) {
+        return None;
+    }
+    if ABERTURAS_ANTIGAS.iter().any(|a| texto.starts_with(a)) {
+        return None;
+    }
+    if texto.starts_with("<task-notification>") {
+        return mensagem_do_evento(texto);
+    }
+    if texto.starts_with("<system-reminder>") || texto.starts_with("<command-name>") {
+        return None;
+    }
+    Some(texto.to_string())
+}
+
+/// Tira a mensagem de dentro de uma notificação de evento do Monitor.
+fn mensagem_do_evento(texto: &str) -> Option<String> {
+    let inicio = texto.find("<event>")? + "<event>".len();
+    let fim = texto[inicio..].find("</event>")? + inicio;
+    let v: Value = serde_json::from_str(texto[inicio..fim].trim()).ok()?;
+    if v.get("kind").and_then(Value::as_str) != Some("message") {
+        return None;
+    }
+    let t = v.get("text").and_then(Value::as_str)?.trim();
+    (!t.is_empty()).then(|| t.to_string())
 }
 
 fn texto_da_mensagem(msg: &Value) -> String {
@@ -179,6 +257,13 @@ mod tests {
     ];
 
     #[test]
+    fn a_marca_casa_com_o_prefixo_que_o_filtro_usa() {
+        // As duas constantes precisam andar juntas: se a frase mudar e o prefixo não, os prompts
+        // do daemon voltam a aparecer como fala do usuário sem ninguém perceber.
+        assert!(MARCA_SISTEMA.starts_with(PREFIXO_MARCA));
+    }
+
+    #[test]
     fn historico_traz_so_o_dialogo() {
         let dir = tempfile::tempdir().unwrap();
         let p = transcript(dir.path(), "a.jsonl", &CONVERSA);
@@ -188,6 +273,104 @@ mod tests {
         assert_eq!(falas[0].texto, "oi, tudo bem?");
         assert_eq!(falas[1].texto, "tudo, e você?");
         assert_eq!(falas[3].texto, "rodei, passaram");
+    }
+
+    #[test]
+    fn prompt_injetado_pelo_daemon_nao_e_fala_do_usuario() {
+        let dir = tempfile::tempdir().unwrap();
+        let bootstrap = serde_json::json!({
+            "type": "user",
+            "message": {"content": format!("{MARCA_SISTEMA}\nVocê está rodando dentro do lukadispatch...")}
+        });
+        let p = transcript(
+            dir.path(),
+            "a.jsonl",
+            &[
+                &bootstrap.to_string(),
+                // A resposta a ele ("Monitor armado.") também não é diálogo e some junto.
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Monitor armado."}]}}"#,
+                r#"{"type":"user","message":{"content":"agora sim, roda os testes"}}"#,
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"rodei"}]}}"#,
+            ],
+        );
+        let falas = historico(&p, 50);
+        assert_eq!(falas.len(), 2, "só a conversa de verdade: {falas:?}");
+        assert_eq!(falas[0].texto, "agora sim, roda os testes");
+        assert_eq!(falas[1].texto, "rodei");
+    }
+
+    #[test]
+    fn prompt_antigo_sem_marca_tambem_fica_de_fora() {
+        let dir = tempfile::tempdir().unwrap();
+        let linha = serde_json::json!({
+            "type": "user",
+            "message": {"content": "Você está rodando dentro do lukadispatch. O seu usuário (Luka) fala com você pelo tópico..."}
+        });
+        let p = transcript(dir.path(), "a.jsonl", &[&linha.to_string()]);
+        assert!(historico(&p, 50).is_empty());
+    }
+
+    #[test]
+    fn resposta_a_prompt_do_sistema_some_junto_com_ele() {
+        let dir = tempfile::tempdir().unwrap();
+        let sistema = serde_json::json!({
+            "type": "user",
+            "message": {"content": format!("{MARCA_SISTEMA}\nArme o monitor de novo.")}
+        });
+        let resposta = serde_json::json!({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "Monitor rearmado. Aguardando."}]}
+        });
+        let depois = serde_json::json!({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "rodei, passaram"}]}
+        });
+        let p = transcript(
+            dir.path(),
+            "a.jsonl",
+            &[
+                &sistema.to_string(),
+                &resposta.to_string(),
+                &depois.to_string(),
+            ],
+        );
+        let falas = historico(&p, 50);
+        assert_eq!(falas.len(), 1, "só a segunda resposta é diálogo: {falas:?}");
+        assert_eq!(falas[0].texto, "rodei, passaram");
+    }
+
+    #[test]
+    fn evento_do_monitor_vira_a_mensagem_que_estava_dentro() {
+        let dir = tempfile::tempdir().unwrap();
+        // O conteúdo é montado com `json!` de propósito: escrever este aninhamento à mão, com
+        // JSON dentro de XML dentro de JSON, é como o teste anterior nasceu quebrado.
+        let conteudo = "<task-notification>\n<task-id>x</task-id>\n<summary>Monitor event</summary>\n<event>{\"kind\":\"message\",\"text\":\"roda os testes\",\"from\":\"Luka\",\"at\":0}</event>\n</task-notification>";
+        let linha = serde_json::json!({"type": "user", "message": {"content": conteudo}});
+        let p = transcript(dir.path(), "a.jsonl", &[&linha.to_string()]);
+
+        let falas = historico(&p, 50);
+        assert_eq!(falas.len(), 1, "a mensagem estava dentro do evento");
+        assert_eq!(falas[0].papel, Papel::Usuario);
+        assert_eq!(falas[0].texto, "roda os testes");
+    }
+
+    #[test]
+    fn notificacao_que_nao_e_mensagem_fica_de_fora() {
+        let dir = tempfile::tempdir().unwrap();
+        let evento = serde_json::json!({
+            "type": "user",
+            "message": {"content": "<task-notification>\n<event>{\"kind\":\"exit\",\"code\":0}</event>\n</task-notification>"}
+        });
+        let lembrete = serde_json::json!({
+            "type": "user",
+            "message": {"content": "<system-reminder>lembrete interno</system-reminder>"}
+        });
+        let p = transcript(
+            dir.path(),
+            "a.jsonl",
+            &[&evento.to_string(), &lembrete.to_string()],
+        );
+        assert!(historico(&p, 50).is_empty());
     }
 
     #[test]

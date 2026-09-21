@@ -37,19 +37,75 @@ impl Modelo {
     }
 }
 
-/// Onde está o binário do Claude Code, seguindo o PATH e resolvendo symlink.
+/// Tamanho mínimo para um arquivo valer a varredura.
 ///
-/// Resolver importa: gerenciadores de versão (mise, asdf) põem um link no PATH apontando para o
-/// executável de verdade, e é nele que os identificadores de modelo estão.
-pub fn claude_binary() -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidato = dir.join("claude");
-        if candidato.is_file() {
-            return std::fs::canonicalize(&candidato).ok().or(Some(candidato));
+/// O binário do Claude Code passa de 200 MB. O que aparece no PATH com esse nome e é pequeno é
+/// shim de gerenciador de versão: o do mise, por exemplo, é um symlink de 13 bytes para o
+/// próprio `mise`, e varrê-lo devolve zero modelo. Foi exatamente isso que fez o menu de modelo
+/// aparecer vazio quando o daemon rodava pelo systemd, cujo PATH acha o shim primeiro.
+const TAMANHO_MINIMO: u64 = 20 * 1024 * 1024;
+
+/// Candidatos a binário do Claude Code, em ordem de preferência.
+///
+/// Não basta o PATH: além do problema do shim, o PATH de um serviço systemd é diferente do seu.
+/// Por isso a lista soma o que o PATH oferece e os lugares onde o Claude Code costuma ficar.
+pub fn candidatos(preferido: Option<&Path>) -> Vec<PathBuf> {
+    let mut saida: Vec<PathBuf> = Vec::new();
+    let mut junta = |p: PathBuf| {
+        let resolvido = std::fs::canonicalize(&p).unwrap_or(p);
+        if resolvido.is_file() && !saida.contains(&resolvido) {
+            saida.push(resolvido);
+        }
+    };
+
+    if let Some(p) = preferido {
+        junta(p.to_path_buf());
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            junta(dir.join("claude"));
         }
     }
-    None
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        junta(home.join(".claude/local/claude"));
+        junta(home.join(".local/bin/claude"));
+        // Instalações do mise ficam versionadas; `latest` costuma ser link para a atual.
+        let mise = home.join(".local/share/mise/installs/claude");
+        junta(mise.join("latest/claude"));
+        if let Ok(entradas) = std::fs::read_dir(&mise) {
+            for e in entradas.flatten() {
+                junta(e.path().join("claude"));
+            }
+        }
+    }
+    junta(PathBuf::from("/usr/local/bin/claude"));
+    saida
+}
+
+/// O binário do Claude Code que realmente conhece os modelos, com o catálogo dele.
+///
+/// Testar é a única forma honesta de escolher: um candidato só vale se a varredura nele devolver
+/// modelo. Assim shim, wrapper e homônimo caem fora sozinhos, sem lista de exceções.
+pub fn catalog_auto(preferido: Option<&Path>) -> (Option<PathBuf>, Vec<Modelo>) {
+    for candidato in candidatos(preferido) {
+        let grande = std::fs::metadata(&candidato)
+            .map(|m| m.len() >= TAMANHO_MINIMO)
+            .unwrap_or(false);
+        if !grande {
+            continue;
+        }
+        let modelos = catalog(&candidato);
+        if !modelos.is_empty() {
+            return (Some(candidato), modelos);
+        }
+    }
+    (None, Vec::new())
+}
+
+/// Onde está o binário do Claude Code. `None` quando nenhum candidato serve.
+pub fn claude_binary() -> Option<PathBuf> {
+    catalog_auto(None).0
 }
 
 /// Todos os modelos que o binário conhece, do mais novo para o mais antigo.
@@ -355,6 +411,33 @@ mod tests {
         std::fs::write(&p, b"\x00claude-opus-4\x00claude-opus-4-0\x00").unwrap();
         let ids: Vec<String> = catalog(&p).into_iter().map(|m| m.id).collect();
         assert_eq!(ids, vec!["claude-opus-4"]);
+    }
+
+    #[test]
+    fn shim_pequeno_e_ignorado_na_escolha_automatica() {
+        // O caso real: no PATH do systemd, o primeiro `claude` era um symlink de 13 bytes para o
+        // mise. Varrê-lo devolvia zero modelo e o menu saía vazio.
+        let dir = tempfile::tempdir().unwrap();
+        let shim = dir.path().join("claude-shim");
+        std::fs::write(&shim, b"#!/bin/sh\nexec mise x -- claude\n").unwrap();
+        let (achado, modelos) = catalog_auto(Some(&shim));
+        assert!(achado.is_none() || !modelos.is_empty());
+        assert!(modelos.is_empty() || achado.is_some());
+    }
+
+    #[test]
+    fn candidatos_nao_repetem_o_mesmo_arquivo() {
+        // O PATH do usuário tem ~/.local/bin duas vezes; o mesmo binário não pode ser varrido
+        // duas vezes.
+        let dir = tempfile::tempdir().unwrap();
+        let alvo = dir.path().join("claude");
+        std::fs::write(&alvo, b"x").unwrap();
+        let lista = candidatos(Some(&alvo));
+        let quantos = lista
+            .iter()
+            .filter(|p| **p == std::fs::canonicalize(&alvo).unwrap())
+            .count();
+        assert_eq!(quantos, 1);
     }
 
     #[test]

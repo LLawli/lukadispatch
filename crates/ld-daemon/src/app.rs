@@ -248,22 +248,37 @@ impl App {
 
     /// Catálogo de modelos, relido só quando o binário do Claude Code muda.
     pub fn modelos(&self) -> Vec<ld_core::models::Modelo> {
-        let Some(bin) = ld_core::models::claude_binary() else {
-            return Vec::new();
-        };
-        let data = std::fs::metadata(&bin)
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::UNIX_EPOCH);
+        let preferido = self.cfg.claude_binary.as_deref().map(std::path::Path::new);
+        // A data do binário é a chave do cache, então atualizar o Claude Code derruba o cache
+        // sozinho. Sem binário conhecido ainda, tenta de novo a cada chamada.
+        let data_atual = preferido
+            .and_then(|p| std::fs::metadata(p).ok())
+            .and_then(|m| m.modified().ok());
 
-        let mut cache = self.catalogo.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((quando, modelos)) = cache.as_ref()
-            && *quando == data
         {
-            return modelos.clone();
+            let cache = self.catalogo.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((quando, modelos)) = cache.as_ref()
+                && !modelos.is_empty()
+                && data_atual.is_none_or(|d| d == *quando)
+            {
+                return modelos.clone();
+            }
         }
-        let modelos = ld_core::models::catalog(&bin);
-        info!(quantos = modelos.len(), binario = %bin.display(), "catálogo de modelos lido");
-        *cache = Some((data, modelos.clone()));
+
+        let (achado, modelos) = ld_core::models::catalog_auto(preferido);
+        match &achado {
+            Some(bin) => {
+                info!(quantos = modelos.len(), binario = %bin.display(), "catálogo de modelos lido")
+            }
+            None => warn!(
+                "não achei um binário do Claude Code com modelos dentro;                  aponte `claude_binary` no config.toml"
+            ),
+        }
+        let data = achado
+            .and_then(|b| std::fs::metadata(b).ok())
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        *self.catalogo.lock().unwrap_or_else(|e| e.into_inner()) = Some((data, modelos.clone()));
         modelos
     }
 
@@ -362,6 +377,12 @@ impl App {
                 .join(format!("{session_id}.jsonl")),
         };
         let falas = ld_core::transcript::historico(&caminho, self.cfg.history_lines);
+        info!(
+            sessao = %session_id,
+            falas = falas.len(),
+            transcript = %caminho.display(),
+            "histórico publicado no tópico"
+        );
         if falas.is_empty() {
             return;
         }

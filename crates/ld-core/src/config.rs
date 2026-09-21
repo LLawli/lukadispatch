@@ -29,6 +29,9 @@ pub struct Config {
     pub trust_projects: bool,
     /// Quantas falas do histórico o tópico recebe ao retomar uma conversa.
     pub history_lines: usize,
+    /// Caminho do binário do Claude Code, quando a descoberta automática não servir.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claude_binary: Option<String>,
 }
 
 impl Default for Config {
@@ -40,6 +43,7 @@ impl Default for Config {
             default_permission_mode: "auto".into(),
             trust_projects: true,
             history_lines: 8,
+            claude_binary: None,
         }
     }
 }

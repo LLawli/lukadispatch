@@ -64,8 +64,12 @@ pub fn tmux_name(projeto: &str, session_id: &str) -> String {
 /// mensagem por conta própria e inventa um curl; (3) o monitor expira e precisa voltar.
 pub fn bootstrap_prompt(session_id: &str, projeto: &str) -> String {
     let cli = paths::cli();
+    // A marca é a primeira linha de todo prompt injetado: é por ela que o replay sabe que este
+    // texto é do sistema, e não uma fala sua.
+    let marca = ld_core::transcript::MARCA_SISTEMA;
     format!(
-        r#"Você está rodando dentro do lukadispatch. O seu usuário (Luka) fala com você pelo tópico "{projeto}" de um grupo do Telegram, e NÃO por este terminal. Ninguém está lendo esta tela.
+        r#"{marca}
+Você está rodando dentro do lukadispatch. O seu usuário (Luka) fala com você pelo tópico "{projeto}" de um grupo do Telegram, e NÃO por este terminal. Ninguém está lendo esta tela.
 
 Faça agora, nesta ordem, e nada além disso:
 
@@ -92,13 +96,15 @@ Como funciona daqui em diante:
 /// no caminho foi o Monitor, que morre junto com o processo anterior.
 pub fn rearm_prompt(session_id: &str, retomada: bool) -> String {
     let cli = paths::cli();
+    let marca = ld_core::transcript::MARCA_SISTEMA;
     let abertura = if retomada {
         "Esta conversa foi retomada pelo lukadispatch e agora está ligada a um tópico do Telegram. Tudo o que vocês já conversaram continua aqui; o Luka acabou de receber as últimas falas no celular."
     } else {
         "A sua sessão foi reiniciada pelo lukadispatch (troca de modelo ou de esforço). O contexto continua o mesmo; o que se perdeu foi o canal do Telegram."
     };
     format!(
-        r#"{abertura}
+        r#"{marca}
+{abertura}
 
 Faça só isto, agora:
 
@@ -360,6 +366,14 @@ mod tests {
             primeiro_erro(std::path::Path::new("/nao/existe.log")),
             "sem saída registrada"
         );
+    }
+
+    #[test]
+    fn todo_prompt_injetado_leva_a_marca() {
+        // Sem ela, o replay mostraria estes textos como se você os tivesse escrito.
+        assert!(bootstrap_prompt("sid", "proj").starts_with(ld_core::transcript::MARCA_SISTEMA));
+        assert!(rearm_prompt("sid", true).starts_with(ld_core::transcript::MARCA_SISTEMA));
+        assert!(rearm_prompt("sid", false).starts_with(ld_core::transcript::MARCA_SISTEMA));
     }
 
     #[test]

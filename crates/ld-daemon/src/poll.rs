@@ -153,9 +153,24 @@ async fn em_topico(app: &Arc<App>, topic: i32, texto: &str, de: &str) -> anyhow:
             let Some(valor) = valor else {
                 // Sem argumento, a escolha vira teclado: família e depois versão.
                 if e_modelo {
+                    // Teclado vazio no Telegram simplesmente não aparece, e o comando pareceria
+                    // ignorado. Se o catálogo falhou, o certo é dizer isso.
+                    let teclado = teclado_familias(app);
+                    if app.modelos().is_empty() {
+                        let _ = app
+                            .tg
+                            .send_html(
+                                Some(topic),
+                                "Não consegui ler o catálogo de modelos do binário do Claude Code. \
+                                 Aponte <code>claude_binary</code> no config.toml, ou mande o nome \
+                                 inteiro: <code>/model claude-opus-4-8[1m]</code>",
+                            )
+                            .await;
+                        return Ok(());
+                    }
                     let _ = app
                         .tg
-                        .send_keyboard(Some(topic), ESCOLHA_FAMILIA, teclado_familias(app))
+                        .send_keyboard(Some(topic), ESCOLHA_FAMILIA, teclado)
                         .await;
                 } else {
                     let botoes = ESFORCOS
