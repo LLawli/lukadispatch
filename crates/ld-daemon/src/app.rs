@@ -864,6 +864,48 @@ impl App {
         }
     }
 
+    /// Responde o card aberto com o texto que você escreveu no tópico.
+    ///
+    /// Devolve `true` quando havia card esperando. Enquanto ele existe, a sessão está parada
+    /// dentro da ferramenta de pergunta: mandar a mensagem para lá seria jogá-la num processo que
+    /// não vai lê-la tão cedo.
+    pub async fn on_card_text(&self, session_id: &str, texto: &str) -> Result<bool> {
+        let Some((ask_id, kind)) = self.cards.aberto_da_sessao(session_id) else {
+            return Ok(false);
+        };
+
+        if kind == crate::cards::Kind::Permissao {
+            // Permissão é binária: só o que for claramente sim ou não conta, e o resto continua
+            // sendo mensagem para a sessão (que a lerá quando a permissão for resolvida).
+            let baixo = texto.trim().to_lowercase();
+            let decisao = match baixo.as_str() {
+                "sim" | "s" | "permitir" | "pode" | "ok" => Some("allow"),
+                "não" | "nao" | "n" | "negar" => Some("deny"),
+                _ => None,
+            };
+            let Some(decisao) = decisao else {
+                return Ok(false);
+            };
+            self.hub.answer(&ask_id, decisao.to_string());
+            return Ok(true);
+        }
+
+        match self.cards.tocar(&ask_id, Acao::Texto(texto.to_string())) {
+            Efeito::Redesenhar(corpo, teclado) => {
+                if let Some(msg) = self.cards.msg(&ask_id) {
+                    self.tg.edit_keyboard(msg, &corpo, teclado).await?;
+                }
+                Ok(true)
+            }
+            Efeito::Pronto(resposta) => {
+                let payload = serde_json::to_string(&resposta).unwrap_or_default();
+                self.hub.answer(&ask_id, payload);
+                Ok(true)
+            }
+            Efeito::Ignorar => Ok(false),
+        }
+    }
+
     /// Toque em botão de card, vindo do Telegram.
     pub async fn on_card_touch(&self, dado: &str) -> Result<()> {
         let mut partes = dado.split(':');

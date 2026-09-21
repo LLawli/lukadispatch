@@ -198,6 +198,16 @@ async fn em_topico(app: &Arc<App>, topic: i32, texto: &str, de: &str) -> anyhow:
             Ok(())
         }
         _ => {
+            // Card aberto? Então o que você escreveu é a resposta dele. A sessão está parada
+            // dentro da pergunta e não leria esta mensagem agora de qualquer jeito.
+            if let Some(s) = app.session_for_topic(topic).await?
+                && app
+                    .on_card_text(&s.session_id, texto)
+                    .await
+                    .unwrap_or(false)
+            {
+                return Ok(());
+            }
             if let Err(e) = app.on_incoming(topic, texto, de).await {
                 let _ = app
                     .tg

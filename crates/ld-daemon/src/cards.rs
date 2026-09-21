@@ -86,6 +86,16 @@ impl Cards {
 
     /// Aplica um toque de botão. `Ignorar` quando o card já morreu, que é o caso normal de quem
     /// tocou no celular depois de responder pelo PC.
+    /// O card aberto de uma sessão, se houver.
+    pub fn aberto_da_sessao(&self, session_id: &str) -> Option<(String, Kind)> {
+        self.abertos
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|(_, c)| c.session_id == session_id)
+            .map(|(id, c)| (id.clone(), c.kind))
+    }
+
     pub fn tocar(&self, ask_id: &str, acao: Acao) -> Efeito {
         let mut abertos = self.abertos.lock().unwrap_or_else(|e| e.into_inner());
         let Some(card) = abertos.get_mut(ask_id) else {
@@ -95,13 +105,19 @@ impl Cards {
     }
 }
 
-/// O que o botão pediu.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// O que o botão (ou a mensagem escrita) pediu.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Acao {
     /// Escolheu a opção `n` da pergunta atual.
     Opcao(usize),
     /// Confirmou uma pergunta de múltipla escolha.
     Confirmar,
+    /// Escreveu a própria resposta, em vez de escolher.
+    ///
+    /// É o que acontece quando você responde ao card digitando, que é o gesto natural no
+    /// Telegram. Sem isto a mensagem ia para a sessão, que está bloqueada justamente esperando a
+    /// resposta do card: ela não chegava a lugar nenhum.
+    Texto(String),
 }
 
 impl Card {
@@ -146,6 +162,15 @@ impl Card {
         };
 
         match acao {
+            Acao::Texto(escrito) => {
+                let escrito = escrito.trim().to_string();
+                if escrito.is_empty() {
+                    return Efeito::Ignorar;
+                }
+                // Texto escrito substitui a escolha: se você escreveu, nenhuma opção servia.
+                self.escolhas[self.atual] = vec![escrito];
+                self.avancar()
+            }
             Acao::Opcao(i) => {
                 let Some(opt) = q.options.get(i) else {
                     return Efeito::Ignorar;
@@ -243,6 +268,9 @@ impl Card {
                 ));
             }
         }
+        // O mesmo convite que a janela do PC faz. Sem ele, escrever parece não ser opção, e
+        // responder digitando é o gesto natural de quem está no Telegram.
+        texto.push_str("\n\n<i>ou escreva a sua resposta</i>");
 
         Efeito::Redesenhar(texto, coluna(botoes))
     }
@@ -326,6 +354,39 @@ mod tests {
             _ => panic!("confirmar devia avançar"),
         }
         assert_eq!(c.escolhas[0], vec!["Postgres"]);
+    }
+
+    #[test]
+    fn texto_escrito_responde_a_pergunta_atual() {
+        let mut c = card(false);
+        match c.tocar(Acao::Texto("quero a opção C".into())) {
+            Efeito::Redesenhar(texto, _) => assert!(texto.contains("Qual log?")),
+            outro => panic!("devia avançar, veio {}", rotulo(&outro)),
+        }
+        match c.tocar(Acao::Texto("nenhum".into())) {
+            Efeito::Pronto(r) => {
+                assert_eq!(r.items[0].answers, vec!["quero a opção C"]);
+                assert_eq!(r.items[1].answers, vec!["nenhum"]);
+            }
+            outro => panic!("devia terminar, veio {}", rotulo(&outro)),
+        }
+    }
+
+    #[test]
+    fn texto_vazio_nao_conta_como_resposta() {
+        let mut c = card(false);
+        assert!(matches!(
+            c.tocar(Acao::Texto("   ".into())),
+            Efeito::Ignorar
+        ));
+    }
+
+    fn rotulo(e: &Efeito) -> &'static str {
+        match e {
+            Efeito::Redesenhar(_, _) => "redesenhar",
+            Efeito::Pronto(_) => "pronto",
+            Efeito::Ignorar => "ignorar",
+        }
     }
 
     #[test]
