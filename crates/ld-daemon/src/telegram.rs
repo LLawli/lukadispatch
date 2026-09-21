@@ -20,6 +20,11 @@ use teloxide::types::{
 /// requisições à toa; o teto prático é o timeout do cliente HTTP, que é ajustado a partir daqui.
 pub const PRAZO_POLL: u32 = 25;
 
+/// Quanto tempo uma resposta de comando fica no General antes de sumir.
+pub const TTL_RESPOSTA: u64 = 25;
+/// O teclado do /new espera a sua escolha, então vive mais que uma resposta comum.
+pub const TTL_TECLADO: u64 = 300;
+
 /// Teto de uma mensagem do Telegram. O nosso corte é um pouco abaixo para caber o rodapé de
 /// continuação sem estourar na virada.
 const LIMITE_MSG: usize = 3900;
@@ -150,6 +155,26 @@ impl Tg {
             Ok(_) => Ok(()),
             Err(e) if mensagem_nao_mudou(&e) => Ok(()),
             Err(e) => Err(e).context("editando teclado"),
+        }
+    }
+
+    /// Agenda o apagamento de uma mensagem.
+    ///
+    /// É o que mantém o General sendo só o painel: comando, resposta e teclado são conversa de
+    /// um instante, e o único conteúdo permanente ali é a mensagem de estado que vai sendo
+    /// editada. Falhar em apagar não é erro: no pior caso sobra uma linha a mais.
+    pub fn efemera(&self, id: MessageId, segundos: u64) {
+        let tg = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(segundos)).await;
+            tg.delete(id).await;
+        });
+    }
+
+    /// Envia uma resposta que se apaga sozinha.
+    pub async fn responde_efemero(&self, topic: Option<i32>, html: &str, segundos: u64) {
+        if let Ok(id) = self.send_html(topic, html).await {
+            self.efemera(id, segundos);
         }
     }
 

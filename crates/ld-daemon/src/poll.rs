@@ -15,12 +15,18 @@ use teloxide::types::{Update, UpdateKind};
 use tracing::{info, warn};
 
 use crate::app::App;
-use crate::telegram::{coluna, escape_html};
+use crate::telegram::{TTL_RESPOSTA, TTL_TECLADO, coluna, escape_html};
 
 pub async fn run(app: Arc<App>) {
     let mut offset: i32 = 0;
     loop {
-        let pedido = app.tg.bot().get_updates().offset(offset).timeout(crate::telegram::PRAZO_POLL).await;
+        let pedido = app
+            .tg
+            .bot()
+            .get_updates()
+            .offset(offset)
+            .timeout(crate::telegram::PRAZO_POLL)
+            .await;
 
         match pedido {
             Ok(updates) => {
@@ -71,7 +77,13 @@ async fn trata(app: Arc<App>, u: Update) -> anyhow::Result<()> {
 
             match msg.thread_id {
                 Some(t) => em_topico(&app, t.0.0, texto, &nome).await,
-                None => no_general(&app, texto).await,
+                None => {
+                    // O General é o painel, e só. O comando que você mandou some junto com a
+                    // resposta dele; o que fica é a mensagem de estado, que é editada no lugar.
+                    let r = no_general(&app, texto).await;
+                    app.tg.delete(msg.id).await;
+                    r
+                }
             }
         }
         UpdateKind::CallbackQuery(q) => {
@@ -80,7 +92,16 @@ async fn trata(app: Arc<App>, u: Update) -> anyhow::Result<()> {
             }
             // Responder sempre, mesmo em erro: sem isso o botão fica rodando no celular.
             let _ = app.tg.bot().answer_callback_query(q.id.clone()).await;
-            if let Some(dado) = q.data.as_deref() {
+            let dado = q.data.clone();
+            // Teclado do General já cumpriu o papel ao ser tocado: some na hora. O card de
+            // pergunta e o de permissão NÃO entram aqui: quem os apaga é o `cleanup_ask`, e só
+            // depois que a resposta chega ao Claude.
+            if let Some(msg) = q.message.as_ref()
+                && dado.as_deref().is_some_and(|d| d.starts_with("n:"))
+            {
+                app.tg.delete(msg.id()).await;
+            }
+            if let Some(dado) = dado.as_deref() {
                 botao(&app, dado).await?;
             }
             Ok(())
@@ -129,7 +150,13 @@ async fn no_general(app: &Arc<App>, texto: &str) -> anyhow::Result<()> {
         "/new" | "/nova" => {
             let projetos = app.cfg.projects_available();
             if projetos.is_empty() {
-                let _ = app.tg.send_html(None, "Nenhum projeto encontrado. Verifique <code>[scan] roots</code> ou adicione um <code>[[projects]]</code> no config.toml.").await;
+                app.tg
+                    .responde_efemero(
+                        None,
+                        "Nenhum projeto encontrado. Verifique <code>[scan] roots</code> ou adicione um <code>[[projects]]</code> no config.toml.",
+                        TTL_RESPOSTA,
+                    )
+                    .await;
                 return Ok(());
             }
             // Com argumento, abre direto; sem, mostra o seletor.
@@ -155,19 +182,30 @@ async fn no_general(app: &Arc<App>, texto: &str) -> anyhow::Result<()> {
                 .enumerate()
                 .map(|(i, p)| (p.name.clone(), format!("n:{i}")))
                 .collect();
-            let _ = app
+            if let Ok(id) = app
                 .tg
                 .send_keyboard(None, "Abrir sessão em qual projeto?", coluna(botoes))
-                .await;
+                .await
+            {
+                app.tg.efemera(id, TTL_TECLADO);
+            }
             Ok(())
         }
         "/ls" | "/sessoes" => {
-            let _ = app.tg.send_html(None, &lista(app)?).await;
+            // No General a lista já é o painel: em vez de mandar uma cópia que viraria lixo,
+            // força o redesenho da mensagem de estado.
+            app.panel.refresh();
             Ok(())
         }
         "/kill" => {
             let Some(alvo) = resto.first() else {
-                let _ = app.tg.send_html(None, "Uso: <code>/kill &lt;id da sessão&gt;</code> (ou mande /kill dentro do tópico dela).").await;
+                app.tg
+                    .responde_efemero(
+                        None,
+                        "Uso: <code>/kill &lt;id da sessão&gt;</code> (ou mande /kill dentro do tópico dela).",
+                        TTL_RESPOSTA,
+                    )
+                    .await;
                 return Ok(());
             };
             let achada = app
@@ -177,21 +215,25 @@ async fn no_general(app: &Arc<App>, texto: &str) -> anyhow::Result<()> {
             match achada {
                 Some(s) => {
                     app.end_session(&s.session_id, true).await?;
-                    let _ = app
-                        .tg
-                        .send_html(None, &format!("Fechei <b>{}</b>.", escape_html(&s.project)))
+                    app.tg
+                        .responde_efemero(
+                            None,
+                            &format!("Fechei <b>{}</b>.", escape_html(&s.project)),
+                            TTL_RESPOSTA,
+                        )
                         .await;
                 }
                 None => {
-                    let _ = app.tg.send_html(None, "Não achei essa sessão.").await;
+                    app.tg
+                        .responde_efemero(None, "Não achei essa sessão.", TTL_RESPOSTA)
+                        .await;
                 }
             }
             Ok(())
         }
         "/help" | "/ajuda" | "/start" => {
-            let _ = app
-                .tg
-                .send_html(
+            app.tg
+                .responde_efemero(
                     None,
                     "<b>lukadispatch</b>\n\n\
                      /new: abre uma sessão (mostra os projetos)\n\
@@ -199,11 +241,22 @@ async fn no_general(app: &Arc<App>, texto: &str) -> anyhow::Result<()> {
                      /ls: lista as sessões vivas\n\
                      /kill &lt;id&gt;: fecha uma sessão\n\n\
                      Cada sessão vira um tópico. Fale com ela lá dentro; /kill no tópico fecha e apaga.",
+                    TTL_TECLADO,
                 )
                 .await;
             Ok(())
         }
-        _ => Ok(()),
+        // Texto solto no General: o painel não é lugar de conversa, e some junto com o aviso.
+        _ => {
+            app.tg
+                .responde_efemero(
+                    None,
+                    "O General é só o painel. Use <b>/new</b> para abrir uma sessão, ou fale dentro do tópico de uma.",
+                    TTL_RESPOSTA,
+                )
+                .await;
+            Ok(())
+        }
     }
 }
 
@@ -231,15 +284,17 @@ async fn botao(app: &Arc<App>, dado: &str) -> anyhow::Result<()> {
 async fn abrir(app: &Arc<App>, p: &Project) -> anyhow::Result<()> {
     info!(projeto = %p.name, "abrindo sessão a pedido do Telegram");
     if let Err(e) = app.create_session(p).await {
-        let _ = app
-            .tg
-            .send_html(
+        // Falha de abertura precisa ser lida com calma (costuma trazer o motivo do ai-memory ou
+        // do tmux), então vive mais que uma resposta comum antes de sumir.
+        app.tg
+            .responde_efemero(
                 None,
                 &format!(
                     "❌ Não consegui abrir <b>{}</b>: {}",
                     escape_html(&p.name),
                     escape_html(&e.to_string())
                 ),
+                TTL_TECLADO,
             )
             .await;
     }
