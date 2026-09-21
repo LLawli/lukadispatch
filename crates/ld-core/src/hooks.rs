@@ -56,6 +56,10 @@ pub fn telemetry_hooks(cli: &str) -> Value {
         "PostToolUse":  [ { "matcher": "", "hooks": [ async_hook(cli, "tool-end")   ] } ],
         "PostToolUseFailure": [ { "matcher": "", "hooks": [ async_hook(cli, "tool-failed") ] } ],
         "Notification": [ { "hooks": [ async_hook(cli, "notification") ] } ],
+        // Diálogo próprio de servidor MCP. Só dá para avisar: o hook não pode responder por
+        // você, e sem o aviso a sessão fica parada sem explicação nenhuma no celular.
+        "Elicitation":       [ { "hooks": [ async_hook(cli, "elicitation") ] } ],
+        "ElicitationResult": [ { "hooks": [ async_hook(cli, "elicitation-result") ] } ],
         // Troca de modelo feita no teclado do PC (`/model`): sem isto o painel mentiria.
         "PostModelSwitch": [ { "hooks": [ async_hook(cli, "model-switch") ] } ],
     })

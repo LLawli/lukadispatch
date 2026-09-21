@@ -151,6 +151,9 @@ fn desenha(store: &Store) -> anyhow::Result<String> {
         if let Some(t) = usage::session_tokens(&db, &sessao.session_id) {
             detalhe.push(format!("{} tokens", milhares(t.total())));
         }
+        if let Some(m) = &sessao.permission_mode {
+            detalhe.push(escape_html(m));
+        }
         if !detalhe.is_empty() {
             s.push_str(&format!("<code>{}</code>\n", detalhe.join(" · ")));
         }

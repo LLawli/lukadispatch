@@ -105,6 +105,30 @@ pub fn run(evento: &str) -> i32 {
             }));
         }
 
+        "elicitation" => {
+            // Os nomes dos campos não estão documentados; lemos os prováveis e caímos para o
+            // JSON cru, que é melhor que não avisar nada.
+            let servidor = texto(&ev, "mcp_server")
+                .or_else(|| texto(&ev, "server"))
+                .unwrap_or_else(|| "MCP".into());
+            let pedido = texto(&ev, "elicitation_request")
+                .or_else(|| texto(&ev, "message"))
+                .or_else(|| texto(&ev, "request"))
+                .or_else(|| texto(&ev, "mcp_tool"))
+                .unwrap_or_else(|| "confirmação".into());
+            client::send(&Request::Event(SessionEvent {
+                session_id,
+                event: EventKind::Elicitation { servidor, pedido },
+            }));
+        }
+
+        "elicitation-result" => {
+            client::send(&Request::Event(SessionEvent {
+                session_id,
+                event: EventKind::ElicitationFim,
+            }));
+        }
+
         "model-switch" => {
             let Some(para) = texto(&ev, "to_model") else {
                 return 0;

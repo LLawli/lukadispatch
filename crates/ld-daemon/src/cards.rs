@@ -105,6 +105,24 @@ impl Cards {
     }
 }
 
+/// Teto de um preview dentro do card.
+///
+/// Uma mensagem do Telegram cabe em 4096 caracteres, e um card pode ter quatro opções com
+/// preview. Cortar cada um é o que impede a pergunta inteira de ser recusada pela API por
+/// tamanho, que seria pior: nenhum card, nenhuma pergunta.
+const TETO_PREVIEW: usize = 600;
+
+fn corta_preview(p: &str) -> String {
+    let texto = p.trim_end();
+    if texto.chars().count() <= TETO_PREVIEW {
+        return texto.to_string();
+    }
+    format!(
+        "{}\n[…]",
+        texto.chars().take(TETO_PREVIEW).collect::<String>()
+    )
+}
+
 /// O que o botão (ou a mensagem escrita) pediu.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Acao {
@@ -258,13 +276,21 @@ impl Card {
             botoes.push(("✅ Confirmar".into(), format!("a:{}:c", self.ask_id)));
         }
 
-        // A descrição de cada opção vai no corpo: no botão ela não caberia.
+        // A descrição e o preview de cada opção vão no corpo: no botão não caberiam.
         for o in &q.options {
+            if o.description.is_empty() && o.preview.is_none() {
+                continue;
+            }
+            texto.push_str(&format!("\n\n<b>{}</b>", escape_html(&o.label)));
             if !o.description.is_empty() {
+                texto.push_str(&format!("\n{}", escape_html(&o.description)));
+            }
+            if let Some(preview) = &o.preview {
+                // `<pre>` é o que preserva o alinhamento por espaços; sem ele uma maquete em
+                // ASCII vira sopa de letras na fonte proporcional do Telegram.
                 texto.push_str(&format!(
-                    "\n\n<b>{}</b>\n{}",
-                    escape_html(&o.label),
-                    escape_html(&o.description)
+                    "\n<pre>{}</pre>",
+                    escape_html(&corta_preview(preview))
                 ));
             }
         }
@@ -281,6 +307,47 @@ mod tests {
     use super::*;
     use ld_core::ask::{Opt, Question};
 
+    fn com_preview() -> Ask {
+        Ask {
+            questions: vec![Question {
+                question: "Qual estilo?".into(),
+                header: "Estilo".into(),
+                multi_select: false,
+                options: vec![Opt {
+                    label: "K&R".into(),
+                    description: "chaves na mesma linha".into(),
+                    preview: Some("fn main() {\n    ok();\n}".into()),
+                }],
+            }],
+        }
+    }
+
+    #[test]
+    fn preview_vai_em_bloco_monoespacado() {
+        let c = Card::nova_pergunta("a1".into(), "s1".into(), 7, MessageId(1), com_preview());
+        match c.desenhar() {
+            Efeito::Redesenhar(texto, _) => {
+                assert!(texto.contains("<pre>"), "sem bloco o alinhamento se perde");
+                assert!(texto.contains("fn main() {"));
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn preview_gigante_e_cortado() {
+        let mut a = com_preview();
+        a.questions[0].options[0].preview = Some("x".repeat(5000));
+        let c = Card::nova_pergunta("a1".into(), "s1".into(), 7, MessageId(1), a);
+        match c.desenhar() {
+            Efeito::Redesenhar(texto, _) => {
+                assert!(texto.chars().count() < 4096, "a API recusaria a mensagem");
+                assert!(texto.contains("[…]"));
+            }
+            _ => panic!(),
+        }
+    }
+
     fn ask(multi: bool) -> Ask {
         Ask {
             questions: vec![
@@ -292,10 +359,12 @@ mod tests {
                         Opt {
                             label: "SQLite".into(),
                             description: "arquivo local".into(),
+                            preview: None,
                         },
                         Opt {
                             label: "Postgres".into(),
                             description: String::new(),
+                            preview: None,
                         },
                     ],
                 },
@@ -306,6 +375,7 @@ mod tests {
                     options: vec![Opt {
                         label: "json".into(),
                         description: String::new(),
+                        preview: None,
                     }],
                 },
             ],

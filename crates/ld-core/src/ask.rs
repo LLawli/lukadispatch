@@ -27,6 +27,12 @@ pub struct Opt {
     pub label: String,
     #[serde(default)]
     pub description: String,
+    /// Bloco de exemplo que a opção carrega (maquete em ASCII, trecho de código, diagrama).
+    ///
+    /// É monoespaçado e alinhado por espaços: sem fonte de largura fixa ele vira sopa de letras,
+    /// então os dois canais o mostram em bloco de código.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
 }
 
 /// A resposta: uma entrada por pergunta, na mesma ordem.
@@ -84,6 +90,11 @@ impl Question {
                             .and_then(Value::as_str)
                             .unwrap_or_default()
                             .to_string(),
+                        preview: o
+                            .get("preview")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                            .filter(|s| !s.trim().is_empty()),
                     })
                     .collect()
             })
@@ -141,7 +152,7 @@ mod tests {
                     "multiSelect": false,
                     "options": [
                         {"label": "SQLite", "description": "arquivo local"},
-                        {"label": "Postgres", "description": "servidor"}
+                        {"label": "Postgres", "description": "servidor", "preview": "┌─────┐\n│ srv │\n└─────┘"}
                     ]
                 },
                 {
@@ -165,6 +176,14 @@ mod tests {
         assert_eq!(
             a.questions[1].options[0].description, "",
             "opção sem descrição não pode quebrar a leitura"
+        );
+        assert!(a.questions[0].options[0].preview.is_none());
+        assert!(
+            a.questions[0].options[1]
+                .preview
+                .as_deref()
+                .is_some_and(|p| p.contains("srv")),
+            "o preview precisa sobreviver à leitura"
         );
     }
 

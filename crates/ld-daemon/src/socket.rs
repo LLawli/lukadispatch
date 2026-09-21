@@ -270,7 +270,11 @@ async fn pergunta(
         .await?;
 
     let bruta = tokio::time::timeout(PRAZO_RESPOSTA, rx).await;
-    app.cleanup_ask(&ask_id).await;
+    let resumo = match &bruta {
+        Ok(Ok(texto)) => Some(app.resumo_respondido(texto)),
+        _ => None,
+    };
+    app.cleanup_ask(&ask_id, resumo.as_deref()).await;
 
     let resp = match bruta {
         Ok(Ok(texto)) => Response::Answer {
@@ -322,7 +326,12 @@ async fn permissao(
         .await?;
 
     let bruta = tokio::time::timeout(PRAZO_RESPOSTA, rx).await;
-    app.cleanup_ask(&ask_id).await;
+    let permitido = match &bruta {
+        Ok(Ok(t)) => Some(t == "allow"),
+        _ => None,
+    };
+    let resumo = permitido.map(|p| app.resumo_permissao(&ferramenta, p));
+    app.cleanup_ask(&ask_id, resumo.as_deref()).await;
 
     let resp = match bruta.map(|r| r.map(|t| t == "allow")) {
         Ok(Ok(true)) => Response::Decision {

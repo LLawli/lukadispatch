@@ -76,7 +76,7 @@ async fn trata(app: Arc<App>, u: Update) -> anyhow::Result<()> {
             let nome = quem.first_name.clone();
 
             match msg.thread_id {
-                Some(t) => em_topico(&app, t.0.0, texto, &nome).await,
+                Some(t) => em_topico(&app, t.0.0, texto, &nome, msg.id).await,
                 None => {
                     // O General é o painel, e só. O comando que você mandou some junto com a
                     // resposta dele; o que fica é a mensagem de estado, que é editada no lugar.
@@ -118,7 +118,13 @@ async fn trata(app: Arc<App>, u: Update) -> anyhow::Result<()> {
     }
 }
 
-async fn em_topico(app: &Arc<App>, topic: i32, texto: &str, de: &str) -> anyhow::Result<()> {
+async fn em_topico(
+    app: &Arc<App>,
+    topic: i32,
+    texto: &str,
+    de: &str,
+    msg: teloxide::types::MessageId,
+) -> anyhow::Result<()> {
     let comando = texto.split_whitespace().next().unwrap_or("");
     match comando {
         "/kill" | "/fechar" => {
@@ -140,6 +146,45 @@ async fn em_topico(app: &Arc<App>, topic: i32, texto: &str, de: &str) -> anyhow:
         // `/model` e `/effort` são comandos do frontend do Claude Code, e nenhum evento consegue
         // dispará-los. O que dá para fazer sem digitar no terminal é reiniciar a sessão com
         // `--resume`, que volta com o mesmo contexto e a flag nova.
+        // Modo de permissão: mesma mecânica de /model, porque também é flag de partida.
+        "/mode" | "/modo" | "/permissao" | "/permissão" => {
+            let Some(s) = app.session_for_topic(topic).await? else {
+                let _ = app
+                    .tg
+                    .send_html(Some(topic), "Este tópico não tem sessão viva.")
+                    .await;
+                return Ok(());
+            };
+            match texto.split_whitespace().nth(1) {
+                Some(modo) => {
+                    if let Err(e) = app.relaunch_modo(&s.session_id, modo).await {
+                        let _ = app
+                            .tg
+                            .send_html(Some(topic), &format!("⚠️ {}", escape_html(&e.to_string())))
+                            .await;
+                    }
+                }
+                None => {
+                    let atual = s.permission_mode.as_deref().unwrap_or("auto");
+                    let botoes = MODOS
+                        .iter()
+                        .map(|(id, rotulo)| {
+                            let marca = if *id == atual { "● " } else { "" };
+                            (format!("{marca}{rotulo}"), format!("pm:{id}"))
+                        })
+                        .collect();
+                    let _ = app
+                        .tg
+                        .send_keyboard(
+                            Some(topic),
+                            &format!("🔐 Modo de permissão\n<i>agora: {}</i>", escape_html(atual)),
+                            coluna(botoes),
+                        )
+                        .await;
+                }
+            }
+            Ok(())
+        }
         "/model" | "/modelo" | "/effort" | "/esforco" | "/esforço" => {
             let Some(s) = app.session_for_topic(topic).await? else {
                 let _ = app
@@ -206,6 +251,9 @@ async fn em_topico(app: &Arc<App>, topic: i32, texto: &str, de: &str) -> anyhow:
                     .await
                     .unwrap_or(false)
             {
+                // O card respondido já mostra o que você escreveu; manter a sua mensagem ao lado
+                // deixaria a mesma resposta duas vezes seguidas no tópico.
+                app.tg.delete(msg).await;
                 return Ok(());
             }
             if let Err(e) = app.on_incoming(topic, texto, de).await {
@@ -321,7 +369,7 @@ async fn no_general(app: &Arc<App>, texto: &str) -> anyhow::Result<()> {
                      /ls: lista as sessões vivas\n\
                      /kill &lt;id&gt;: fecha uma sessão\n\n\
                      Cada sessão vira um tópico. Fale com ela lá dentro; /kill no tópico fecha e apaga.\n\
-                     Dentro do tópico: /model e /effort reiniciam a sessão com o contexto inteiro.",
+                     Dentro do tópico: /model, /effort e /mode reiniciam a sessão com o contexto inteiro.",
                     TTL_TECLADO,
                 )
                 .await;
@@ -431,6 +479,22 @@ async fn botao(
     }
     if let Some(nivel) = dado.strip_prefix("ef:") {
         return troca(app, topico, msg, None, Some(nivel)).await;
+    }
+    if let Some(modo) = dado.strip_prefix("pm:") {
+        let (Some(topico), Some(msg)) = (topico, msg) else {
+            return Ok(());
+        };
+        app.tg.delete(msg).await;
+        let Some(s) = app.session_for_topic(topico).await? else {
+            return Ok(());
+        };
+        if let Err(e) = app.relaunch_modo(&s.session_id, modo).await {
+            let _ = app
+                .tg
+                .send_html(Some(topico), &format!("⚠️ {}", escape_html(&e.to_string())))
+                .await;
+        }
+        return Ok(());
     }
     Ok(())
 }
@@ -572,6 +636,17 @@ async fn abrir(
     }
     Ok(())
 }
+
+/// Modos de permissão do Claude Code, com nome legível.
+///
+/// São os que fazem sentido pelo celular. `dontAsk` fica de fora de propósito: ele nunca
+/// pergunta e nunca avisa, que é o pior dos mundos para quem não está na frente da tela.
+const MODOS: [(&str, &str); 4] = [
+    ("auto", "🤖 auto (classificador decide)"),
+    ("manual", "🙋 perguntar sempre"),
+    ("plan", "📋 plano (só propõe)"),
+    ("bypassPermissions", "⚠️ liberar tudo"),
+];
 
 /// Modelos e níveis de esforço que o Claude Code aceita como apelido.
 const MODELOS: [&str; 4] = ["opus", "sonnet", "haiku", "fable"];

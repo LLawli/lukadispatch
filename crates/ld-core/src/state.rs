@@ -32,6 +32,8 @@ pub struct Session {
     /// `PostModelSwitch` (quando você troca pelo `/model` no teclado do PC).
     pub model: Option<String>,
     pub effort: Option<String>,
+    /// Modo de permissão em vigor. Vem da config na criação e muda por `/mode` no Telegram.
+    pub permission_mode: Option<String>,
     pub created_at: i64,
     pub ended_at: Option<i64>,
 }
@@ -59,6 +61,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     status_message_id INTEGER,
     model             TEXT,
     effort            TEXT,
+    permission_mode   TEXT,
     created_at        INTEGER NOT NULL,
     updated_at        INTEGER NOT NULL,
     ended_at          INTEGER
@@ -80,7 +83,7 @@ CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 /// destas colunas ficaria sem elas. O erro de coluna duplicada é o caminho normal aqui (banco
 /// novo já nasce com tudo), por isso ele é ignorado em silêncio.
 fn migra(conn: &Connection) {
-    for coluna in ["model", "effort"] {
+    for coluna in ["model", "effort", "permission_mode"] {
         let _ = conn.execute(
             &format!("ALTER TABLE sessions ADD COLUMN {coluna} TEXT"),
             [],
@@ -128,8 +131,8 @@ impl Store {
     pub fn upsert(&self, s: &Session) -> Result<()> {
         let c = self.conn();
         c.execute(
-            "INSERT INTO sessions (session_id, project, cwd, transcript_path, tmux, topic_id, status, status_message_id, model, effort, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)
+            "INSERT INTO sessions (session_id, project, cwd, transcript_path, tmux, topic_id, status, status_message_id, model, effort, permission_mode, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)
              ON CONFLICT(session_id) DO UPDATE SET
                 project         = excluded.project,
                 cwd             = excluded.cwd,
@@ -138,6 +141,7 @@ impl Store {
                 topic_id        = COALESCE(excluded.topic_id, sessions.topic_id),
                 model           = COALESCE(excluded.model, sessions.model),
                 effort          = COALESCE(excluded.effort, sessions.effort),
+                permission_mode = COALESCE(excluded.permission_mode, sessions.permission_mode),
                 status          = excluded.status,
                 -- Retomar uma conversa reusa o id da sessão anterior, que estava encerrada. Sem
                 -- limpar isto aqui, ela voltaria viva no tmux e morta no banco: sem tópico, sem
@@ -155,6 +159,7 @@ impl Store {
                 s.status_message_id,
                 s.model,
                 s.effort,
+                s.permission_mode,
                 agora(),
             ],
         )?;
@@ -165,7 +170,7 @@ impl Store {
         let c = self.conn();
         let s = c
             .query_row(
-                "SELECT session_id, project, cwd, transcript_path, tmux, topic_id, status, status_message_id, model, effort, created_at, ended_at
+                "SELECT session_id, project, cwd, transcript_path, tmux, topic_id, status, status_message_id, model, effort, permission_mode, created_at, ended_at
                  FROM sessions WHERE session_id = ?1",
                 [session_id],
                 linha_para_sessao,
@@ -180,7 +185,7 @@ impl Store {
         let c = self.conn();
         let s = c
             .query_row(
-                "SELECT session_id, project, cwd, transcript_path, tmux, topic_id, status, status_message_id, model, effort, created_at, ended_at
+                "SELECT session_id, project, cwd, transcript_path, tmux, topic_id, status, status_message_id, model, effort, permission_mode, created_at, ended_at
                  FROM sessions WHERE topic_id = ?1 AND ended_at IS NULL
                  ORDER BY created_at DESC LIMIT 1",
                 [topic_id],
@@ -200,7 +205,7 @@ impl Store {
         let c = self.conn();
         let s = c
             .query_row(
-                "SELECT session_id, project, cwd, transcript_path, tmux, topic_id, status, status_message_id, model, effort, created_at, ended_at
+                "SELECT session_id, project, cwd, transcript_path, tmux, topic_id, status, status_message_id, model, effort, permission_mode, created_at, ended_at
                  FROM sessions WHERE cwd = ?1 AND session_id <> ?2 AND ended_at IS NULL
                  ORDER BY created_at DESC LIMIT 1",
                 params![cwd, exceto],
@@ -271,6 +276,14 @@ impl Store {
         Ok(())
     }
 
+    pub fn set_permission_mode(&self, session_id: &str, modo: &str) -> Result<()> {
+        self.conn().execute(
+            "UPDATE sessions SET permission_mode = ?2, updated_at = ?3 WHERE session_id = ?1",
+            params![session_id, modo, agora()],
+        )?;
+        Ok(())
+    }
+
     pub fn set_transcript(&self, session_id: &str, transcript: &str) -> Result<()> {
         self.conn().execute(
             "UPDATE sessions SET transcript_path = ?2, updated_at = ?3 WHERE session_id = ?1",
@@ -295,7 +308,7 @@ impl Store {
     pub fn live(&self) -> Result<Vec<Session>> {
         let c = self.conn();
         let mut stmt = c.prepare(
-            "SELECT session_id, project, cwd, transcript_path, tmux, topic_id, status, status_message_id, model, effort, created_at, ended_at
+            "SELECT session_id, project, cwd, transcript_path, tmux, topic_id, status, status_message_id, model, effort, permission_mode, created_at, ended_at
              FROM sessions WHERE ended_at IS NULL ORDER BY created_at DESC",
         )?;
         let linhas = stmt.query_map([], linha_para_sessao)?;
@@ -394,8 +407,9 @@ fn linha_para_sessao(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
         status_message_id: row.get(7)?,
         model: row.get(8)?,
         effort: row.get(9)?,
-        created_at: row.get(10)?,
-        ended_at: row.get(11)?,
+        permission_mode: row.get(10)?,
+        created_at: row.get(11)?,
+        ended_at: row.get(12)?,
     })
 }
 
@@ -432,6 +446,7 @@ mod tests {
             status_message_id: None,
             model: Some("opus".into()),
             effort: None,
+            permission_mode: Some("auto".into()),
             created_at: 0,
             ended_at: None,
         }

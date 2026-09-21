@@ -165,6 +165,7 @@ impl App {
             status_message_id: None,
             model: model.map(str::to_string),
             effort: effort.map(str::to_string),
+            permission_mode: Some(modo.clone()),
             created_at: 0,
             ended_at: None,
         })?;
@@ -211,7 +212,8 @@ impl App {
         }
 
         for ask in self.cards.da_sessao(session_id) {
-            self.cleanup_ask(&ask).await;
+            // Sessão morrendo: a pergunta aberta não tem mais quem responda.
+            self.cleanup_ask(&ask, None).await;
         }
         for ask in self.hub.asks_of(session_id) {
             self.hub.close_ask(&ask);
@@ -317,6 +319,23 @@ impl App {
     /// fazer sem trapaça é reiniciar o processo com `--resume <id>`, que volta com o mesmo
     /// transcript e o mesmo id, só que com a flag nova. A conversa continua; o que se perde é o
     /// Monitor, e o prompt de re-arme cuida disso.
+    /// Troca só o modo de permissão, pela mesma mecânica do modelo.
+    pub async fn relaunch_modo(&self, session_id: &str, modo: &str) -> Result<()> {
+        const VALIDOS: [&str; 6] = [
+            "auto",
+            "manual",
+            "plan",
+            "acceptEdits",
+            "bypassPermissions",
+            "dontAsk",
+        ];
+        if !VALIDOS.contains(&modo) {
+            bail!("modo desconhecido: {modo} (use {})", VALIDOS.join(", "));
+        }
+        self.store.set_permission_mode(session_id, modo)?;
+        self.relaunch(session_id, None, None).await
+    }
+
     pub async fn relaunch(
         &self,
         session_id: &str,
@@ -341,7 +360,11 @@ impl App {
             model: None,
             effort: None,
         };
-        let modo = self.cfg.permission_mode_for(&s.cwd);
+        // O modo guardado é o que vale: ele pode ter sido trocado por /mode depois da criação.
+        let modo = s
+            .permission_mode
+            .clone()
+            .unwrap_or_else(|| self.cfg.permission_mode_for(&s.cwd));
         // O que não foi pedido agora continua valendo: trocar só o esforço não derruba o modelo.
         let model_final = model.map(str::to_string).or_else(|| s.model.clone());
         let effort_final = effort.map(str::to_string).or_else(|| s.effort.clone());
@@ -666,6 +689,37 @@ impl App {
                     let _ = tg.send_html(Some(topic), &corpo).await;
                 });
             }
+            EventKind::Elicitation { servidor, pedido } => {
+                let tmux = s.tmux.clone().unwrap_or_else(|| "a sessão".into());
+                let corpo = format!(
+                    "🧩 <b>{}</b> está pedindo confirmação:\n{}\n\n<i>Este diálogo é do próprio                      servidor MCP, fora do sistema de permissões do Claude Code, e não dá para                      responder daqui. Responda no PC:</i>\n<code>tmux attach -t {}</code>",
+                    escape_html(servidor),
+                    escape_html(&corta(pedido, 600)),
+                    escape_html(&tmux)
+                );
+                let tg = self.tg.clone();
+                let anterior = self.tira_aviso(&ev.session_id);
+                let sessao = ev.session_id.clone();
+                let avisos = self.avisos_handle();
+                tokio::spawn(async move {
+                    if let Some(id) = anterior {
+                        tg.delete(id).await;
+                    }
+                    if let Ok(id) = tg.send_html(Some(topic), &corpo).await {
+                        avisos
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(sessao, id);
+                    }
+                });
+            }
+            // Respondido no PC: o aviso já cumpriu o papel e vira ruído.
+            EventKind::ElicitationFim => {
+                if let Some(id) = self.tira_aviso(&ev.session_id) {
+                    let tg = self.tg.clone();
+                    tokio::spawn(async move { tg.delete(id).await });
+                }
+            }
             EventKind::ModelSwitch { model } => {
                 self.store.set_model(&ev.session_id, Some(model), None)?;
                 self.panel.refresh();
@@ -847,21 +901,64 @@ impl App {
         Ok((ask_id, rx))
     }
 
-    /// Fecha o card, respondido ou não. É o único ponto de limpeza: quem espera a resposta chama
-    /// isto ao terminar, tanto no caminho feliz quanto no timeout.
-    pub async fn cleanup_ask(&self, ask_id: &str) {
+    /// Fecha o card. É o único ponto de limpeza: quem espera a resposta chama isto ao terminar,
+    /// tanto no caminho feliz quanto no timeout.
+    ///
+    /// Com resposta, o card **não some**: ele vira o registro do que foi perguntado e do que foi
+    /// respondido, sem botões. Apagar deixava a sua resposta escrita no tópico sem a pergunta ao
+    /// lado, e quem lesse depois não saberia do que se tratava. Sem resposta (timeout, sessão
+    /// morta), aí sim ele some: pergunta que ninguém respondeu e ninguém mais pode responder é só
+    /// ruído.
+    pub async fn cleanup_ask(&self, ask_id: &str, resposta: Option<&str>) {
         self.hub.close_ask(ask_id);
-        if let Some(card) = self.cards.fechar(ask_id) {
-            self.tg.delete(card.msg).await;
-            // A sessão volta a trabalhar: deixar "Perguntando..." parado seria mentira na tela.
-            let _ = self.store.set_status(&card.session_id, "pensando");
-            self.status.set(
-                &self.ctx(),
-                &card.session_id,
-                card.topic,
-                "Pensando...".into(),
-            );
+        let Some(card) = self.cards.fechar(ask_id) else {
+            return;
+        };
+        match resposta {
+            Some(resumo) => {
+                if self.tg.edit_html(card.msg, resumo).await.is_err() {
+                    // Mensagem sumiu (apagada na mão): manda o registro como mensagem nova.
+                    let _ = self.tg.send_html(Some(card.topic), resumo).await;
+                }
+            }
+            None => self.tg.delete(card.msg).await,
         }
+        // A sessão volta a trabalhar: deixar "Perguntando..." parado seria mentira na tela.
+        let _ = self.store.set_status(&card.session_id, "pensando");
+        self.status.set(
+            &self.ctx(),
+            &card.session_id,
+            card.topic,
+            "Pensando...".into(),
+        );
+    }
+
+    /// Como a pergunta respondida fica no tópico.
+    pub fn resumo_respondido(&self, bruta: &str) -> String {
+        match serde_json::from_str::<Answer>(bruta) {
+            Ok(a) => {
+                let mut s = String::from("✅ <b>Respondido</b>");
+                for item in &a.items {
+                    s.push_str(&format!(
+                        "\n\n<b>{}</b>\n{}",
+                        escape_html(&item.question),
+                        escape_html(&item.answers.join(", "))
+                    ));
+                }
+                s
+            }
+            Err(_) => format!("✅ <b>Respondido</b>\n{}", escape_html(bruta)),
+        }
+    }
+
+    /// Idem, para o card de permissão.
+    pub fn resumo_permissao(&self, ferramenta: &str, permitido: bool) -> String {
+        let decisao = if permitido {
+            "✅ Permitido"
+        } else {
+            "⛔ Negado"
+        };
+        format!("🔐 <b>{}</b>\n{decisao}", escape_html(ferramenta))
     }
 
     /// Responde o card aberto com o texto que você escreveu no tópico.
@@ -1031,6 +1128,7 @@ fn nova_sessao(r: &RegisterSession) -> Session {
         status_message_id: None,
         model: r.model.clone(),
         effort: None,
+        permission_mode: None,
         created_at: 0,
         ended_at: None,
     }

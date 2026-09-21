@@ -102,6 +102,9 @@ fn monta(app: &adw::Application, ask: &Ask, resposta: Rc<RefCell<Option<Answer>>
                 d.add_css_class("caption");
                 grupo.append(&d);
             }
+            if let Some(preview) = &opt.preview {
+                grupo.append(&bloco_de_preview(preview));
+            }
             botoes.push((opt.label.clone(), b));
         }
 
@@ -159,6 +162,38 @@ fn monta(app: &adw::Application, ask: &Ask, resposta: Rc<RefCell<Option<Answer>>
     }
 
     janela.present();
+}
+
+/// Maquete ou trecho de código que a opção carrega.
+///
+/// Fonte de largura fixa e SEM quebra de linha: o preview é alinhado por espaços, e quebrar a
+/// linha desmonta o desenho. O que passa da largura da janela ganha rolagem lateral, que é o
+/// único jeito de mostrar uma maquete larga sem deformá-la.
+fn bloco_de_preview(preview: &str) -> gtk4::Widget {
+    let texto = Label::new(Some(preview.trim_end()));
+    texto.set_halign(Align::Start);
+    texto.set_wrap(false);
+    texto.set_selectable(true);
+    texto.add_css_class("monospace");
+    texto.set_margin_top(4);
+    texto.set_margin_bottom(4);
+    texto.set_margin_start(8);
+    texto.set_margin_end(8);
+
+    let rolagem = ScrolledWindow::builder()
+        .hscrollbar_policy(gtk4::PolicyType::Automatic)
+        .vscrollbar_policy(gtk4::PolicyType::Never)
+        .propagate_natural_height(true)
+        .max_content_height(320)
+        .child(&texto)
+        .build();
+
+    let moldura = gtk4::Frame::new(None);
+    moldura.set_margin_start(28);
+    moldura.set_margin_bottom(4);
+    moldura.add_css_class("view");
+    moldura.set_child(Some(&rolagem));
+    moldura.upcast()
 }
 
 /// Lê a tela e monta a resposta. Texto livre ganha do botão: se você digitou, é porque nenhuma

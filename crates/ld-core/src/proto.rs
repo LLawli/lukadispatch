@@ -147,6 +147,18 @@ pub enum EventKind {
     UserPrompt {
         text: String,
     },
+    /// Um servidor MCP pediu confirmação própria (hook `Elicitation`).
+    ///
+    /// É outro mecanismo, fora do sistema de permissões do Claude Code: quem desenha o diálogo é
+    /// o próprio cliente, e o hook **não pode responder** (a documentação diz que a saída dele é
+    /// ignorada nesse evento). Então isto aqui serve só para você saber que a sessão parou, e por
+    /// quê, em vez de ela emudecer.
+    Elicitation {
+        servidor: String,
+        pedido: String,
+    },
+    /// O pedido acima foi respondido no PC.
+    ElicitationFim,
     /// O modelo da sessão mudou (hook `PostModelSwitch`). Acontece quando você usa `/model` no
     /// teclado do PC; a troca pedida pelo Telegram já passa pelo banco antes.
     ModelSwitch {

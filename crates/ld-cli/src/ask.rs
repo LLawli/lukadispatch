@@ -109,10 +109,12 @@ pub fn permission(ev: &Value, session_id: String) -> i32 {
                 Opt {
                     label: "Permitir".into(),
                     description: label_for_tool(&ferramenta, &entrada),
+                    preview: None,
                 },
                 Opt {
                     label: "Negar".into(),
                     description: String::new(),
+                    preview: None,
                 },
             ],
         }],
