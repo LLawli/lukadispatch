@@ -85,7 +85,12 @@ pub fn run(evento: &str) -> i32 {
         }
 
         "prompt" => {
-            let Some(texto_prompt) = texto(&ev, "user_prompt") else {
+            // O campo é `prompt`. A documentação chama de `user_prompt`, e não é o que chega:
+            // medido no evento real, que traz `cwd`, `hook_event_name`, `permission_mode`,
+            // `prompt`, `prompt_id`, `session_id` e `transcript_path`. O nome documentado fica
+            // como segunda tentativa, para uma versão futura não quebrar isto em silêncio.
+            let Some(texto_prompt) = texto(&ev, "prompt").or_else(|| texto(&ev, "user_prompt"))
+            else {
                 return 0;
             };
             client::send(&Request::Event(SessionEvent {
