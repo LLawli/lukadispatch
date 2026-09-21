@@ -1,0 +1,26 @@
+[Unit]
+Description=lukadispatch: sessões do Claude Code pelo Telegram
+Documentation=https://github.com/LLawli/lukadispatch
+# Só faz sentido com rede: o daemon fala com a API do Telegram por long polling.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# O token mora aqui, fora do git. Sem ele o daemon recusa subir, de propósito.
+EnvironmentFile=%h/.config/lukadispatch/.env
+ExecStart=%h/.local/bin/lukadispatchd
+Restart=on-failure
+RestartSec=5s
+
+# As sessões são processos dentro de um servidor tmux que não pertence a este serviço e precisa
+# continuar vivo quando o daemon reinicia. Sem isto, um `systemctl restart` levaria junto todas
+# as sessões abertas, porque o systemd mata o cgroup inteiro por padrão.
+KillMode=process
+
+# Sem sandbox de systemd aqui, e de propósito: este serviço existe para rodar agentes que
+# compilam, editam e executam código nos seus projetos. Um ProtectSystem= por cima disso não
+# protegeria nada de verdade e quebraria o que ele precisa fazer.
+
+[Install]
+WantedBy=default.target
