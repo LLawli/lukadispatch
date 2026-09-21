@@ -8,11 +8,17 @@
 //! - **O que o daemon escreve (status, painel, cards) vai em HTML**, com escape nosso, porque aí
 //!   o conteúdo é controlado e negrito ajuda a ler no celular.
 
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use teloxide::prelude::*;
 use teloxide::types::{
     InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, MessageId, ParseMode, ThreadId,
 };
+
+/// Quantos segundos o Telegram segura o `getUpdates` sem novidade. Quanto maior, menos
+/// requisições à toa; o teto prático é o timeout do cliente HTTP, que é ajustado a partir daqui.
+pub const PRAZO_POLL: u32 = 25;
 
 /// Teto de uma mensagem do Telegram. O nosso corte é um pouco abaixo para caber o rodapé de
 /// continuação sem estourar na virada.
@@ -26,8 +32,16 @@ pub struct Tg {
 
 impl Tg {
     pub fn new(token: String, chat_id: i64) -> Self {
+        // O cliente padrão do teloxide tem timeout de 17s, e o `getUpdates` deste projeto pede
+        // ao Telegram para segurar a conexão por PRAZO_POLL. Com o padrão, toda janela ociosa
+        // morria em erro de rede e reabria: o update não se perdia (o Telegram reenvia), mas o
+        // log virava um aviso a cada 20s e cada mensagem podia atrasar alguns segundos.
+        let cliente = teloxide::net::default_reqwest_settings()
+            .timeout(Duration::from_secs(PRAZO_POLL as u64 + 30))
+            .build()
+            .expect("cliente http do teloxide");
         Self {
-            bot: Bot::new(token),
+            bot: Bot::with_client(token, cliente),
             chat: ChatId(chat_id),
         }
     }

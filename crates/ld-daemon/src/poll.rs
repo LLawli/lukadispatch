@@ -20,7 +20,7 @@ use crate::telegram::{coluna, escape_html};
 pub async fn run(app: Arc<App>) {
     let mut offset: i32 = 0;
     loop {
-        let pedido = app.tg.bot().get_updates().offset(offset).timeout(30).await;
+        let pedido = app.tg.bot().get_updates().offset(offset).timeout(crate::telegram::PRAZO_POLL).await;
 
         match pedido {
             Ok(updates) => {
