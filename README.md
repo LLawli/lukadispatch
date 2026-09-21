@@ -136,8 +136,13 @@ no tópico. O teto é 20 MB, que é o do Bot API. Os arquivos são apagados junt
 No sentido contrário, o agente **não chama ferramenta nenhuma**: ele escreve na resposta uma linha
 sozinha com `@arquivo:` seguido do caminho absoluto (e, se quiser, ` | legenda`). O hook `Stop`
 manda o arquivo antes do texto e tira a linha da mensagem. `@documento:` força documento quando os
-bytes exatos importam; sem isso, imagem até 10 MB vai como foto e aparece na conversa. O teto é
-50 MB, que é o do Bot API para enviar.
+bytes exatos importam; sem isso, imagem até 10 MB vai como foto e aparece na conversa.
+
+Acima de 50 MB (o teto do Bot API) o arquivo não é recusado: o daemon divide em volumes de 45 MB
+com o 7z, manda um por um com `parte i/n` na legenda e fecha com a instrução de juntar. No celular
+o ZArchiver ou o RAR remontam a partir do `.001`, e no PC é `7z x nome.7z.001`. O envio dividido
+sai em segundo plano, porque subir centenas de MB demora mais que o prazo do hook `Stop`; o teto é
+20 partes.
 
 O reconhecimento é estreito de propósito: a linha precisa ser só o marcador, do começo ao fim.
 Marcador no meio de uma frase, dentro de crase ou depois de hífen de lista é o agente falando do

@@ -682,6 +682,23 @@ impl App {
             .unwrap_or_else(|| caminho.to_string());
         let tamanho = crate::arquivos::humano_u64(pronto.tamanho);
 
+        // Maior que uma mensagem do Telegram: vai em volumes, e não na frente do fim de turno.
+        // Dividir e subir 200 MB leva minutos, e o hook Stop desiste em 60 segundos; segurar o
+        // turno por causa disso deixaria a sessão parada e o texto preso junto.
+        if pronto.precisa_dividir {
+            self.envia_em_partes(
+                &s.session_id,
+                topic,
+                pronto.caminho.clone(),
+                nome.clone(),
+                legenda.map(str::to_string),
+            );
+            return Ok(format!(
+                "{nome} ({tamanho}) passa do teto do Telegram; mandando em partes de {} MB",
+                crate::arquivos::VOLUME_MB
+            ));
+        }
+
         if pronto.como_foto {
             match self
                 .tg
@@ -958,6 +975,94 @@ impl App {
             rearm_attempts: tentativas,
             rearm_command: Some(format!("lukadispatch listen --session {}", r.session_id)),
         })
+    }
+
+    /// Divide um arquivo grande e manda os volumes, em segundo plano.
+    ///
+    /// Em segundo plano porque isto demora: o que a sessão recebe de volta é "vai chegar aí", e
+    /// quem acompanha o progresso é o tópico, que ganha uma parte de cada vez.
+    fn envia_em_partes(
+        &self,
+        session_id: &str,
+        topic: i32,
+        caminho: std::path::PathBuf,
+        nome: String,
+        legenda: Option<String>,
+    ) {
+        let tg = self.tg.clone();
+        let dir = crate::arquivos::dir_partes(session_id);
+        let sessao = session_id.to_string();
+        tokio::spawn(async move {
+            let _ = tg
+                .send_html(
+                    Some(topic),
+                    &format!(
+                        "📦 <b>{}</b> não cabe numa mensagem; estou dividindo em volumes de {} MB.",
+                        escape_html(&nome),
+                        crate::arquivos::VOLUME_MB
+                    ),
+                )
+                .await;
+
+            let partes = match crate::arquivos::divide(&caminho, dir).await {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!(sessao = %sessao, erro = %e, "não consegui dividir o arquivo");
+                    let _ = tg
+                        .send_html(
+                            Some(topic),
+                            &format!("⚠️ {}", escape_html(&format!("{e:#}"))),
+                        )
+                        .await;
+                    return;
+                }
+            };
+
+            let total = partes.arquivos.len();
+            let mut enviadas = 0;
+            for (i, parte) in partes.arquivos.iter().enumerate() {
+                let rotulo = match &legenda {
+                    Some(l) => format!("{nome} · parte {}/{total} · {l}", i + 1),
+                    None => format!("{nome} · parte {}/{total}", i + 1),
+                };
+                match tg.send_document(Some(topic), parte, Some(&rotulo)).await {
+                    Ok(_) => enviadas += 1,
+                    Err(e) => {
+                        warn!(sessao = %sessao, erro = %e, parte = %parte.display(), "parte não subiu");
+                        let _ = tg
+                            .send_html(
+                                Some(topic),
+                                &format!(
+                                    "⚠️ a parte {}/{total} não subiu: {}",
+                                    i + 1,
+                                    escape_html(&format!("{e:#}"))
+                                ),
+                            )
+                            .await;
+                        break;
+                    }
+                }
+            }
+
+            // Sem a instrução de juntar, um punhado de .001, .002 no celular é só lixo.
+            if enviadas == total {
+                let _ = tg
+                    .send_html(
+                        Some(topic),
+                        &format!(
+                            "🧩 {total} partes de <b>{}</b>. Baixe todas para a mesma pasta e abra a \
+                             <code>{}</code>: no celular o ZArchiver ou o RAR juntam sozinhos, e no PC é \
+                             <code>7z x {}</code>.",
+                            escape_html(&nome),
+                            escape_html(&partes.primeiro),
+                            escape_html(&partes.primeiro)
+                        ),
+                    )
+                    .await;
+                info!(sessao = %sessao, arquivo = %caminho.display(), partes = total, "arquivo grande enviado em partes");
+            }
+            partes.limpa().await;
+        });
     }
 
     /// Manda um arquivo que o agente marcou na resposta.

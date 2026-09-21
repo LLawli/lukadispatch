@@ -189,7 +189,18 @@ pub struct ParaEnviar {
     pub tamanho: u64,
     /// Se vale a pena tentar como foto (aparece na conversa em vez de virar download).
     pub como_foto: bool,
+    /// Não cabe numa mensagem: vai em volumes, e o envio sai da frente do fim de turno.
+    pub precisa_dividir: bool,
 }
+
+/// Tamanho de cada volume quando o arquivo não cabe numa mensagem. Fica abaixo do teto de 50 MB
+/// por margem: o 7z conta o volume, o Telegram conta o arquivo, e empatar com o limite é pedir
+/// para um envio falhar no fim de um upload longo.
+pub const VOLUME_MB: u64 = 45;
+
+/// Teto de partes. Acima disso o tópico vira uma fila de upload e a coisa deixa de ser prática;
+/// melhor dizer isso na cara do que passar meia hora mandando.
+pub const MAX_PARTES: usize = 20;
 
 /// Confere o que o agente pediu para mandar, antes de qualquer chamada de rede.
 ///
@@ -210,17 +221,29 @@ pub fn para_enviar(caminho: &Path, como_arquivo: bool) -> Result<ParaEnviar> {
     if meta.len() == 0 {
         bail!("{} está vazio", caminho.display());
     }
-    if meta.len() > LIMITE_ENVIO {
-        bail!(
-            "{} tem {}, e o Bot API só envia até 50 MB",
-            caminho.display(),
-            humano_u64(meta.len())
-        );
+    let precisa_dividir = meta.len() > LIMITE_ENVIO;
+    if precisa_dividir {
+        let previstas = meta.len().div_ceil(VOLUME_MB * 1024 * 1024) as usize;
+        if previstas > MAX_PARTES {
+            bail!(
+                "{} tem {}, o que daria {previstas} partes de {VOLUME_MB} MB; o teto aqui é {MAX_PARTES}",
+                caminho.display(),
+                humano_u64(meta.len())
+            );
+        }
+        if !tem_7z() {
+            bail!(
+                "{} tem {} e o Telegram só aceita 50 MB, mas não achei o 7z para dividir",
+                caminho.display(),
+                humano_u64(meta.len())
+            );
+        }
     }
     Ok(ParaEnviar {
         caminho: caminho.to_path_buf(),
         tamanho: meta.len(),
         como_foto: !como_arquivo && meta.len() <= LIMITE_FOTO && e_imagem(caminho),
+        precisa_dividir,
     })
 }
 
@@ -331,6 +354,122 @@ fn expande_til(caminho: &str) -> String {
         },
         None => caminho.to_string(),
     }
+}
+
+fn tem_7z() -> bool {
+    caminho_7z().is_some()
+}
+
+/// O 7z pode se chamar `7z` (p7zip completo) ou `7za` (só o núcleo). Os dois servem aqui.
+fn caminho_7z() -> Option<&'static str> {
+    ["7z", "7za", "7zz"].into_iter().find(|nome| {
+        std::process::Command::new(nome)
+            .arg("--help")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    })
+}
+
+/// Onde os volumes de uma sessão são montados: disco de verdade, e um subdiretório por envio
+/// para dois arquivos grandes ao mesmo tempo não se misturarem.
+pub fn dir_partes(session_id: &str) -> PathBuf {
+    paths::arquivos_base()
+        .join("partes")
+        .join(session_id)
+        .join(agora().to_string())
+}
+
+/// Um arquivo grande partido em volumes, pronto para sair um a um.
+pub struct Partes {
+    /// Diretório só das partes; some inteiro depois do envio.
+    dir: PathBuf,
+    pub arquivos: Vec<PathBuf>,
+    /// Nome do primeiro volume, que é por onde se abre o conjunto.
+    pub primeiro: String,
+}
+
+impl Partes {
+    pub async fn limpa(self) {
+        let _ = tokio::fs::remove_dir_all(&self.dir).await;
+    }
+}
+
+/// Divide um arquivo em volumes de 7z que o Telegram aceite.
+///
+/// 7z, e não `split`, porque o critério é juntar de volta no celular: parte crua de `split` só
+/// se remonta com `cat`, e os aplicativos de arquivo do Android (ZArchiver, RAR) abrem um
+/// conjunto `.7z.001` direto, com todas as partes na mesma pasta. A compressão fica no mínimo
+/// (`-mx1`): o que se quer aqui é o corte, não o ganho de tamanho.
+pub async fn divide(caminho: &Path, dir: PathBuf) -> Result<Partes> {
+    let bin = caminho_7z().context("não achei o 7z para dividir o arquivo")?;
+    let nome = sanitiza(
+        &caminho
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "arquivo".into()),
+    );
+
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .with_context(|| format!("criando {}", dir.display()))?;
+
+    let alvo = dir.join(format!("{nome}.7z"));
+    let saida = tokio::process::Command::new(bin)
+        .arg("a")
+        .arg(format!("-v{VOLUME_MB}m"))
+        .arg("-mx1")
+        .arg("-y")
+        .arg(&alvo)
+        .arg(caminho)
+        .output()
+        .await
+        .context("rodando o 7z")?;
+
+    // Código de saída não é prova de artefato: o que vale é a lista de volumes em disco.
+    let mut arquivos: Vec<PathBuf> = Vec::new();
+    let mut entradas = tokio::fs::read_dir(&dir).await?;
+    while let Some(e) = entradas.next_entry().await? {
+        if e.path().is_file() {
+            arquivos.push(e.path());
+        }
+    }
+    arquivos.sort();
+
+    if arquivos.is_empty()
+        || arquivos
+            .iter()
+            .any(|p| p.metadata().is_ok_and(|m| m.len() == 0))
+    {
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        bail!(
+            "o 7z não produziu volume utilizável ({}) {}",
+            saida.status,
+            String::from_utf8_lossy(&saida.stderr).trim()
+        );
+    }
+    if arquivos.len() > MAX_PARTES {
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        bail!("deu {} partes, e o teto é {MAX_PARTES}", arquivos.len());
+    }
+
+    let primeiro = arquivos[0]
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    Ok(Partes {
+        dir,
+        arquivos,
+        primeiro,
+    })
+}
+
+fn agora() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Reduz o que veio da API a um nome de arquivo simples: sem diretório, sem surpresa.
@@ -580,6 +719,39 @@ mod tests {
             texto, original,
             "sem envio, o texto não pode nem perder o \\n"
         );
+    }
+
+    /// Divide de verdade, com o 7z da máquina. Some quando ele não existe, porque aí o daemon
+    /// também recusa antes de tentar.
+    #[tokio::test]
+    async fn arquivo_grande_vira_volumes_que_somam_o_original() {
+        if !tem_7z() {
+            return;
+        }
+        let raiz = tempfile::tempdir().unwrap();
+        let grande = raiz.path().join("grande.bin");
+        // Incompressível de propósito: com texto repetido o 7z geraria um volume só e o teste
+        // não provaria nada.
+        let mut dados = Vec::with_capacity(3 * 1024 * 1024);
+        let mut x: u32 = 12345;
+        while dados.len() < 3 * 1024 * 1024 {
+            x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+            dados.extend_from_slice(&x.to_le_bytes());
+        }
+        std::fs::write(&grande, &dados).unwrap();
+
+        let partes = divide(&grande, raiz.path().join("partes")).await.unwrap();
+        assert!(!partes.arquivos.is_empty());
+        assert!(partes.primeiro.ends_with(".001"), "{}", partes.primeiro);
+        let soma: u64 = partes
+            .arquivos
+            .iter()
+            .map(|p| p.metadata().unwrap().len())
+            .sum();
+        assert!(soma > 0, "volume vazio não é divisão");
+        let dir = partes.dir.clone();
+        partes.limpa().await;
+        assert!(!dir.exists(), "as partes têm que sumir depois do envio");
     }
 
     #[test]
