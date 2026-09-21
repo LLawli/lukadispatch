@@ -138,8 +138,16 @@ async fn responde(app: &Arc<App>, req: Request) -> Response {
             Err(e) => erro(e),
         },
 
+        Request::Inject { session_id, text } => match app.inject(&session_id, &text) {
+            Ok(true) => Response::Ok,
+            Ok(false) => Response::Error {
+                message: "sessão sem monitor armado; a mensagem ficou na fila".into(),
+            },
+            Err(e) => erro(e),
+        },
+
         Request::ListSessions => match app.summaries() {
-            Ok(s) => Response::Sessions(s),
+            Ok(sessions) => Response::Sessions { sessions },
             Err(e) => erro(e),
         },
 

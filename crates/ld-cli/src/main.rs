@@ -22,6 +22,7 @@ lukadispatch
   ls                        sessões vivas
   kill <id>                 fecha uma sessão
   new <projeto>             abre uma sessão
+  send <id> <texto>         entrega uma mensagem a uma sessão sem passar pelo Telegram
   install [--global]        escreve os hooks; --global acrescenta a telemetria ao settings do
                             Claude Code, para as suas sessões de terminal entrarem no painel
   uninstall                 remove os hooks do settings do Claude Code
@@ -36,6 +37,10 @@ fn main() -> ExitCode {
         "hook" => hook::run(args.get(1).map(String::as_str).unwrap_or("")),
         "ls" => ls(),
         "kill" => kill(args.get(1).map(String::as_str)),
+        "send" => send(
+            args.get(1).map(String::as_str),
+            args.get(2..).map(|r| r.join(" ")).unwrap_or_default(),
+        ),
         "new" => new(args.get(1..).map(|r| r.join(" ")).unwrap_or_default()),
         "install" => install(args.iter().any(|a| a == "--global")),
         "uninstall" => uninstall(),
@@ -60,12 +65,12 @@ fn valor(args: &[String], flag: &str) -> Option<String> {
 
 fn ls() -> i32 {
     match client::call(&Request::ListSessions, client::PRAZO_LOCAL) {
-        Some(Response::Sessions(s)) if s.is_empty() => {
+        Some(Response::Sessions { sessions }) if sessions.is_empty() => {
             println!("nenhuma sessão viva");
             0
         }
-        Some(Response::Sessions(s)) => {
-            for x in s {
+        Some(Response::Sessions { sessions }) => {
+            for x in sessions {
                 let ctx = match (x.context_tokens, x.context_limit) {
                     (Some(t), Some(l)) => format!("{}k/{}k", t / 1000, l / 1000),
                     _ => "-".into(),
@@ -128,6 +133,30 @@ fn new(projeto: String) -> i32 {
     }
 }
 
+fn send(id: Option<&str>, texto: String) -> i32 {
+    let (Some(id), false) = (id, texto.is_empty()) else {
+        eprintln!("uso: lukadispatch send <id> <texto>");
+        return 2;
+    };
+    match client::call(
+        &Request::Inject {
+            session_id: id.to_string(),
+            text: texto,
+        },
+        client::PRAZO_LOCAL,
+    ) {
+        Some(Response::Ok) => 0,
+        Some(Response::Error { message }) => {
+            eprintln!("{message}");
+            1
+        }
+        _ => {
+            eprintln!("daemon não respondeu");
+            1
+        }
+    }
+}
+
 /// Escreve o settings das sessões do bot e, com `--global`, acrescenta a telemetria ao settings
 /// do Claude Code do usuário.
 ///
@@ -135,10 +164,7 @@ fn new(projeto: String) -> i32 {
 /// painel, mas continua com o menu nativo de pergunta e o fluxo de permissão normal. Sequestrar
 /// isso numa sessão em que você já está na frente do teclado seria pior que não ter painel.
 fn install(global: bool) -> i32 {
-    let cli = match std::env::current_exe() {
-        Ok(p) => p.to_string_lossy().into_owned(),
-        Err(_) => "lukadispatch".to_string(),
-    };
+    let cli = paths::cli();
 
     let destino = paths::bot_settings_file();
     if let Some(pai) = destino.parent()

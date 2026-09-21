@@ -46,6 +46,7 @@ pub fn tmux_name(projeto: &str, session_id: &str) -> String {
 /// consegue chamá-lo; (2) a resposta vai sozinha pelo hook, senão o agente tenta "mandar" a
 /// mensagem por conta própria e inventa um curl; (3) o monitor expira e precisa voltar.
 pub fn bootstrap_prompt(session_id: &str, projeto: &str) -> String {
+    let cli = paths::cli();
     format!(
         r#"Você está rodando dentro do lukadispatch. O seu usuário (Luka) fala com você pelo tópico "{projeto}" de um grupo do Telegram, e NÃO por este terminal. Ninguém está lendo esta tela.
 
@@ -53,7 +54,7 @@ Faça agora, nesta ordem, e nada além disso:
 
 1. Chame ToolSearch com query "select:Monitor" para carregar o schema da ferramenta Monitor.
 2. Chame Monitor com exatamente estes argumentos:
-   command: lukadispatch listen --session {session_id}
+   command: {cli} listen --session {session_id}
    description: mensagens do Telegram
    timeout_ms: 1800000
 3. Pare. Não escreva relatório, não explore o projeto, não chame mais nenhuma ferramenta. Fique em silêncio até chegar o primeiro evento do monitor.
@@ -66,6 +67,15 @@ Como funciona daqui em diante:
 - O monitor expira a cada 30 minutos. Quando isso acontecer, arme-o de novo com a mesma chamada do passo 2. Se você terminar um turno sem monitor armado, um lembrete vai chegar: cumpra-o na hora, senão a sessão fica surda.
 "#
     )
+}
+
+/// Nome do workstream gerenciado do ai-memory.
+///
+/// Precisa ser único por sessão: o `ai-memory run` recusa com 409 quando o workstream do projeto
+/// já está ativo (é o que acontece se você já tem uma sessão gerenciada ali), e recusa de novo se
+/// o nome pedido em `--new` já existir. Com o id da sessão no nome, nenhum dos dois acontece.
+pub fn workstream_name(session_id: &str) -> String {
+    format!("lukadispatch-{}", &session_id[..8])
 }
 
 /// Escreve o script de partida da sessão e devolve o caminho.
@@ -93,7 +103,7 @@ fn write_launch_script(
 # Gerado pelo lukadispatch para a sessão {session_id}. Editar aqui não muda nada:
 # o arquivo é reescrito a cada sessão nova.
 set -u
-exec ai-memory run claude \
+exec ai-memory run --new {workstream} claude \
   --session-id {session_id} \
   --settings {settings} \
   --permission-mode {permission_mode} \
@@ -101,6 +111,7 @@ exec ai-memory run claude \
 "#,
             settings = settings.display(),
             prompt = prompt.display(),
+            workstream = workstream_name(session_id),
         ),
     )?;
     Ok(script)
@@ -122,6 +133,11 @@ pub async fn launch(projeto: &Project, permission_mode: &str) -> Result<Launched
             &projeto.path,
             "-e",
             &format!("LD_SESSION={session_id}"),
+            // O hook roda dentro desta sessão e precisa achar o socket. O servidor tmux pode
+            // ter sido iniciado com outro ambiente (sem XDG_RUNTIME_DIR, por exemplo), então o
+            // caminho vai explícito em vez de depender do que ele herdou.
+            "-e",
+            &format!("LUKADISPATCH_SOCKET={}", paths::socket().display()),
             "bash",
         ])
         .arg(&script)
@@ -141,7 +157,44 @@ pub async fn launch(projeto: &Project, permission_mode: &str) -> Result<Launched
         bail!("tmux saiu 0 mas a sessão {tmux} não existe");
     }
 
+    // Espelha o painel num arquivo. É por `pipe-pane`, e não redirecionando o comando, porque o
+    // Claude Code precisa de um terminal de verdade no stdout: com um pipe ali ele entra em modo
+    // não interativo. Sem esse espelho, uma sessão que morre ao subir não deixa pista nenhuma.
+    let log = script.with_file_name("pane.log");
+    let _ = Command::new("tmux")
+        .args(["pipe-pane", "-o", "-t", &tmux])
+        .arg(format!("cat >> {}", log.display()))
+        .output()
+        .await;
+
+    // Morrer logo depois de subir é o caso comum de erro (workstream ocupado, diálogo de
+    // confiança, projeto inexistente), e é justamente o que passaria por "deu certo".
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    if !has_session(&tmux).await {
+        bail!("a sessão morreu ao subir: {}", primeiro_erro(&log));
+    }
+
     Ok(Launched { session_id, tmux })
+}
+
+/// A linha de erro mais útil do espelho do painel.
+///
+/// O arquivo tem sequências de escape do terminal misturadas ao texto; interessa a primeira
+/// linha que fala de erro, que é o que explica a morte.
+fn primeiro_erro(log: &std::path::Path) -> String {
+    let Ok(bruto) = std::fs::read_to_string(log) else {
+        return "sem saída registrada".into();
+    };
+    let limpo: String = bruto
+        .chars()
+        .map(|c| if c == '\u{1b}' { '\n' } else { c })
+        .collect();
+    limpo
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("Error") || l.contains("error:") || l.contains("Caused by"))
+        .map(|l| l.chars().take(200).collect())
+        .unwrap_or_else(|| "sem mensagem de erro no painel".into())
 }
 
 pub async fn has_session(tmux: &str) -> bool {
@@ -187,6 +240,36 @@ mod tests {
     }
 
     #[test]
+    fn workstream_e_unico_por_sessao() {
+        // O ai-memory recusa com 409 se o workstream do projeto já estiver ativo, então dois
+        // lançamentos não podem pedir o mesmo nome.
+        let a = workstream_name("abcd1234-0000-0000-0000-000000000000");
+        let b = workstream_name("ffff9999-0000-0000-0000-000000000000");
+        assert_ne!(a, b);
+        assert_eq!(a, "lukadispatch-abcd1234");
+    }
+
+    #[test]
+    fn acha_o_erro_no_espelho_do_painel() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("pane.log");
+        std::fs::write(
+            &log,
+            "\u{1b}[2J ai-memory starting\nError: opening managed workstream\nCaused by: 409\n",
+        )
+        .unwrap();
+        assert!(primeiro_erro(&log).contains("opening managed workstream"));
+    }
+
+    #[test]
+    fn espelho_ausente_nao_explode() {
+        assert_eq!(
+            primeiro_erro(std::path::Path::new("/nao/existe.log")),
+            "sem saída registrada"
+        );
+    }
+
+    #[test]
     fn prompt_carrega_o_monitor_antes_de_usar() {
         let p = bootstrap_prompt("sid-123", "proj");
         let pos_toolsearch = p
@@ -199,7 +282,7 @@ mod tests {
             pos_toolsearch < pos_monitor,
             "Monitor é ferramenta diferida: o ToolSearch tem que vir antes"
         );
-        assert!(p.contains("lukadispatch listen --session sid-123"));
+        assert!(p.contains("listen --session sid-123"));
         assert!(p.contains("1800000"));
     }
 

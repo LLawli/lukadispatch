@@ -59,6 +59,15 @@ pub enum Request {
         reason: String,
     },
 
+    /// Entrega uma mensagem a uma sessão sem passar pelo Telegram.
+    ///
+    /// Existe para testar o canal de entrada inteiro (socket, fila, Monitor, hook Stop) numa
+    /// máquina sem bot configurado, e para mandar recado a uma sessão do próprio PC.
+    Inject {
+        session_id: String,
+        text: String,
+    },
+
     /// Comandos administrativos, usados pelo CLI local (`lukadispatch ls|kill|new`).
     ListSessions,
     NewSession {
@@ -164,7 +173,12 @@ pub enum Response {
         ask_id: String,
     },
 
-    Sessions(Vec<SessionSummary>),
+    /// Variante de campo nomeado, e não newtype: serde não consegue serializar uma variante
+    /// newtype com lista dentro quando o enum tem tag interna (`#[serde(tag = "kind")]`), e o
+    /// erro só aparece em runtime, na hora de responder.
+    Sessions {
+        sessions: Vec<SessionSummary>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -223,6 +237,62 @@ mod tests {
             let txt = line(&caso);
             assert!(txt.ends_with('\n'), "a linha precisa terminar em \\n");
             let volta: Request = serde_json::from_str(txt.trim()).unwrap();
+            assert_eq!(caso, volta);
+        }
+    }
+
+    /// Toda variante de `Response` precisa passar por aqui.
+    ///
+    /// Existe porque a `Sessions` já quebrou em produção: com tag interna, serde recusa variante
+    /// newtype contendo lista, e o erro só aparece quando alguém pede a lista de sessões. Um
+    /// round-trip por variante é o que impede isso de voltar.
+    #[test]
+    fn round_trip_de_cada_resposta() {
+        let casos = vec![
+            Response::Pong,
+            Response::Ok,
+            Response::Error {
+                message: "x".into(),
+            },
+            Response::Message {
+                text: "oi".into(),
+                from: "luka".into(),
+                at: 1,
+            },
+            Response::Listener {
+                alive: false,
+                rearm_attempts: 2,
+                rearm_command: Some("lukadispatch listen".into()),
+            },
+            Response::Answer {
+                answered: true,
+                text: Some("sim".into()),
+                reason: None,
+            },
+            Response::Decision {
+                decision: PermissionDecision::Allow,
+                reason: None,
+            },
+            Response::AskOpened {
+                ask_id: "abc".into(),
+            },
+            Response::Sessions {
+                sessions: vec![SessionSummary {
+                    session_id: "s1".into(),
+                    project: "p".into(),
+                    cwd: "/tmp".into(),
+                    topic_id: Some(7),
+                    status: "ocioso".into(),
+                    context_tokens: Some(10),
+                    context_limit: Some(200_000),
+                    owned_by_bot: true,
+                }],
+            },
+        ];
+        for caso in casos {
+            let txt = serde_json::to_string(&caso)
+                .unwrap_or_else(|e| panic!("{caso:?} não serializa: {e}"));
+            let volta: Response = serde_json::from_str(&txt).unwrap();
             assert_eq!(caso, volta);
         }
     }

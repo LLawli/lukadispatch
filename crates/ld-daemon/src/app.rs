@@ -11,10 +11,12 @@ use anyhow::{Context, Result, bail};
 use ld_core::ask::{Answer, Ask};
 use ld_core::config::{Config, Project};
 use ld_core::context;
+use ld_core::paths;
 use ld_core::proto::{
     EventKind, RegisterSession, Response, SessionEvent, SessionSummary, StopReport,
 };
 use ld_core::state::{Session, Store};
+use std::path::Path;
 use tracing::{info, warn};
 
 use crate::cards::{Acao, Card, Cards, Efeito};
@@ -30,6 +32,9 @@ const TETO_REARME: u32 = 3;
 
 pub struct App {
     pub cfg: Config,
+    /// Sem Telegram: nenhum tópico é criado e nada é enviado. Serve para desenvolver e testar o
+    /// canal de entrada numa máquina sem bot; a sessão continua real, no tmux, com os hooks.
+    pub offline: bool,
     pub store: Arc<Store>,
     pub tg: Tg,
     pub hub: Hub,
@@ -45,6 +50,7 @@ impl App {
         let panel = Panel::start(tg.clone(), store.clone());
         Self {
             cfg,
+            offline: std::env::var_os("LUKADISPATCH_OFFLINE").is_some(),
             store,
             tg,
             hub: Hub::new(),
@@ -68,13 +74,27 @@ impl App {
     /// Ordem importa: o tópico vem antes do tmux para a sessão já nascer com para onde falar. Se
     /// o tmux falhar, o tópico recém-criado é apagado, senão sobra tópico órfão a cada tentativa.
     pub async fn create_session(&self, projeto: &Project) -> Result<String> {
-        let topic = self.tg.create_topic(&projeto.name).await?;
+        let topic = match self.offline {
+            true => None,
+            false => Some(self.tg.create_topic(&projeto.name).await?),
+        };
+
+        // Antes de subir: a pasta precisa estar confiada, senão o Claude Code para num diálogo
+        // que só dá para responder no teclado do PC, e do celular a sessão parece muda.
+        if self.cfg.trust_projects
+            && let Ok(true) =
+                ld_core::trust::ensure_trusted(&paths::claude_json(), Path::new(&projeto.path))
+        {
+            info!(projeto = %projeto.path, "pasta marcada como confiada");
+        }
 
         let modo = self.cfg.permission_mode_for(&projeto.path);
         let lancada = match sessions::launch(projeto, &modo).await {
             Ok(l) => l,
             Err(e) => {
-                let _ = self.tg.delete_topic(topic).await;
+                if let Some(t) = topic {
+                    let _ = self.tg.delete_topic(t).await;
+                }
                 return Err(e);
             }
         };
@@ -85,14 +105,15 @@ impl App {
             cwd: projeto.path.clone(),
             transcript_path: None,
             tmux: Some(lancada.tmux.clone()),
-            topic_id: Some(topic),
+            topic_id: topic,
             status: "iniciando".into(),
             status_message_id: None,
             created_at: 0,
             ended_at: None,
         })?;
 
-        let _ = self
+        if let Some(topic) = topic {
+            let _ = self
             .tg
             .send_html(
                 Some(topic),
@@ -104,9 +125,10 @@ impl App {
                 ),
             )
             .await;
+        }
 
         self.panel.refresh();
-        info!(sessao = %lancada.session_id, topico = topic, projeto = %projeto.name, "sessão criada");
+        info!(sessao = %lancada.session_id, topico = ?topic, projeto = %projeto.name, "sessão criada");
         Ok(lancada.session_id)
     }
 
@@ -150,6 +172,27 @@ impl App {
         Ok(())
     }
 
+    /// Encerra as sessões cujo tmux não existe mais.
+    ///
+    /// Duas coisas deixam esse lixo para trás: a sessão morre sozinha (crash, `exit` digitado no
+    /// PC) com o daemon fora do ar, e o lançamento falha depois que o registro já foi gravado.
+    /// Sem isto elas ficam no painel para sempre, e o tópico delas vira um canal que não responde.
+    pub async fn reconcile(&self) -> Result<usize> {
+        let mut mortas = 0;
+        for s in self.store.live()? {
+            let Some(tmux) = &s.tmux else {
+                continue; // sessão do terminal: quem cuida dela é o hook SessionEnd.
+            };
+            if sessions::has_session(tmux).await {
+                continue;
+            }
+            warn!(sessao = %s.session_id, tmux = %tmux, "tmux sumiu; encerrando a sessão");
+            self.end_session(&s.session_id, true).await?;
+            mortas += 1;
+        }
+        Ok(mortas)
+    }
+
     // ---------------------------------------------------------------- vindo do Telegram
 
     /// Mensagem sua num tópico de sessão.
@@ -181,6 +224,22 @@ impl App {
         self.status
             .set(&self.ctx(), &s.session_id, topic, "Pensando...".into());
         Ok(())
+    }
+
+    /// Entrega uma mensagem direto a uma sessão, sem Telegram no caminho.
+    pub fn inject(&self, session_id: &str, texto: &str) -> Result<bool> {
+        let entregue = self.hub.deliver(
+            session_id,
+            Incoming {
+                text: texto.to_string(),
+                from: "pc".into(),
+                at: agora(),
+            },
+        );
+        if !entregue {
+            self.store.enqueue(session_id, texto, "pc")?;
+        }
+        Ok(entregue)
     }
 
     // ---------------------------------------------------------------- vindo dos hooks

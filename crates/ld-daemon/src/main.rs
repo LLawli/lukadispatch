@@ -27,14 +27,21 @@ async fn main() -> Result<()> {
         .init();
 
     let cfg = Config::load(&paths::config_file())?;
-    let token = Config::telegram_token()?;
-    if cfg.telegram.chat_id == 0 {
+    // Modo offline: sobe só o socket e as sessões. Serve para testar o canal de entrada numa
+    // máquina que ainda não tem bot, sem abrir mão de nada do resto (tmux, hooks, Monitor).
+    let offline = std::env::var_os("LUKADISPATCH_OFFLINE").is_some();
+    let token = if offline {
+        String::new()
+    } else {
+        Config::telegram_token()?
+    };
+    if !offline && cfg.telegram.chat_id == 0 {
         anyhow::bail!(
             "falta o chat_id: ponha em {} ou em LUKADISPATCH_CHAT_ID",
             paths::config_file().display()
         );
     }
-    if cfg.telegram.allowed_user_ids.is_empty() {
+    if !offline && cfg.telegram.allowed_user_ids.is_empty() {
         anyhow::bail!(
             "allowed_user_ids está vazio em {}: sem isso o bot não obedeceria ninguém",
             paths::config_file().display()
@@ -45,16 +52,33 @@ async fn main() -> Result<()> {
 
     let store = ld_core::state::Store::open(&paths::state_db())?;
     let tg = Tg::new(token, cfg.telegram.chat_id);
-    let eu = tg.preflight().await?;
-    info!(bot = %eu, chat = cfg.telegram.chat_id, "conectado ao Telegram");
+    if offline {
+        info!("modo offline: sem Telegram, só socket e sessões");
+    } else {
+        let eu = tg.preflight().await?;
+        info!(bot = %eu, chat = cfg.telegram.chat_id, "conectado ao Telegram");
+    }
 
     let app = Arc::new(App::new(cfg, store, tg));
+
+    // Antes de qualquer coisa: o que sobrou de antes do restart pode já estar morto.
+    match app.reconcile().await {
+        Ok(n) if n > 0 => info!(mortas = n, "sessões órfãs encerradas na partida"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(erro = %e, "reconciliação falhou"),
+    }
 
     let socket_app = app.clone();
     let caminho_socket = paths::socket();
     let socket = tokio::spawn(async move { socket::serve(socket_app, caminho_socket).await });
     let poll_app = app.clone();
-    let poll = tokio::spawn(async move { poll::run(poll_app).await });
+    let poll = tokio::spawn(async move {
+        if offline {
+            // Nada de long polling sem token: ficaria batendo em 401 para sempre.
+            std::future::pending::<()>().await;
+        }
+        poll::run(poll_app).await
+    });
 
     // Relógio do painel: a contagem para o reset das janelas envelhece sozinha, então ele
     // precisa se redesenhar mesmo quando nada acontece.
@@ -63,6 +87,11 @@ async fn main() -> Result<()> {
         let mut tique = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
             tique.tick().await;
+            // Uma sessão pode morrer a qualquer momento (crash, `exit` no PC): sem esta varredura
+            // o painel mostraria uma sessão viva que não existe mais.
+            if let Err(e) = painel_app.reconcile().await {
+                tracing::warn!(erro = %e, "reconciliação falhou");
+            }
             painel_app.panel.refresh();
         }
     });
@@ -88,25 +117,9 @@ fn escreve_settings_das_sessoes() -> Result<()> {
     if let Some(pai) = destino.parent() {
         std::fs::create_dir_all(pai)?;
     }
-    let cli = caminho_do_cli();
+    let cli = paths::cli();
     let json = serde_json::to_string_pretty(&hooks::bot_settings(&cli))?;
     std::fs::write(&destino, json).with_context(|| format!("escrevendo {}", destino.display()))?;
     info!(settings = %destino.display(), cli = %cli, "settings das sessões atualizado");
     Ok(())
-}
-
-/// Caminho do binário `lukadispatch` que os hooks vão chamar.
-///
-/// Procura ao lado do próprio daemon antes de confiar no PATH: num serviço systemd o PATH é
-/// mínimo, e o hook que não acha o binário falha silenciosamente (é `async`, ninguém vê).
-fn caminho_do_cli() -> String {
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        let vizinho = dir.join("lukadispatch");
-        if vizinho.is_file() {
-            return vizinho.to_string_lossy().into_owned();
-        }
-    }
-    "lukadispatch".to_string()
 }

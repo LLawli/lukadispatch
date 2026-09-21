@@ -21,6 +21,12 @@ pub struct Config {
     pub projects: Vec<Project>,
     /// Modo de permissão usado quando o projeto não declara o dele.
     pub default_permission_mode: String,
+    /// Marcar a pasta do projeto como confiada antes de abrir a sessão.
+    ///
+    /// Sem isso, projeto fora de uma árvore já confiada trava no diálogo de confiança do Claude
+    /// Code, e do celular isso aparece como uma sessão muda. Vale só para os projetos que este
+    /// config oferece, nunca para um caminho arbitrário.
+    pub trust_projects: bool,
 }
 
 impl Default for Config {
@@ -30,6 +36,7 @@ impl Default for Config {
             scan: Scan::default(),
             projects: Vec::new(),
             default_permission_mode: "auto".into(),
+            trust_projects: true,
         }
     }
 }

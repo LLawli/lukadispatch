@@ -12,6 +12,7 @@ pub mod labels;
 pub mod paths;
 pub mod proto;
 pub mod state;
+pub mod trust;
 pub mod usage;
 
 pub use proto::{Request, Response};

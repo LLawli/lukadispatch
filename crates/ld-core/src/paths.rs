@@ -54,6 +54,23 @@ pub fn bot_settings_file() -> PathBuf {
     state_dir().join("bot-settings.json")
 }
 
+/// Caminho do binário `lukadispatch`, do jeito que outro processo precisa dele.
+///
+/// Procura ao lado do executável atual antes de confiar no PATH, e isso importa em dois lugares
+/// onde o PATH não é o seu: um serviço systemd tem PATH mínimo, e o comando que o Monitor roda
+/// dentro da sessão herda o ambiente do Claude Code. Caminho absoluto resolve os dois.
+pub fn cli() -> String {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let vizinho = dir.join("lukadispatch");
+        if vizinho.is_file() {
+            return vizinho.to_string_lossy().into_owned();
+        }
+    }
+    "lukadispatch".to_string()
+}
+
 /// Diretório do Claude Code do usuário (transcripts, settings global, banco de uso).
 pub fn claude_dir() -> PathBuf {
     match std::env::var_os("CLAUDE_CONFIG_DIR") {
@@ -64,6 +81,11 @@ pub fn claude_dir() -> PathBuf {
 
 pub fn claude_settings() -> PathBuf {
     claude_dir().join("settings.json")
+}
+
+/// `~/.claude.json`: onde o Claude Code guarda, entre outras coisas, a confiança por pasta.
+pub fn claude_json() -> PathBuf {
+    home().join(".claude.json")
 }
 
 /// Banco do XClaudeUsage: quem escreve é o statusline/hook do usuário, aqui só lemos.
