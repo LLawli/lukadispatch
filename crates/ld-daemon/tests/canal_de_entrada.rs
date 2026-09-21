@@ -69,7 +69,9 @@ async fn fila_antiga_sai_antes_da_mensagem_nova() {
     let app = sobe_daemon(dir.path()).await;
 
     // Chegou com a sessão surda: tem que ficar guardada.
-    app.store.enqueue("s1", "mensagem da fila", "luka").unwrap();
+    app.store
+        .enqueue("s1", "mensagem da fila", "luka", &[])
+        .unwrap();
 
     let mut stream = UnixStream::connect(dir.path().join("ld.sock"))
         .await
@@ -99,14 +101,10 @@ async fn fila_antiga_sai_antes_da_mensagem_nova() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(app.hub.deliver(
-        "s1",
-        Incoming {
-            text: "mensagem ao vivo".into(),
-            from: "luka".into(),
-            at: 0,
-        }
-    ));
+    assert!(
+        app.hub
+            .deliver("s1", Incoming::texto("mensagem ao vivo", "luka", 0))
+    );
 
     let segunda: Response =
         serde_json::from_str(&linhas.next_line().await.unwrap().unwrap()).unwrap();
@@ -144,19 +142,55 @@ async fn mensagem_com_quebra_de_linha_continua_sendo_um_evento_so() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    app.hub.deliver(
-        "s1",
-        Incoming {
-            text: "primeira\nsegunda".into(),
-            from: "luka".into(),
-            at: 0,
-        },
-    );
+    app.hub
+        .deliver("s1", Incoming::texto("primeira\nsegunda", "luka", 0));
 
     let bruta = linhas.next_line().await.unwrap().unwrap();
     let r: Response = serde_json::from_str(&bruta).unwrap();
     match r {
         Response::Message { text, .. } => assert_eq!(text, "primeira\nsegunda"),
+        outra => panic!("veio {outra:?}"),
+    }
+}
+
+/// O caminho do anexo tem que sobreviver à fila: o arquivo chega em disco antes de a sessão
+/// estar ouvindo, e é só o caminho que espera no banco.
+#[tokio::test(flavor = "multi_thread")]
+async fn anexo_guardado_chega_com_o_caminho() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = sobe_daemon(dir.path()).await;
+
+    app.store
+        .enqueue(
+            "s1",
+            "[arquivo recebido: /data/nota.pdf]",
+            "luka",
+            &["/data/nota.pdf".to_string()],
+        )
+        .unwrap();
+
+    let mut stream = UnixStream::connect(dir.path().join("ld.sock"))
+        .await
+        .unwrap();
+    pede(
+        &mut stream,
+        &Request::Listen {
+            session_id: "s1".into(),
+        },
+    )
+    .await;
+    let (leitura, _e) = stream.into_split();
+    let mut linhas = BufReader::new(leitura).lines();
+
+    let r: Response = serde_json::from_str(&linhas.next_line().await.unwrap().unwrap()).unwrap();
+    match r {
+        Response::Message { text, files, .. } => {
+            assert_eq!(files, vec!["/data/nota.pdf".to_string()]);
+            assert!(
+                text.contains("/data/nota.pdf"),
+                "o texto também leva o caminho"
+            );
+        }
         outra => panic!("veio {outra:?}"),
     }
 }

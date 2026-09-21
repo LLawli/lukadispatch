@@ -16,6 +16,15 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::proto::SessionSummary;
 
+/// Uma mensagem que esperou na fila porque a sessão estava sem monitor armado.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Guardada {
+    pub text: String,
+    pub from: String,
+    pub at: i64,
+    pub files: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Session {
     pub session_id: String,
@@ -71,7 +80,9 @@ CREATE TABLE IF NOT EXISTS queue (
     session_id TEXT NOT NULL,
     text       TEXT NOT NULL,
     from_name  TEXT NOT NULL,
-    at         INTEGER NOT NULL
+    at         INTEGER NOT NULL,
+    -- Caminhos dos anexos já baixados, em JSON. NULL é o caso comum (mensagem de texto).
+    files      TEXT
 );
 CREATE INDEX IF NOT EXISTS queue_por_sessao ON queue(session_id, id);
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -89,6 +100,7 @@ fn migra(conn: &Connection) {
             [],
         );
     }
+    let _ = conn.execute("ALTER TABLE queue ADD COLUMN files TEXT", []);
 }
 
 fn agora() -> i64 {
@@ -315,24 +327,43 @@ impl Store {
         Ok(linhas.flatten().collect())
     }
 
-    pub fn enqueue(&self, session_id: &str, texto: &str, de: &str) -> Result<()> {
+    pub fn enqueue(&self, session_id: &str, texto: &str, de: &str, files: &[String]) -> Result<()> {
+        // Lista vazia vira NULL em vez de "[]": o caso comum é mensagem sem anexo, e assim a
+        // coluna nova não muda nada para quem só manda texto.
+        let files = if files.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(files)?)
+        };
         self.conn().execute(
-            "INSERT INTO queue (session_id, text, from_name, at) VALUES (?1, ?2, ?3, ?4)",
-            params![session_id, texto, de, agora()],
+            "INSERT INTO queue (session_id, text, from_name, at, files) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![session_id, texto, de, agora(), files],
         )?;
         Ok(())
     }
 
     /// Tira da fila tudo que estava guardado para a sessão. Usado quando um `Listen` abre: as
     /// mensagens que chegaram sem ninguém ouvindo são entregues antes de a espera começar.
-    pub fn drain(&self, session_id: &str) -> Result<Vec<(String, String, i64)>> {
+    pub fn drain(&self, session_id: &str) -> Result<Vec<Guardada>> {
         let mut c = self.conn();
         let tx = c.transaction()?;
-        let itens: Vec<(String, String, i64)> = {
+        let itens: Vec<Guardada> = {
             let mut stmt = tx.prepare(
-                "SELECT text, from_name, at FROM queue WHERE session_id = ?1 ORDER BY id",
+                "SELECT text, from_name, at, files FROM queue WHERE session_id = ?1 ORDER BY id",
             )?;
-            let linhas = stmt.query_map([session_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            let linhas = stmt.query_map([session_id], |r| {
+                let files: Option<String> = r.get(3)?;
+                Ok(Guardada {
+                    text: r.get(0)?,
+                    from: r.get(1)?,
+                    at: r.get(2)?,
+                    // JSON corrompido na coluna não pode derrubar a entrega da mensagem: o
+                    // texto ainda vale, e o anexo perdido aparece como ausência de caminho.
+                    files: files
+                        .and_then(|j| serde_json::from_str(&j).ok())
+                        .unwrap_or_default(),
+                })
+            })?;
             linhas.flatten().collect()
         };
         tx.execute("DELETE FROM queue WHERE session_id = ?1", [session_id])?;
@@ -502,7 +533,7 @@ mod tests {
     fn rekey_do_clear_move_topico_e_fila() {
         let st = Store::open_memory().unwrap();
         st.upsert(&sessao("velha")).unwrap();
-        st.enqueue("velha", "oi", "luka").unwrap();
+        st.enqueue("velha", "oi", "luka", &[]).unwrap();
 
         let mut nova = sessao("nova");
         nova.topic_id = None;
@@ -537,14 +568,38 @@ mod tests {
     fn fila_entrega_em_ordem_e_esvazia() {
         let st = Store::open_memory().unwrap();
         st.upsert(&sessao("s1")).unwrap();
-        st.enqueue("s1", "um", "luka").unwrap();
-        st.enqueue("s1", "dois", "luka").unwrap();
+        st.enqueue("s1", "um", "luka", &[]).unwrap();
+        st.enqueue("s1", "dois", "luka", &[]).unwrap();
         let itens = st.drain("s1").unwrap();
         assert_eq!(
-            itens.iter().map(|i| i.0.as_str()).collect::<Vec<_>>(),
+            itens.iter().map(|i| i.text.as_str()).collect::<Vec<_>>(),
             vec!["um", "dois"]
         );
         assert!(st.drain("s1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn fila_guarda_o_caminho_do_anexo() {
+        let st = Store::open_memory().unwrap();
+        st.upsert(&sessao("s1")).unwrap();
+        st.enqueue(
+            "s1",
+            "[arquivo recebido: nota.pdf]",
+            "luka",
+            &["/data/nota.pdf".to_string()],
+        )
+        .unwrap();
+        let itens = st.drain("s1").unwrap();
+        assert_eq!(itens[0].files, vec!["/data/nota.pdf".to_string()]);
+    }
+
+    #[test]
+    fn fila_sem_anexo_volta_com_lista_vazia() {
+        // A coluna nasceu depois, então a linha antiga tem NULL ali: isso não pode virar erro.
+        let st = Store::open_memory().unwrap();
+        st.upsert(&sessao("s1")).unwrap();
+        st.enqueue("s1", "oi", "luka", &[]).unwrap();
+        assert!(st.drain("s1").unwrap()[0].files.is_empty());
     }
 
     #[test]

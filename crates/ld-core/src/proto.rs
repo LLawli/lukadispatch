@@ -177,10 +177,16 @@ pub enum Response {
 
     /// Uma mensagem vinda do Telegram para a sessão. É a linha que o Monitor transforma em
     /// evento dentro do Claude.
+    ///
+    /// `files` são caminhos absolutos de anexos já baixados em disco, para a sessão abrir com
+    /// Read. Fica de fora quando está vazio: a linha é a mesma de antes para mensagem de texto,
+    /// e um `listen` de versão anterior continua repassando o que não conhece.
     Message {
         text: String,
         from: String,
         at: i64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        files: Vec<String>,
     },
 
     /// Encerra um `Listen` de vez: outro monitor assumiu o lugar deste.
@@ -309,6 +315,13 @@ mod tests {
                 text: "oi".into(),
                 from: "luka".into(),
                 at: 1,
+                files: vec![],
+            },
+            Response::Message {
+                text: "[arquivo recebido: nota.pdf]".into(),
+                from: "luka".into(),
+                at: 1,
+                files: vec!["/home/luka/.local/share/lukadispatch/arquivos/s1/nota.pdf".into()],
             },
             Response::Listener {
                 alive: false,
@@ -360,6 +373,7 @@ mod tests {
             text: "linha1\nlinha2".into(),
             from: "luka".into(),
             at: 0,
+            files: vec![],
         };
         let txt = line(&r);
         assert_eq!(txt.matches('\n').count(), 1);

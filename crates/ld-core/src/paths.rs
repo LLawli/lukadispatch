@@ -39,6 +39,23 @@ pub fn config_dir() -> PathBuf {
     xdg("XDG_CONFIG_HOME", ".config").join("lukadispatch")
 }
 
+/// Onde ficam os arquivos que chegaram pelo Telegram para uma sessão.
+///
+/// Fora do projeto e fora do `/tmp`, e cada uma das duas coisas por um motivo: dentro do projeto
+/// o anexo entraria num `git add -A` sem ninguém pedir, e o `/tmp` desta máquina é tmpfs, ou
+/// seja, um PDF de 15 MB largado ali é RAM que não volta. O diretório é por sessão porque é a
+/// sessão que é apagada no fim.
+pub fn arquivos_dir(session_id: &str) -> PathBuf {
+    arquivos_base().join(session_id)
+}
+
+/// A raiz de todos os diretórios de sessão. É o que a varredura de órfãos percorre.
+pub fn arquivos_base() -> PathBuf {
+    xdg("XDG_DATA_HOME", ".local/share")
+        .join("lukadispatch")
+        .join("arquivos")
+}
+
 pub fn config_file() -> PathBuf {
     config_dir().join("config.toml")
 }

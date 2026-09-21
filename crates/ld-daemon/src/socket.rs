@@ -399,11 +399,12 @@ async fn escuta(
     let (token, mut rx) = app.hub.listen(&session_id);
 
     if let Ok(guardadas) = app.store.drain(&session_id) {
-        for (texto, de, at) in guardadas {
+        for g in guardadas {
             let msg = Response::Message {
-                text: texto,
-                from: de,
-                at,
+                text: g.text,
+                from: g.from,
+                at: g.at,
+                files: g.files,
             };
             escrita.write_all(line(&msg).as_bytes()).await?;
         }
@@ -414,7 +415,7 @@ async fn escuta(
             recebida = rx.recv() => {
                 match recebida {
                     Some(crate::hub::Aviso::Mensagem(m)) => {
-                        let msg = Response::Message { text: m.text, from: m.from, at: m.at };
+                        let msg = Response::Message { text: m.text, from: m.from, at: m.at, files: m.files };
                         if escrita.write_all(line(&msg).as_bytes()).await.is_err() {
                             break;
                         }

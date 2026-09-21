@@ -15,6 +15,7 @@ use teloxide::types::{Update, UpdateKind};
 use tracing::{info, warn};
 
 use crate::app::App;
+use crate::arquivos::{self, Achado, Anexo};
 use crate::telegram::{TTL_RESPOSTA, TTL_TECLADO, coluna, escape_html};
 
 pub async fn run(app: Arc<App>) {
@@ -70,13 +71,31 @@ async fn trata(app: Arc<App>, u: Update) -> anyhow::Result<()> {
             if msg.chat.id != app.tg.chat() {
                 return Ok(());
             }
-            let Some(texto) = msg.text() else {
-                return Ok(());
-            };
             let nome = quem.first_name.clone();
+            // Anexo vem com legenda, e não com texto: para o resto do fluxo os dois são a mesma
+            // coisa, o que você escreveu junto.
+            let texto = msg.text().or_else(|| msg.caption()).unwrap_or("");
+            let achado = arquivos::anexos(&msg);
 
             match msg.thread_id {
-                Some(t) => em_topico(&app, t.0.0, texto, &nome, msg.id).await,
+                Some(t) => match achado {
+                    Achado::Arquivos(lista) => com_arquivos(&app, t.0.0, texto, &nome, lista).await,
+                    // Sem transcrição, um .ogg salvo em disco não serve para nada à sessão. O que
+                    // não pode acontecer é o áudio sumir calado, como se ninguém tivesse ouvido.
+                    Achado::Audio => {
+                        let _ = app
+                            .tg
+                            .send_html(
+                                Some(t.0.0),
+                                "🎤 <i>áudio ainda não: falta a transcrição, e sem ela o arquivo não diz nada à sessão. Por enquanto, escreva.</i>",
+                            )
+                            .await;
+                        Ok(())
+                    }
+                    Achado::Nada if texto.is_empty() => Ok(()),
+                    Achado::Nada => em_topico(&app, t.0.0, texto, &nome, msg.id).await,
+                },
+                None if texto.is_empty() => Ok(()),
                 None => {
                     // O General é o painel, e só. O comando que você mandou some junto com a
                     // resposta dele; o que fica é a mensagem de estado, que é editada no lugar.
@@ -273,6 +292,105 @@ async fn em_topico(
             }
             Ok(())
         }
+    }
+}
+
+/// Mensagem com anexo: baixa, grava em disco e entrega o caminho à sessão.
+///
+/// O arquivo é baixado antes de a mensagem seguir, e de propósito: o `file_id` do Telegram não é
+/// eterno, e uma sessão que só recebesse o id teria de falar com a API por conta própria. O que
+/// ela recebe é um caminho que já existe.
+async fn com_arquivos(
+    app: &Arc<App>,
+    topic: i32,
+    legenda: &str,
+    de: &str,
+    lista: Vec<Anexo>,
+) -> anyhow::Result<()> {
+    let Some(s) = app.session_for_topic(topic).await? else {
+        let _ = app
+            .tg
+            .send_html(Some(topic), "Este tópico não tem sessão viva.")
+            .await;
+        return Ok(());
+    };
+
+    let mut caminhos = Vec::new();
+    for anexo in &lista {
+        match arquivos::baixa(app.tg.bot(), &s.session_id, anexo).await {
+            Ok(caminho) => {
+                info!(sessao = %s.session_id, arquivo = %caminho.display(), "anexo recebido");
+                let _ = app
+                    .tg
+                    .send_html(
+                        Some(topic),
+                        &format!(
+                            "📎 <b>{}</b> · {}\n<code>{}</code>",
+                            escape_html(
+                                caminho
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy())
+                                    .unwrap_or_default()
+                                    .as_ref()
+                            ),
+                            arquivos::humano(anexo.tamanho),
+                            escape_html(&caminho.to_string_lossy())
+                        ),
+                    )
+                    .await;
+                caminhos.push(caminho.to_string_lossy().into_owned());
+            }
+            Err(e) => {
+                warn!(sessao = %s.session_id, erro = %e, "não consegui baixar o anexo");
+                let _ = app
+                    .tg
+                    .send_html(
+                        Some(topic),
+                        &format!(
+                            "⚠️ não consegui trazer {} {}: {}",
+                            artigo(anexo.tipo),
+                            escape_html(anexo.tipo),
+                            escape_html(&format!("{e:#}"))
+                        ),
+                    )
+                    .await;
+            }
+        }
+    }
+
+    // Nada chegou em disco: a sessão não tem o que ler, e o aviso do erro já foi para o tópico.
+    if caminhos.is_empty() {
+        return Ok(());
+    }
+
+    app.on_incoming_com_arquivos(topic, &texto_com_anexo(legenda, &caminhos), de, caminhos)
+        .await
+}
+
+/// O que a sessão lê quando chega um arquivo.
+///
+/// O caminho vai no texto, e não só no campo `files`, porque o texto é o que o agente lê primeiro
+/// (e é o que sobrevive a um `lukadispatch listen` de versão anterior, que repassa a linha sem
+/// entender o campo novo). Sem legenda, o texto não pode ficar vazio: uma mensagem em branco
+/// chegando do nada parece bug.
+fn texto_com_anexo(legenda: &str, caminhos: &[String]) -> String {
+    let lista = caminhos
+        .iter()
+        .map(|c| format!("[arquivo recebido: {c}]"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if legenda.trim().is_empty() {
+        lista
+    } else {
+        format!("{legenda}\n\n{lista}")
+    }
+}
+
+/// "a foto", "o documento": o tipo do anexo já vem em português, só falta concordar.
+fn artigo(tipo: &str) -> &'static str {
+    match tipo {
+        "foto" | "animação" | "figurinha" | "nota de vídeo" => "a",
+        _ => "o",
     }
 }
 

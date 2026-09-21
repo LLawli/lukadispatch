@@ -25,6 +25,20 @@ pub struct Incoming {
     pub text: String,
     pub from: String,
     pub at: i64,
+    /// Caminhos absolutos dos anexos já gravados em disco. Vazio na mensagem de texto.
+    pub files: Vec<String>,
+}
+
+impl Incoming {
+    /// Mensagem sem anexo, que é a esmagadora maioria.
+    pub fn texto(text: impl Into<String>, from: impl Into<String>, at: i64) -> Self {
+        Self {
+            text: text.into(),
+            from: from.into(),
+            at,
+            files: Vec::new(),
+        }
+    }
 }
 
 /// Uma pergunta (ou pedido de permissão) esperando resposta humana.
@@ -195,14 +209,7 @@ mod tests {
     fn sem_listener_a_entrega_falha() {
         let hub = Hub::new();
         assert!(!hub.has_listener("s1"));
-        assert!(!hub.deliver(
-            "s1",
-            Incoming {
-                text: "oi".into(),
-                from: "luka".into(),
-                at: 0
-            }
-        ));
+        assert!(!hub.deliver("s1", Incoming::texto("oi", "luka", 0)));
     }
 
     #[tokio::test]
@@ -210,14 +217,7 @@ mod tests {
         let hub = Hub::new();
         let (_t, mut rx) = hub.listen("s1");
         assert!(hub.has_listener("s1"));
-        assert!(hub.deliver(
-            "s1",
-            Incoming {
-                text: "oi".into(),
-                from: "luka".into(),
-                at: 0
-            }
-        ));
+        assert!(hub.deliver("s1", Incoming::texto("oi", "luka", 0)));
         match rx.recv().await.unwrap() {
             Aviso::Mensagem(m) => assert_eq!(m.text, "oi"),
             Aviso::Substituido => panic!("não houve substituição"),
@@ -248,14 +248,7 @@ mod tests {
         let hub = Hub::new();
         let (_t, rx) = hub.listen("s1");
         drop(rx);
-        assert!(!hub.deliver(
-            "s1",
-            Incoming {
-                text: "oi".into(),
-                from: "luka".into(),
-                at: 0
-            }
-        ));
+        assert!(!hub.deliver("s1", Incoming::texto("oi", "luka", 0)));
         assert!(!hub.has_listener("s1"));
     }
 

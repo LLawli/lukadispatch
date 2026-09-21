@@ -290,6 +290,11 @@ impl App {
             }
         }
 
+        // Os anexos morrem com a sessão, como o tópico: foi a escolha de guardar o mínimo, e
+        // vale para o caso comum. Se um arquivo precisa sobreviver, ele sai daqui pela sessão,
+        // que grava onde você mandar.
+        crate::arquivos::limpa(session_id).await;
+
         self.store.end(session_id)?;
         self.panel.refresh();
         info!(sessao = %session_id, "sessão encerrada");
@@ -569,6 +574,19 @@ impl App {
             }
         }
 
+        // Anexo de sessão que já não existe (o `/clear` troca o id sem encerrar nada, e o
+        // daemon pode ter morrido no meio de um fechamento) fica em disco sem dono.
+        let vivas: std::collections::HashSet<String> = self
+            .store
+            .live()?
+            .into_iter()
+            .map(|s| s.session_id)
+            .collect();
+        let apagados = crate::arquivos::varre_orfaos(&vivas).await;
+        if apagados > 0 {
+            info!(apagados, "arquivos de sessões mortas removidos");
+        }
+
         // O contrário também acontece: o tmux ficou vivo com a sessão já encerrada no banco (um
         // relançamento interrompido no meio, por exemplo). Ninguém mais fala com ele, e o tópico
         // dele já foi apagado, então é lixo que só consome memória.
@@ -585,6 +603,18 @@ impl App {
 
     /// Mensagem sua num tópico de sessão.
     pub async fn on_incoming(&self, topic: i32, texto: &str, de: &str) -> Result<()> {
+        self.on_incoming_com_arquivos(topic, texto, de, Vec::new())
+            .await
+    }
+
+    /// O mesmo, com anexos já baixados: a sessão recebe os caminhos na própria linha.
+    pub async fn on_incoming_com_arquivos(
+        &self,
+        topic: i32,
+        texto: &str,
+        de: &str,
+        files: Vec<String>,
+    ) -> Result<()> {
         let Some(s) = self.store.by_topic(topic)? else {
             bail!("tópico {topic} não tem sessão viva");
         };
@@ -593,11 +623,13 @@ impl App {
             text: texto.to_string(),
             from: de.to_string(),
             at: agora(),
+            files: files.clone(),
         };
         if !self.hub.deliver(&s.session_id, msg) {
             // Sem monitor armado: guarda para entregar assim que ele voltar, e diz isso, senão
-            // parece que a mensagem sumiu.
-            self.store.enqueue(&s.session_id, texto, de)?;
+            // parece que a mensagem sumiu. O anexo já está em disco, então o que espera na fila
+            // é só o caminho dele.
+            self.store.enqueue(&s.session_id, texto, de, &files)?;
             let _ = self
                 .tg
                 .send_html(
@@ -654,18 +686,13 @@ impl App {
 
     /// Entrega uma mensagem direto a uma sessão, sem Telegram no caminho.
     pub fn inject(&self, session_id: &str, texto: &str) -> Result<bool> {
-        let entregue = self.hub.deliver(
-            session_id,
-            Incoming {
-                text: texto.to_string(),
-                from: "pc".into(),
-                at: agora(),
-            },
-        );
+        let entregue = self
+            .hub
+            .deliver(session_id, Incoming::texto(texto, "pc", agora()));
         if entregue {
             self.marca_pedido(session_id);
         } else {
-            self.store.enqueue(session_id, texto, "pc")?;
+            self.store.enqueue(session_id, texto, "pc", &[])?;
         }
         Ok(entregue)
     }

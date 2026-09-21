@@ -5,6 +5,7 @@
 //! entrega) é justamente a parte que precisa ser testada de verdade, sem Telegram no meio.
 
 pub mod app;
+pub mod arquivos;
 pub mod cards;
 pub mod hub;
 pub mod panel;
