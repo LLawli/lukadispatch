@@ -121,7 +121,13 @@ Dentro do tópico de uma sessão, qualquer mensagem vai para o Claude. Além dis
   binário do Claude Code: aparecem também os modelos que o menu `/model` dele não mostra, e as
   variantes de janela de 1M. `/model claude-opus-4-8[1m]` funciona direto, sem menu.
 - `/effort` faz o mesmo para o nível de esforço.
+- `/mode` troca o modo de permissão: auto, perguntar sempre, plano, liberar tudo. O modo é por
+  sessão e sobrevive a um relançamento, então ele não volta ao padrão do projeto sozinho.
 - `/kill` fecha a sessão e apaga o tópico.
+
+Perguntas do Claude viram card com botões, e **também aceitam resposta escrita**: o que você
+digitar no tópico com um card aberto é a resposta dele. Respondido, o card perde os botões e vira
+o registro do que foi perguntado e escolhido; sem resposta (6h ou sessão morta), some.
 
 **Como a troca de modelo funciona, e por que ela não perde nada.** `/model` e `/effort` são
 comandos do frontend do Claude Code: nenhum evento consegue dispará-los, e digitar no terminal
@@ -171,6 +177,27 @@ tmux attach -t ld-<projeto>-<id>     # a sessão é um tmux de verdade
   constrói o cliente com um teto maior; com o padrão, toda janela ociosa morre em erro de rede.
 - **Texto do agente vai sem `parse_mode`.** Resposta de Claude tem crase, asterisco e colchete o
   tempo todo; em MarkdownV2 isso vira erro 400 e a mensagem não chega.
+- **Com `auto` ligado, não há card de permissão para ver.** O classificador decide antes de o
+  pedido virar prompt, e o mesmo vale para o diálogo próprio de um servidor MCP: ele nunca chega
+  a ser acionado. Para exercitar permissão pelo celular, `/mode` e escolha "perguntar sempre".
+- **Diálogo de servidor MCP (elicitation) não dá para responder pelo Telegram.** O hook existe,
+  mas é só notificação: a documentação diz que a saída dele é ignorada nesse evento. O daemon
+  avisa no tópico o que foi pedido e por qual `tmux attach` responder, e só.
+
+## Caminho não percorrido: preview como imagem
+
+As opções do `AskUserQuestion` podem trazer um `preview` (maquete em ASCII, trecho de código).
+Hoje ele vai em bloco `<pre>` no Telegram e em fonte de largura fixa com rolagem lateral na
+janela GTK4, e nos testes o desenho se manteve nos dois.
+
+Se um dia aparecer uma maquete larga demais e o Telegram quebrar a linha em vez de rolar, o
+conserto é **renderizar o preview como imagem** e mandar como foto, que é o que o `sdispath` faz
+com todas as mensagens dele. A diferença proposta é fazê-lo **só nos previews que precisam** (por
+exemplo, linha acima de ~40 colunas), mantendo o resto em texto, que é pesquisável e copiável.
+
+Custo estimado: três crates (`usvg`, `resvg`, `tiny-skia`), montar um SVG com o texto em fonte
+monoespaçada e rasterizar, mais a escolha da fonte em tempo de execução. Não foi feito porque o
+`<pre>` resolveu; fica registrado para não ser redescoberto do zero.
 
 ## Desenvolver e testar sem bot
 
