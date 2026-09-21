@@ -27,6 +27,15 @@ use crate::sessions;
 use crate::status::{Ctx, StatusBoard};
 use crate::telegram::{Tg, escape_html};
 
+/// De onde veio o pedido de encerrar a sessão.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fim {
+    /// Você mandou (`/kill`, `lukadispatch kill`).
+    Explicito,
+    /// O hook `SessionEnd` avisou que o processo acabou.
+    Hook,
+}
+
 /// Depois de tantas cobranças seguidas de re-arme sem sucesso, o daemon para de insistir e
 /// avisa. Insistir para sempre prenderia a sessão num laço de acordar-e-não-resolver.
 const TETO_REARME: u32 = 3;
@@ -143,6 +152,7 @@ impl App {
             effort,
             resume: retomar,
             retomada: true,
+            wrap_mcp: self.cfg.wrap_mcp,
         };
         let lancada = match sessions::launch(&spec).await {
             Ok(l) => l,
@@ -198,17 +208,40 @@ impl App {
     /// Encerra a sessão: mata o tmux, fecha as perguntas abertas, apaga o tópico e marca no
     /// banco. Idempotente de propósito, porque dois caminhos chegam aqui (o /kill do Telegram e
     /// o hook SessionEnd de quando você fecha o Claude no PC).
+    /// Quem pediu o fim da sessão.
+    ///
+    /// A diferença importa por causa da janela de relançamento: matar o tmux para trocar de
+    /// modelo dispara um `SessionEnd` que NÃO é fim de sessão, e essa marca existe para ignorá-lo.
+    /// Só que ela engolia também um `/kill` seu dado logo depois da troca, e a sessão ficava viva
+    /// com você achando que tinha fechado.
     pub async fn end_session(&self, session_id: &str, apagar_topico: bool) -> Result<()> {
+        self.encerra(session_id, apagar_topico, Fim::Explicito)
+            .await
+    }
+
+    /// Fim vindo do hook `SessionEnd`, que respeita a janela de relançamento.
+    pub async fn end_session_por_hook(&self, session_id: &str) -> Result<()> {
+        self.encerra(session_id, true, Fim::Hook).await
+    }
+
+    async fn encerra(&self, session_id: &str, apagar_topico: bool, quem: Fim) -> Result<()> {
         let Some(s) = self.store.get(session_id)? else {
             return Ok(());
         };
         if s.ended_at.is_some() {
             return Ok(());
         }
-        // Troca de modelo em andamento: este fim é do processo velho, não da sessão.
-        if self.em_relancamento(session_id) {
+        // Troca de modelo em andamento: o fim VINDO DO HOOK é do processo velho, não da sessão.
+        // Um pedido explícito seu passa por cima: você mandou fechar, fecha.
+        if quem == Fim::Hook && self.em_relancamento(session_id) {
             info!(sessao = %session_id, "fim ignorado: a sessão está sendo relançada");
             return Ok(());
+        }
+        if quem == Fim::Explicito {
+            self.relancando
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(session_id);
         }
 
         for ask in self.cards.da_sessao(session_id) {
@@ -385,6 +418,7 @@ impl App {
             effort: effort_final.as_deref(),
             resume: Some(session_id),
             retomada: false,
+            wrap_mcp: self.cfg.wrap_mcp,
         };
         let lancada = sessions::launch(&spec).await?;
 

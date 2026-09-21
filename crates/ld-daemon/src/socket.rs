@@ -133,7 +133,8 @@ async fn responde(app: &Arc<App>, req: Request) -> Response {
             Err(e) => erro(e),
         },
 
-        Request::SessionEnd { session_id, .. } => match app.end_session(&session_id, true).await {
+        Request::SessionEnd { session_id, .. } => match app.end_session_por_hook(&session_id).await
+        {
             Ok(()) => Response::Ok,
             Err(e) => erro(e),
         },
@@ -327,13 +328,13 @@ async fn permissao(
 
     let bruta = tokio::time::timeout(PRAZO_RESPOSTA, rx).await;
     let permitido = match &bruta {
-        Ok(Ok(t)) => Some(t == "allow"),
+        Ok(Ok(t)) => Some(e_permitir(t)),
         _ => None,
     };
     let resumo = permitido.map(|p| app.resumo_permissao(&ferramenta, p));
     app.cleanup_ask(&ask_id, resumo.as_deref()).await;
 
-    let resp = match bruta.map(|r| r.map(|t| t == "allow")) {
+    let resp = match bruta.map(|r| r.map(|t| e_permitir(&t))) {
         Ok(Ok(true)) => Response::Decision {
             decision: PermissionDecision::Allow,
             reason: Some("liberado por você no lukadispatch".into()),
@@ -349,6 +350,30 @@ async fn permissao(
     };
     escrita.write_all(line(&resp).as_bytes()).await?;
     Ok(())
+}
+
+/// A resposta de um card de permissão, venha ela de onde vier.
+///
+/// O botão do Telegram manda `allow`/`deny`; a janela do PC manda um `Answer` em JSON, porque ela
+/// é a mesma janela das perguntas comuns. Comparar com a string `"allow"` fazia toda resposta da
+/// janela virar negação, inclusive quando você tinha clicado em "Permitir".
+fn e_permitir(bruta: &str) -> bool {
+    if bruta == "allow" {
+        return true;
+    }
+    if bruta == "deny" {
+        return false;
+    }
+    serde_json::from_str::<ld_core::ask::Answer>(bruta)
+        .ok()
+        .and_then(|a| a.items.first()?.answers.first().cloned())
+        .map(|escolha| {
+            let e = escolha.trim();
+            e.eq_ignore_ascii_case("permitir")
+                || e.eq_ignore_ascii_case("allow")
+                || e.eq_ignore_ascii_case("sim")
+        })
+        .unwrap_or(false)
 }
 
 /// Fluxo de entrada de uma sessão: a fila guardada primeiro, depois o que chegar ao vivo.
@@ -409,4 +434,29 @@ async fn escuta(
     app.hub.unlisten(&session_id, token);
     info!(sessao = %session_id, "monitor caiu");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn permissao_entende_os_dois_formatos() {
+        assert!(e_permitir("allow"));
+        assert!(!e_permitir("deny"));
+
+        // O que a janela do PC manda quando você clica em "Permitir".
+        let da_janela = serde_json::json!({
+            "items": [{"header": "Permissão", "question": "Permitir Bash?", "answers": ["Permitir"]}]
+        })
+        .to_string();
+        assert!(e_permitir(&da_janela), "clicar em Permitir não pode negar");
+
+        let negou = serde_json::json!({
+            "items": [{"header": "Permissão", "question": "Permitir Bash?", "answers": ["Negar"]}]
+        })
+        .to_string();
+        assert!(!e_permitir(&negou));
+        assert!(!e_permitir("qualquer outra coisa"));
+    }
 }

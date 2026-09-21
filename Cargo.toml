@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/ld-core", "crates/ld-daemon", "crates/ld-cli", "crates/ld-ask"]
+members = ["crates/ld-core", "crates/ld-daemon", "crates/ld-cli", "crates/ld-ask", "crates/ld-mcp"]
 
 [workspace.package]
 version = "0.1.0"

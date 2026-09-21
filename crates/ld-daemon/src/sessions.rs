@@ -32,6 +32,8 @@ pub struct Spec<'a> {
     /// `true` quando o `resume` é "continuar de onde parou" (e não uma troca de modelo). Muda só
     /// a primeira frase do prompt, para a sessão saber por que voltou.
     pub retomada: bool,
+    /// Passar os servidores MCP pelo proxy.
+    pub wrap_mcp: bool,
 }
 
 /// Nome de sessão tmux: previsível para você achar no `tmux ls`, e único para dois projetos com
@@ -159,6 +161,32 @@ fn write_launch_script(session_id: &str, spec: &Spec<'_>) -> Result<PathBuf> {
     };
     std::fs::write(&prompt, texto)?;
 
+    // Configuração de MCP própria, com cada servidor de stdio passando pelo proxy. Ela precisa
+    // vir com `--strict-mcp-config`, senão o original subiria junto com o embrulhado, e o
+    // servidor apareceria duas vezes na sessão.
+    let mcp = if spec.wrap_mcp {
+        let servidores =
+            ld_core::mcp::servidores_do_projeto(&paths::claude_json(), &spec.projeto.path);
+        if servidores.is_empty() {
+            String::new()
+        } else {
+            let arquivo = dir.join("mcp.json");
+            let conteudo =
+                ld_core::mcp::config_embrulhada(&servidores, session_id, &paths::mcp_proxy());
+            std::fs::write(&arquivo, serde_json::to_string_pretty(&conteudo)?)?;
+            tracing::info!(
+                servidores = ?ld_core::mcp::embrulhados(&servidores),
+                "servidores MCP passando pelo proxy"
+            );
+            format!(
+                "  --mcp-config {} \\\n  --strict-mcp-config \\\n",
+                arquivo.display()
+            )
+        }
+    } else {
+        String::new()
+    };
+
     let script = dir.join("launch.sh");
     let settings = paths::bot_settings_file();
 
@@ -186,7 +214,7 @@ exec ai-memory run --new {workstream} claude \
   {selecao} \
   --settings {settings} \
   --permission-mode {permission_mode} \
-{extras}  -n {nome} \
+{extras}{mcp}  -n {nome} \
   "$(cat {prompt})"
 "#,
             settings = settings.display(),
@@ -194,6 +222,7 @@ exec ai-memory run --new {workstream} claude \
             permission_mode = spec.permission_mode,
             workstream = workstream_name_unico(session_id),
             nome = shell_quote(&spec.projeto.name),
+            mcp = mcp,
         ),
     )?;
     Ok(script)

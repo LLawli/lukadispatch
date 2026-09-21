@@ -60,15 +60,25 @@ pub fn bot_settings_file() -> PathBuf {
 /// onde o PATH não é o seu: um serviço systemd tem PATH mínimo, e o comando que o Monitor roda
 /// dentro da sessão herda o ambiente do Claude Code. Caminho absoluto resolve os dois.
 pub fn cli() -> String {
+    vizinho("lukadispatch")
+}
+
+/// Um binário do projeto, procurado ao lado do executável atual antes do PATH.
+fn vizinho(nome: &str) -> String {
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {
-        let vizinho = dir.join("lukadispatch");
-        if vizinho.is_file() {
-            return vizinho.to_string_lossy().into_owned();
+        let candidato = dir.join(nome);
+        if candidato.is_file() {
+            return candidato.to_string_lossy().into_owned();
         }
     }
-    "lukadispatch".to_string()
+    nome.to_string()
+}
+
+/// Caminho do proxy de MCP, ao lado dos outros binários.
+pub fn mcp_proxy() -> String {
+    vizinho("lukadispatch-mcp")
 }
 
 /// Diretório do Claude Code do usuário (transcripts, settings global, banco de uso).

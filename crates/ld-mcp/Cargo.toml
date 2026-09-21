@@ -1,0 +1,19 @@
+[package]
+name = "ld-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "lukadispatch-mcp"
+path = "src/main.rs"
+
+# Sem tokio: o proxy é duas bombas de linhas entre dois processos, e threads bloqueantes fazem
+# isso com menos peça do que um runtime assíncrono. Ele também nasce a cada servidor MCP de cada
+# sessão, então arrancar rápido importa.
+[dependencies]
+ld-core.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true

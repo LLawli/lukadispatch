@@ -32,6 +32,11 @@ pub struct Config {
     /// Caminho do binário do Claude Code, quando a descoberta automática não servir.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claude_binary: Option<String>,
+    /// Passar os servidores MCP pelo proxy, para o diálogo deles caber no celular.
+    ///
+    /// Desligue se algum servidor seu não gostar de ter um processo no meio do cano: as sessões
+    /// voltam a falar direto com eles, e o diálogo volta a só dar para responder no PC.
+    pub wrap_mcp: bool,
 }
 
 impl Default for Config {
@@ -44,6 +49,7 @@ impl Default for Config {
             trust_projects: true,
             history_lines: 8,
             claude_binary: None,
+            wrap_mcp: true,
         }
     }
 }
