@@ -5,4 +5,15 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "lukadispatch"
+path = "src/main.rs"
+
+# Sem tokio e sem teloxide de propósito: este binário roda a cada chamada de ferramenta do
+# Claude Code. Tudo aqui é std síncrono, para o processo nascer e morrer em milissegundos.
 [dependencies]
+ld-core.workspace = true
+
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true

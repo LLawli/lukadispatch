@@ -1,1 +1,227 @@
-fn main() {}
+//! `lukadispatch`: o binário que os hooks chamam, o que o Monitor lê e o que você usa no PC.
+//!
+//! Três papéis num executável só para o hook não ter que achar três caminhos diferentes, e para
+//! a instalação ser um arquivo. O parser de argumentos é feito na mão: são seis subcomandos, e
+//! uma dependência de linha de comando aqui pesaria em cada chamada de ferramenta do Claude.
+
+mod ask;
+mod client;
+mod hook;
+mod listen;
+
+use std::process::ExitCode;
+
+use ld_core::paths;
+use ld_core::proto::{Request, Response};
+
+const USO: &str = "\
+lukadispatch
+
+  listen --session <uuid>   fluxo de mensagens do Telegram (é o que o Monitor da sessão lê)
+  hook <evento>             ponte de hook do Claude Code (lê o evento no stdin)
+  ls                        sessões vivas
+  kill <id>                 fecha uma sessão
+  new <projeto>             abre uma sessão
+  install [--global]        escreve os hooks; --global acrescenta a telemetria ao settings do
+                            Claude Code, para as suas sessões de terminal entrarem no painel
+  uninstall                 remove os hooks do settings do Claude Code
+";
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let cmd = args.first().map(String::as_str).unwrap_or("");
+
+    let codigo = match cmd {
+        "listen" => listen::run(valor(&args, "--session").as_deref()),
+        "hook" => hook::run(args.get(1).map(String::as_str).unwrap_or("")),
+        "ls" => ls(),
+        "kill" => kill(args.get(1).map(String::as_str)),
+        "new" => new(args.get(1..).map(|r| r.join(" ")).unwrap_or_default()),
+        "install" => install(args.iter().any(|a| a == "--global")),
+        "uninstall" => uninstall(),
+        "-h" | "--help" | "help" | "" => {
+            print!("{USO}");
+            0
+        }
+        outro => {
+            eprintln!("subcomando desconhecido: {outro}\n\n{USO}");
+            2
+        }
+    };
+    ExitCode::from(codigo as u8)
+}
+
+fn valor(args: &[String], flag: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+}
+
+fn ls() -> i32 {
+    match client::call(&Request::ListSessions, client::PRAZO_LOCAL) {
+        Some(Response::Sessions(s)) if s.is_empty() => {
+            println!("nenhuma sessão viva");
+            0
+        }
+        Some(Response::Sessions(s)) => {
+            for x in s {
+                let ctx = match (x.context_tokens, x.context_limit) {
+                    (Some(t), Some(l)) => format!("{}k/{}k", t / 1000, l / 1000),
+                    _ => "-".into(),
+                };
+                let dono = if x.owned_by_bot { "bot" } else { "pc " };
+                println!(
+                    "{dono}  {:8}  {:<20} {:<10} {ctx}",
+                    &x.session_id[..8.min(x.session_id.len())],
+                    x.project,
+                    x.status
+                );
+            }
+            0
+        }
+        _ => {
+            eprintln!("daemon não respondeu");
+            1
+        }
+    }
+}
+
+fn kill(id: Option<&str>) -> i32 {
+    let Some(id) = id else {
+        eprintln!("uso: lukadispatch kill <id>");
+        return 2;
+    };
+    match client::call(
+        &Request::Kill {
+            session_id: id.to_string(),
+        },
+        client::PRAZO_LOCAL,
+    ) {
+        Some(Response::Ok) => 0,
+        Some(Response::Error { message }) => {
+            eprintln!("{message}");
+            1
+        }
+        _ => {
+            eprintln!("daemon não respondeu");
+            1
+        }
+    }
+}
+
+fn new(projeto: String) -> i32 {
+    if projeto.is_empty() {
+        eprintln!("uso: lukadispatch new <projeto>");
+        return 2;
+    }
+    match client::call(&Request::NewSession { project: projeto }, client::PRAZO_NEW) {
+        Some(Response::Ok) => 0,
+        Some(Response::Error { message }) => {
+            eprintln!("{message}");
+            1
+        }
+        _ => {
+            eprintln!("daemon não respondeu");
+            1
+        }
+    }
+}
+
+/// Escreve o settings das sessões do bot e, com `--global`, acrescenta a telemetria ao settings
+/// do Claude Code do usuário.
+///
+/// A separação é o ponto: o global leva **só** telemetria. Uma sessão sua de terminal entra no
+/// painel, mas continua com o menu nativo de pergunta e o fluxo de permissão normal. Sequestrar
+/// isso numa sessão em que você já está na frente do teclado seria pior que não ter painel.
+fn install(global: bool) -> i32 {
+    let cli = match std::env::current_exe() {
+        Ok(p) => p.to_string_lossy().into_owned(),
+        Err(_) => "lukadispatch".to_string(),
+    };
+
+    let destino = paths::bot_settings_file();
+    if let Some(pai) = destino.parent()
+        && let Err(e) = std::fs::create_dir_all(pai)
+    {
+        eprintln!("não consegui criar {}: {e}", pai.display());
+        return 1;
+    }
+    let conteudo = serde_json::to_string_pretty(&ld_core::hooks::bot_settings(&cli))
+        .expect("settings sempre serializa");
+    if let Err(e) = std::fs::write(&destino, conteudo) {
+        eprintln!("não consegui escrever {}: {e}", destino.display());
+        return 1;
+    }
+    println!("settings das sessões: {}", destino.display());
+
+    if global {
+        let alvo = paths::claude_settings();
+        let mut settings = ler_json(&alvo);
+        ld_core::hooks::merge_into(&mut settings, &ld_core::hooks::telemetry_hooks(&cli));
+        if let Err(e) = escrever_json(&alvo, &settings) {
+            eprintln!("não consegui escrever {}: {e}", alvo.display());
+            return 1;
+        }
+        println!("telemetria instalada em {}", alvo.display());
+        println!("(vale a partir da próxima sessão do Claude Code)");
+    }
+    0
+}
+
+fn uninstall() -> i32 {
+    let alvo = paths::claude_settings();
+    let mut settings = ler_json(&alvo);
+    ld_core::hooks::strip(&mut settings);
+    if let Err(e) = escrever_json(&alvo, &settings) {
+        eprintln!("não consegui escrever {}: {e}", alvo.display());
+        return 1;
+    }
+    println!("hooks removidos de {}", alvo.display());
+    0
+}
+
+fn ler_json(caminho: &std::path::Path) -> serde_json::Value {
+    std::fs::read_to_string(caminho)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
+/// Escreve com backup do que estava lá.
+///
+/// O settings do Claude Code é arquivo do usuário, com coisas que não são nossas. Se um bug
+/// nosso o corromper, o `.bak` é a diferença entre "restaura" e "reconfigura tudo de novo".
+fn escrever_json(caminho: &std::path::Path, v: &serde_json::Value) -> std::io::Result<()> {
+    if let Some(pai) = caminho.parent() {
+        std::fs::create_dir_all(pai)?;
+    }
+    if caminho.exists() {
+        let _ = std::fs::copy(caminho, caminho.with_extension("json.bak"));
+    }
+    std::fs::write(caminho, format!("{}\n", serde_json::to_string_pretty(v)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valor_le_a_flag_seguinte() {
+        let args: Vec<String> = ["listen", "--session", "abc"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(valor(&args, "--session").as_deref(), Some("abc"));
+        assert!(valor(&args, "--outra").is_none());
+    }
+
+    #[test]
+    fn flag_sem_valor_nao_explode() {
+        let args: Vec<String> = ["listen", "--session"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(valor(&args, "--session").is_none());
+    }
+}
