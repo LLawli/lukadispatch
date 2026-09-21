@@ -1,0 +1,219 @@
+//! Protocolo do socket de controle: NDJSON nos dois sentidos, uma mensagem por linha.
+//!
+//! Escolha de formato: linha de JSON em vez de algo binário porque os dois lados são pequenos e
+//! porque dá para depurar com `socat - UNIX-CONNECT:...` sem ferramenta nenhuma.
+//!
+//! A maioria das conexões é pergunta-e-resposta e morre em seguida. Duas são longas:
+//! `Listen`, que vira um fluxo de mensagens do Telegram (é o que o Monitor da sessão lê), e
+//! `Ask`/`Permission`, que ficam abertas enquanto a pergunta espera resposta.
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Request {
+    /// Sonda de vida. O hook usa antes de decidir se sobe o daemon.
+    Ping,
+
+    /// Uma sessão do Claude Code começou (hook SessionStart). Vale tanto para sessão do bot
+    /// quanto para sessão que o usuário abriu no terminal: as duas entram no painel.
+    Register(RegisterSession),
+
+    /// Telemetria de turno (ferramenta rodando, texto, erro). Nunca bloqueia.
+    Event(SessionEvent),
+
+    /// Fluxo de entrada da sessão. O daemon responde com um `Response::Message` por mensagem
+    /// recebida do Telegram, para sempre, até o cliente sair.
+    Listen { session_id: String },
+
+    /// O turno acabou (hook Stop). A resposta diz se o Monitor da sessão ainda está armado,
+    /// porque é o hook Stop que força o re-arme quando ele expira.
+    Stop(StopReport),
+
+    /// Pergunta do Claude (AskUserQuestion) esperando resposta humana.
+    Ask {
+        session_id: String,
+        tool_use_id: Option<String>,
+        questions: serde_json::Value,
+    },
+
+    /// Pedido de permissão de ferramenta que escapou do modo auto.
+    Permission {
+        session_id: String,
+        tool_name: String,
+        tool_input: serde_json::Value,
+        tool_use_id: Option<String>,
+    },
+
+    /// A janela nativa respondeu primeiro: cancela o card do Telegram.
+    LocalAnswer { ask_id: String, answer: String },
+
+    /// A sessão terminou (hook SessionEnd): apaga o tópico e limpa o estado.
+    SessionEnd { session_id: String, reason: String },
+
+    /// Comandos administrativos, usados pelo CLI local (`lukadispatch ls|kill|new`).
+    ListSessions,
+    NewSession { project: String },
+    Kill { session_id: String },
+}
+
+/// O que o hook SessionStart conta ao daemon.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RegisterSession {
+    pub session_id: String,
+    pub cwd: String,
+    pub transcript_path: String,
+    /// `startup`, `resume`, `clear`, `compact`, `fork`. O `clear` troca o id da sessão sem
+    /// trocar o terminal, e é justamente aí que o mapa tópico -> sessão precisa ser remendado.
+    pub reason: String,
+    pub model: Option<String>,
+}
+
+/// Fim de turno. `last_assistant_message` é o que vai para o Telegram como resposta.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StopReport {
+    pub session_id: String,
+    pub transcript_path: Option<String>,
+    pub last_assistant_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessionEvent {
+    pub session_id: String,
+    pub event: EventKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum EventKind {
+    /// Uma ferramenta vai rodar. `label` já vem pronto para leitura humana.
+    ToolStart { tool: String, label: String },
+    ToolEnd { tool: String, ok: bool },
+    /// Texto do assistente em streaming (hook MessageDisplay). Usado só para o status
+    /// "escrevendo": a resposta de verdade vem no Stop, que é autoritativo.
+    Streaming,
+    Notification { text: String },
+    Failure { text: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Response {
+    Pong,
+    Ok,
+    Error {
+        message: String,
+    },
+
+    /// Uma mensagem vinda do Telegram para a sessão. É a linha que o Monitor transforma em
+    /// evento dentro do Claude.
+    Message {
+        text: String,
+        from: String,
+        at: i64,
+    },
+
+    /// Resposta ao `Stop`: o daemon diz se ainda existe um `Listen` aberto para a sessão.
+    /// Sem listener, o Monitor expirou e o hook precisa mandar o agente re-armar.
+    Listener {
+        alive: bool,
+        /// Quantas vezes seguidas já pedimos re-arme. O hook desiste depois do teto para não
+        /// prender a sessão num laço de "não consigo encerrar o turno".
+        rearm_attempts: u32,
+        rearm_command: Option<String>,
+    },
+
+    /// Resposta de uma pergunta. `answered=false` significa desistência (timeout, daemon caindo,
+    /// sessão sem tópico): o hook então sai sem decidir e o Claude segue o fluxo normal.
+    Answer {
+        answered: bool,
+        text: Option<String>,
+        reason: Option<String>,
+    },
+
+    /// Decisão de permissão.
+    Decision {
+        decision: PermissionDecision,
+        reason: Option<String>,
+    },
+
+    /// Id do card aberto, devolvido antes da espera para que a janela nativa possa cancelá-lo.
+    AskOpened {
+        ask_id: String,
+    },
+
+    Sessions(Vec<SessionSummary>),
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PermissionDecision {
+    Allow,
+    Deny,
+    /// Ninguém respondeu: deixa o Claude Code decidir como sempre decidiria.
+    Undecided,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessionSummary {
+    pub session_id: String,
+    pub project: String,
+    pub cwd: String,
+    pub topic_id: Option<i32>,
+    pub status: String,
+    pub context_tokens: Option<u64>,
+    pub context_limit: Option<u64>,
+    pub owned_by_bot: bool,
+}
+
+/// Serializa uma mensagem do protocolo como uma linha NDJSON (com o `\n` no fim).
+pub fn line<T: Serialize>(msg: &T) -> String {
+    let mut s = serde_json::to_string(msg).expect("mensagem do protocolo sempre serializa");
+    s.push('\n');
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn round_trip_de_cada_variante() {
+        let casos = vec![
+            Request::Ping,
+            Request::Listen {
+                session_id: "s1".into(),
+            },
+            Request::Stop(StopReport {
+                session_id: "s1".into(),
+                transcript_path: Some("/tmp/t.jsonl".into()),
+                last_assistant_message: Some("pronto".into()),
+            }),
+            Request::Event(SessionEvent {
+                session_id: "s1".into(),
+                event: EventKind::ToolStart {
+                    tool: "Bash".into(),
+                    label: "cargo test".into(),
+                },
+            }),
+        ];
+        for caso in casos {
+            let txt = line(&caso);
+            assert!(txt.ends_with('\n'), "a linha precisa terminar em \\n");
+            let volta: Request = serde_json::from_str(txt.trim()).unwrap();
+            assert_eq!(caso, volta);
+        }
+    }
+
+    #[test]
+    fn resposta_de_mensagem_cabe_em_uma_linha() {
+        // O Monitor quebra eventos por linha, então um texto com \n não pode virar duas linhas.
+        let r = Response::Message {
+            text: "linha1\nlinha2".into(),
+            from: "luka".into(),
+            at: 0,
+        };
+        let txt = line(&r);
+        assert_eq!(txt.matches('\n').count(), 1);
+    }
+}

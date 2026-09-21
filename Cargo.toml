@@ -1,0 +1,27 @@
+[workspace]
+resolver = "3"
+members = ["crates/ld-core", "crates/ld-daemon", "crates/ld-cli", "crates/ld-ask"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/LLawli/lukadispatch"
+
+[workspace.dependencies]
+ld-core = { path = "crates/ld-core" }
+
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[profile.release]
+strip = true
+lto = "thin"
