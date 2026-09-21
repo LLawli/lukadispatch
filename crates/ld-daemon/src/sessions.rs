@@ -117,6 +117,18 @@ Faça só isto, agora:
     )
 }
 
+/// A linha do `--permission-mode`, ou nada.
+///
+/// "padrao" quer dizer ausência da flag, e é o único modo em que o Claude Code honra a decisão
+/// de um hook de permissão: é ele que faz o card do Telegram valer. Passar `manual` aqui seria
+/// pedir para o prompt ficar esperando teclado no PC.
+fn modo_flag(modo: &str) -> String {
+    match modo {
+        "padrao" | "" => String::new(),
+        outro => format!("  --permission-mode {outro} \\\n"),
+    }
+}
+
 /// Nome do workstream gerenciado do ai-memory.
 ///
 /// Precisa ser único por sessão: o `ai-memory run` recusa com 409 quando o workstream do projeto
@@ -213,13 +225,12 @@ set -u
 exec ai-memory run --new {workstream} claude \
   {selecao} \
   --settings {settings} \
-  --permission-mode {permission_mode} \
-{extras}{mcp}  -n {nome} \
+{modo}{extras}{mcp}  -n {nome} \
   "$(cat {prompt})"
 "#,
             settings = settings.display(),
             prompt = prompt.display(),
-            permission_mode = spec.permission_mode,
+            modo = modo_flag(spec.permission_mode),
             workstream = workstream_name_unico(session_id),
             nome = shell_quote(&spec.projeto.name),
             mcp = mcp,
@@ -372,6 +383,13 @@ mod tests {
     fn nome_vazio_nao_gera_sessao_sem_nome() {
         let id = "abcd1234-0000-0000-0000-000000000000";
         assert_eq!(tmux_name("!!!", id), "ld-projeto-abcd");
+    }
+
+    #[test]
+    fn modo_padrao_nao_passa_flag_nenhuma() {
+        // A ausência da flag é o que faz o card de permissão do Telegram ser honrado.
+        assert_eq!(modo_flag("padrao"), "");
+        assert!(modo_flag("auto").contains("--permission-mode auto"));
     }
 
     #[test]

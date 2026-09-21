@@ -354,7 +354,8 @@ impl App {
     /// Monitor, e o prompt de re-arme cuida disso.
     /// Troca só o modo de permissão, pela mesma mecânica do modelo.
     pub async fn relaunch_modo(&self, session_id: &str, modo: &str) -> Result<()> {
-        const VALIDOS: [&str; 6] = [
+        const VALIDOS: [&str; 7] = [
+            "padrao",
             "auto",
             "manual",
             "plan",
@@ -364,6 +365,12 @@ impl App {
         ];
         if !VALIDOS.contains(&modo) {
             bail!("modo desconhecido: {modo} (use {})", VALIDOS.join(", "));
+        }
+        if modo == "manual" {
+            bail!(
+                "o modo manual ignora a decisão do hook: o card aparece aqui, você responde, e o \
+                 prompt continua esperando teclado no PC. Para perguntar pelo celular, use padrao"
+            );
         }
         self.store.set_permission_mode(session_id, modo)?;
         self.relaunch(session_id, None, None).await

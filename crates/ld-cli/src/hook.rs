@@ -204,8 +204,13 @@ mod tests {
     }
 
     #[test]
-    fn evento_desconhecido_sai_zero() {
-        // Contrato do projeto: hook nunca derruba nem trava a sessão.
-        assert_eq!(super::run("evento-que-nao-existe"), 0);
+    fn evento_sem_campo_util_nao_vira_pedido() {
+        // `run` não entra aqui de propósito: ele lê o stdin, e sob `cargo test` isso pendura o
+        // processo de teste para sempre (sete deles ficaram vivos na máquina até eu perceber).
+        // O que dá para verificar sem efeito colateral é a leitura, que é onde mora a decisão de
+        // sair cedo.
+        let vazio = json!({});
+        assert!(texto(&vazio, "session_id").is_none());
+        assert!(texto(&json!({"session_id": ""}), "session_id").is_none());
     }
 }

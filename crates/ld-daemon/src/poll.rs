@@ -637,13 +637,17 @@ async fn abrir(
     Ok(())
 }
 
-/// Modos de permissão do Claude Code, com nome legível.
+/// Modos de permissão oferecidos no Telegram, com nome legível.
 ///
-/// São os que fazem sentido pelo celular. `dontAsk` fica de fora de propósito: ele nunca
-/// pergunta e nunca avisa, que é o pior dos mundos para quem não está na frente da tela.
+/// `padrao` é a ausência do `--permission-mode`, e é ELE que significa "perguntar sempre" aqui.
+/// O modo `manual` do Claude Code parece ser isso pelo nome, mas não é para quem está longe:
+/// medido nesta versão, ele **ignora a decisão do hook** e exige o teclado, então o card do
+/// Telegram aparece, você responde, e o prompt continua de pé no terminal. Ele ficou de fora da
+/// lista por isso, e `dontAsk` também, porque nunca perguntar e nunca avisar é o pior dos
+/// mundos para quem não está na frente da tela.
 const MODOS: [(&str, &str); 4] = [
     ("auto", "🤖 auto (classificador decide)"),
-    ("manual", "🙋 perguntar sempre"),
+    ("padrao", "🙋 perguntar (card no celular)"),
     ("plan", "📋 plano (só propõe)"),
     ("bypassPermissions", "⚠️ liberar tudo"),
 ];
