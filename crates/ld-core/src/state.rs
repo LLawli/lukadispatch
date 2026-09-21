@@ -71,6 +71,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     model             TEXT,
     effort            TEXT,
     permission_mode   TEXT,
+    -- 1 enquanto há um pedido seu esperando resposta. Fica no banco, e não na memória do
+    -- daemon, porque um restart no meio de um turno faria a resposta ser descartada em silêncio.
+    pedido            INTEGER NOT NULL DEFAULT 0,
     created_at        INTEGER NOT NULL,
     updated_at        INTEGER NOT NULL,
     ended_at          INTEGER
@@ -101,6 +104,10 @@ fn migra(conn: &Connection) {
         );
     }
     let _ = conn.execute("ALTER TABLE queue ADD COLUMN files TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE sessions ADD COLUMN pedido INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
 }
 
 fn agora() -> i64 {
@@ -238,6 +245,9 @@ impl Store {
                 topic_id          = (SELECT topic_id FROM sessions WHERE session_id = ?1),
                 tmux              = COALESCE(tmux, (SELECT tmux FROM sessions WHERE session_id = ?1)),
                 status_message_id = (SELECT status_message_id FROM sessions WHERE session_id = ?1),
+                -- O pedido em aberto é da conversa, não do id: um /clear no meio dele não pode
+                -- fazer a resposta ser descartada.
+                pedido            = (SELECT pedido FROM sessions WHERE session_id = ?1),
                 updated_at        = ?3
              WHERE session_id = ?2",
             params![antigo, novo, agora()],
@@ -252,6 +262,36 @@ impl Store {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Marca que alguém pediu alguma coisa a esta sessão, e que a resposta do próximo turno é
+    /// para ir ao Telegram.
+    pub fn marca_pedido(&self, session_id: &str) -> Result<()> {
+        self.conn().execute(
+            "UPDATE sessions SET pedido = 1, updated_at = ?2 WHERE session_id = ?1",
+            params![session_id, agora()],
+        )?;
+        Ok(())
+    }
+
+    /// Consome a marca: devolve `true` uma vez só, no `Stop` daquele turno.
+    pub fn tira_pedido(&self, session_id: &str) -> Result<bool> {
+        let mut c = self.conn();
+        let tx = c.transaction()?;
+        let tinha: i64 = tx
+            .query_row(
+                "SELECT pedido FROM sessions WHERE session_id = ?1",
+                [session_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        tx.execute(
+            "UPDATE sessions SET pedido = 0 WHERE session_id = ?1",
+            [session_id],
+        )?;
+        tx.commit()?;
+        Ok(tinha != 0)
     }
 
     pub fn set_status(&self, session_id: &str, status: &str) -> Result<()> {
@@ -562,6 +602,19 @@ mod tests {
         assert_eq!(st.topicos_vazados().unwrap(), vec![("s1".to_string(), 7)]);
         st.clear_topic("s1").unwrap();
         assert!(st.topicos_vazados().unwrap().is_empty());
+    }
+
+    #[test]
+    fn pedido_sobrevive_e_e_consumido_uma_vez_so() {
+        // O que este teste trava: com a marca só na memória do daemon, um `systemctl restart`
+        // no meio de um turno fazia a resposta ser descartada em silêncio.
+        let st = Store::open_memory().unwrap();
+        st.upsert(&sessao("s1")).unwrap();
+        assert!(!st.tira_pedido("s1").unwrap(), "sessão nova não tem pedido");
+
+        st.marca_pedido("s1").unwrap();
+        assert!(st.tira_pedido("s1").unwrap());
+        assert!(!st.tira_pedido("s1").unwrap(), "consumir é uma vez só");
     }
 
     #[test]

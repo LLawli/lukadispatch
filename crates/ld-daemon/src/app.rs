@@ -90,8 +90,9 @@ pub struct App {
     /// rearmado", que ia para o tópico como se fosse resposta a você.
     ///
     /// A regra que substitui isso é simples: só vai para o tópico a resposta de um turno que
-    /// alguém pediu, seja pelo Telegram ou pelo teclado do PC. A marca é consumida no `Stop`.
-    com_pedido: Mutex<std::collections::HashSet<String>>,
+    /// alguém pediu, seja pelo Telegram ou pelo teclado do PC. A marca é consumida no `Stop`, e
+    /// mora no banco: quando ela vivia em memória, um restart do daemon no meio de um turno
+    /// engolia a resposta inteira sem deixar rastro.
 
     /// Sessões que estão trocando de modelo agora, com a hora em que a troca começou.
     ///
@@ -124,7 +125,6 @@ impl App {
             panel,
             avisos: Arc::new(Mutex::new(HashMap::new())),
             catalogo: Mutex::new(None),
-            com_pedido: Mutex::new(std::collections::HashSet::new()),
             relancando: Mutex::new(HashMap::new()),
             entregues: Mutex::new(HashMap::new()),
         }
@@ -306,18 +306,14 @@ impl App {
 
     /// Registra que alguém pediu alguma coisa a esta sessão.
     fn marca_pedido(&self, session_id: &str) {
-        self.com_pedido
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(session_id.to_string());
+        if let Err(e) = self.store.marca_pedido(session_id) {
+            warn!(sessao = %session_id, erro = %e, "não consegui marcar o pedido");
+        }
     }
 
     /// Consome a marca: devolve `true` uma vez só, no `Stop` daquele turno.
     fn tinha_pedido(&self, session_id: &str) -> bool {
-        self.com_pedido
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(session_id)
+        self.store.tira_pedido(session_id).unwrap_or(false)
     }
 
     fn marca_relancamento(&self, session_id: &str) {
