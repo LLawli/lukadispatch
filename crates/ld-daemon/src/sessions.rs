@@ -138,9 +138,16 @@ fn workstream_name_unico(session_id: &str) -> String {
 
 /// Escreve o script de partida da sessão e devolve o caminho.
 ///
-/// Existe um script em vez de uma linha de comando montada na hora por dois motivos: o prompt
-/// sai do `ps` (ele é longo e vaza o nome do projeto para qualquer um que liste processos), e dá
-/// para ler depois exatamente o que foi lançado quando algo der errado.
+/// O script existe para dar para ler depois, exatamente, o que foi lançado quando algo der
+/// errado, e para o `tmux new-session` receber um comando simples em vez de uma linha montada
+/// com aspas dentro de aspas.
+///
+/// **O prompt continua aparecendo no `ps`**: ele entra como `"$(cat prompt.txt)"`, e o shell
+/// expande isso antes de o `claude` nascer, então o texto vira argv. Medido do jeito pior: um
+/// `pkill -f 'lukadispatch listen'` meu, feito para matar um processo de teste, casou com a
+/// linha do prompt (que cita esse comando) e matou a sessão inteira. Não há como evitar sem
+/// abrir mão do prompt inicial, que é argumento posicional do `claude` por definição; o que dá
+/// para fazer é saber disto antes de mirar um `pkill` por padrão nesta máquina.
 fn write_launch_script(session_id: &str, spec: &Spec<'_>) -> Result<PathBuf> {
     let dir = paths::state_dir().join("sessions").join(session_id);
     std::fs::create_dir_all(&dir).with_context(|| format!("criando {}", dir.display()))?;
