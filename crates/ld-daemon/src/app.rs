@@ -993,29 +993,62 @@ impl App {
         let dir = crate::arquivos::dir_partes(session_id);
         let sessao = session_id.to_string();
         tokio::spawn(async move {
+            // Vídeo é cortado por tempo, e o resto em volumes: um trecho de vídeo toca sozinho
+            // no celular, enquanto um volume de 7z não serve para nada até estarem todos lá.
+            let e_video = crate::arquivos::e_video(&caminho) && crate::arquivos::tem_ffmpeg();
             let _ = tg
                 .send_html(
                     Some(topic),
                     &format!(
-                        "📦 <b>{}</b> não cabe numa mensagem; estou dividindo em volumes de {} MB.",
+                        "📦 <b>{}</b> não cabe numa mensagem; {}.",
                         escape_html(&nome),
-                        crate::arquivos::VOLUME_MB
+                        if e_video {
+                            "estou cortando em trechos que tocam sozinhos".to_string()
+                        } else {
+                            format!(
+                                "estou dividindo em volumes de {} MB",
+                                crate::arquivos::VOLUME_MB
+                            )
+                        }
                     ),
                 )
                 .await;
 
-            let partes = match crate::arquivos::divide(&caminho, dir).await {
-                Ok(p) => p,
-                Err(e) => {
-                    warn!(sessao = %sessao, erro = %e, "não consegui dividir o arquivo");
-                    let _ = tg
-                        .send_html(
-                            Some(topic),
-                            &format!("⚠️ {}", escape_html(&format!("{e:#}"))),
-                        )
-                        .await;
-                    return;
+            let cortado = if e_video {
+                match crate::arquivos::corta_video(
+                    &caminho,
+                    dir.clone(),
+                    crate::arquivos::alvo_trecho(),
+                )
+                .await
+                {
+                    Ok(p) => Some(p),
+                    // Container que o ffmpeg não fatia por cópia (fluxo sem keyframe utilizável,
+                    // por exemplo) ainda tem o caminho dos volumes: pior de usar, mas entrega.
+                    Err(e) => {
+                        warn!(sessao = %sessao, erro = %e, "corte por tempo falhou; caio nos volumes");
+                        None
+                    }
                 }
+            } else {
+                None
+            };
+
+            let partes = match cortado {
+                Some(p) => p,
+                None => match crate::arquivos::divide(&caminho, dir).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn!(sessao = %sessao, erro = %e, "não consegui dividir o arquivo");
+                        let _ = tg
+                            .send_html(
+                                Some(topic),
+                                &format!("⚠️ {}", escape_html(&format!("{e:#}"))),
+                            )
+                            .await;
+                        return;
+                    }
+                },
             };
 
             let total = partes.arquivos.len();
@@ -1025,7 +1058,23 @@ impl App {
                     Some(l) => format!("{nome} · parte {}/{total} · {l}", i + 1),
                     None => format!("{nome} · parte {}/{total}", i + 1),
                 };
-                match tg.send_document(Some(topic), parte, Some(&rotulo)).await {
+                let enviou = match partes.corte {
+                    // Trecho de vídeo vai como vídeo, para virar player em vez de download; se o
+                    // Telegram não digerir o container, o documento ainda entrega.
+                    crate::arquivos::Corte::Trechos => {
+                        match tg.send_video(Some(topic), parte, Some(&rotulo)).await {
+                            Ok(id) => Ok(id),
+                            Err(e) => {
+                                warn!(erro = %e, "sendVideo recusado; mando como documento");
+                                tg.send_document(Some(topic), parte, Some(&rotulo)).await
+                            }
+                        }
+                    }
+                    crate::arquivos::Corte::Volumes => {
+                        tg.send_document(Some(topic), parte, Some(&rotulo)).await
+                    }
+                };
+                match enviou {
                     Ok(_) => enviadas += 1,
                     Err(e) => {
                         warn!(sessao = %sessao, erro = %e, parte = %parte.display(), "parte não subiu");
@@ -1046,19 +1095,24 @@ impl App {
 
             // Sem a instrução de juntar, um punhado de .001, .002 no celular é só lixo.
             if enviadas == total {
-                let _ = tg
-                    .send_html(
-                        Some(topic),
-                        &format!(
-                            "🧩 {total} partes de <b>{}</b>. Baixe todas para a mesma pasta e abra a \
-                             <code>{}</code>: no celular o ZArchiver ou o RAR juntam sozinhos, e no PC é \
-                             <code>7z x {}</code>.",
-                            escape_html(&nome),
-                            escape_html(&partes.primeiro),
-                            escape_html(&partes.primeiro)
-                        ),
-                    )
-                    .await;
+                let instrucao = match partes.corte {
+                    crate::arquivos::Corte::Trechos => format!(
+                        "🧩 {total} trechos de <b>{}</b>, na ordem. Cada um toca sozinho; para \
+                         remontar o vídeo inteiro no PC, <code>ffmpeg -f concat -safe 0 -i \
+                         lista.txt -c copy {}</code>, com os trechos listados em lista.txt.",
+                        escape_html(&nome),
+                        escape_html(&nome)
+                    ),
+                    crate::arquivos::Corte::Volumes => format!(
+                        "🧩 {total} partes de <b>{}</b>. Baixe todas para a mesma pasta e abra a \
+                         <code>{}</code>: no celular o ZArchiver ou o RAR juntam sozinhos, e no PC é \
+                         <code>7z x {}</code>.",
+                        escape_html(&nome),
+                        escape_html(&partes.primeiro),
+                        escape_html(&partes.primeiro)
+                    ),
+                };
+                let _ = tg.send_html(Some(topic), &instrucao).await;
                 info!(sessao = %sessao, arquivo = %caminho.display(), partes = total, "arquivo grande enviado em partes");
             }
             partes.limpa().await;

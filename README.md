@@ -143,11 +143,13 @@ uma chave pública sua antes de enviar, e recusar o envio enquanto você não ti
 chave na conversa. O tópico é um grupo do Telegram, e o Telegram guarda o arquivo nos servidores
 dele.
 
-Acima de 50 MB (o teto do Bot API) o arquivo não é recusado: o daemon divide em volumes de 45 MB
-com o 7z, manda um por um com `parte i/n` na legenda e fecha com a instrução de juntar. No celular
-o ZArchiver ou o RAR remontam a partir do `.001`, e no PC é `7z x nome.7z.001`. O envio dividido
-sai em segundo plano, porque subir centenas de MB demora mais que o prazo do hook `Stop`; o teto é
-20 partes.
+Acima de 50 MB (o teto do Bot API) o arquivo não é recusado, e o corte depende do que ele é.
+**Vídeo é cortado por tempo** com `ffmpeg -c copy`, sem recodificar: cada trecho é um vídeo de
+verdade, vai como vídeo (com player) e toca sozinho no celular; remontar é opcional, com
+`ffmpeg -f concat`. **O resto vai em volumes de 45 MB do 7z**, que o ZArchiver ou o RAR remontam a
+partir do `.001` no celular, e `7z x nome.7z.001` no PC. Sem `ffmpeg`, ou quando o corte por tempo
+falha, vídeo também cai nos volumes. O envio dividido sai em segundo plano, porque subir centenas
+de MB demora mais que o prazo do hook `Stop`; o teto é 20 partes.
 
 O reconhecimento é estreito de propósito: a linha precisa ser só o marcador, do começo ao fim.
 Marcador no meio de uma frase, dentro de crase ou depois de hífen de lista é o agente falando do

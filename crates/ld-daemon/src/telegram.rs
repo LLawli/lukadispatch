@@ -168,6 +168,28 @@ impl Tg {
         Ok(req.await.context("enviando foto")?.id)
     }
 
+    /// Manda um vídeo como vídeo: o Telegram monta o player e dá para assistir sem baixar.
+    ///
+    /// Vale a pena tentar antes do documento porque é isso que faz um trecho de vídeo ser útil no
+    /// celular; container que o Telegram não digere volta como erro, e aí o documento resolve.
+    pub async fn send_video(
+        &self,
+        topic: Option<i32>,
+        caminho: &std::path::Path,
+        legenda: Option<&str>,
+    ) -> Result<MessageId> {
+        let mut req = self
+            .bot
+            .send_video(self.chat, InputFile::file(caminho.to_path_buf()));
+        req.caption = legenda.map(str::to_string);
+        // Sem isto o celular baixa o arquivo inteiro antes de mostrar o primeiro quadro.
+        req.supports_streaming = Some(true);
+        if let Some(t) = topic {
+            req.message_thread_id = Some(ThreadId(MessageId(t)));
+        }
+        Ok(req.await.context("enviando vídeo")?.id)
+    }
+
     pub async fn send_html(&self, topic: Option<i32>, html: &str) -> Result<MessageId> {
         let mut req = self.bot.send_message(self.chat, html);
         req.parse_mode = Some(ParseMode::Html);

@@ -381,13 +381,23 @@ pub fn dir_partes(session_id: &str) -> PathBuf {
         .join(agora().to_string())
 }
 
-/// Um arquivo grande partido em volumes, pronto para sair um a um.
+/// Como o arquivo foi partido, que é o que muda a instrução de juntar no fim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Corte {
+    /// Volumes de 7z: nenhum abre sozinho, o conjunto se abre pelo `.001`.
+    Volumes,
+    /// Trechos de vídeo: cada um toca por si, e juntar é opcional.
+    Trechos,
+}
+
+/// Um arquivo grande partido, pronto para sair uma parte de cada vez.
 pub struct Partes {
     /// Diretório só das partes; some inteiro depois do envio.
     dir: PathBuf,
     pub arquivos: Vec<PathBuf>,
-    /// Nome do primeiro volume, que é por onde se abre o conjunto.
+    /// Nome da primeira parte, que é por onde se abre o conjunto.
     pub primeiro: String,
+    pub corte: Corte,
 }
 
 impl Partes {
@@ -462,7 +472,169 @@ pub async fn divide(caminho: &Path, dir: PathBuf) -> Result<Partes> {
         dir,
         arquivos,
         primeiro,
+        corte: Corte::Volumes,
     })
+}
+
+/// Container de vídeo que vale cortar por tempo em vez de quebrar em volumes.
+pub fn e_video(caminho: &Path) -> bool {
+    caminho
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| {
+            matches!(
+                e.to_ascii_lowercase().as_str(),
+                "mp4" | "mkv" | "mov" | "webm" | "m4v" | "avi" | "ts" | "mpg" | "mpeg"
+            )
+        })
+}
+
+/// Alvo de cada trecho de vídeo. Bem abaixo do teto porque o corte acontece no keyframe mais
+/// próximo, e não no ponto exato: o trecho real pode passar do alvo, e passar do teto seria um
+/// upload perdido.
+const ALVO_TRECHO: u64 = 40 * 1024 * 1024;
+
+/// Corta um vídeo em trechos que caibam numa mensagem, sem recodificar.
+///
+/// `-c copy` copia os fluxos como estão: é rápido (segundos para centenas de MB), não perde
+/// qualidade e mantém cada trecho sendo um vídeo de verdade, que toca sozinho no celular. É essa
+/// a diferença para os volumes de 7z, onde nenhuma parte serve para nada até estarem todas
+/// juntas.
+pub async fn corta_video(caminho: &Path, dir: PathBuf, alvo: u64) -> Result<Partes> {
+    let tamanho = std::fs::metadata(caminho)?.len();
+    let duracao = duracao_de(caminho).await?;
+    if duracao <= 0.0 {
+        bail!("não consegui ler a duração do vídeo");
+    }
+
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .with_context(|| format!("criando {}", dir.display()))?;
+
+    let ext = caminho
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("mp4")
+        .to_ascii_lowercase();
+    let base = sanitiza(
+        caminho
+            .file_stem()
+            .and_then(|n| n.to_str())
+            .unwrap_or("video"),
+    );
+
+    // Primeira tentativa pelo bitrate médio; se um trecho passar do teto (GOP longo, cena
+    // pesada), corta na metade do tempo e tenta de novo. Duas tentativas bastam na prática, e
+    // insistir mais sairia mais caro que cair nos volumes.
+    let mut segundos = (duracao * alvo as f64 / tamanho as f64).max(5.0);
+    for tentativa in 0..2 {
+        let arquivos = segmenta(caminho, &dir, &base, &ext, segundos).await?;
+        let maior = arquivos
+            .iter()
+            .filter_map(|p| p.metadata().ok().map(|m| m.len()))
+            .max()
+            .unwrap_or(0);
+        if !arquivos.is_empty() && maior <= LIMITE_ENVIO && arquivos.len() <= MAX_PARTES {
+            let primeiro = arquivos[0]
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            return Ok(Partes {
+                dir,
+                arquivos,
+                primeiro,
+                corte: Corte::Trechos,
+            });
+        }
+        if tentativa == 0 {
+            segundos /= 2.0;
+        }
+    }
+
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+    bail!("os trechos continuaram passando do teto do Telegram")
+}
+
+/// Uma passada do `ffmpeg` cortando por tempo. Devolve os trechos em ordem.
+async fn segmenta(
+    caminho: &Path,
+    dir: &Path,
+    base: &str,
+    ext: &str,
+    segundos: f64,
+) -> Result<Vec<PathBuf>> {
+    // Rodar de novo por cima do que já existe misturaria as duas tentativas.
+    let _ = tokio::fs::remove_dir_all(dir).await;
+    tokio::fs::create_dir_all(dir).await?;
+
+    let molde = dir.join(format!("{base}-parte-%03d.{ext}"));
+    let saida = tokio::process::Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(caminho)
+        .args(["-map", "0", "-c", "copy", "-f", "segment"])
+        .arg("-segment_time")
+        .arg(format!("{segundos:.3}"))
+        .args(["-reset_timestamps", "1"])
+        .arg(&molde)
+        .output()
+        .await
+        .context("rodando o ffmpeg")?;
+
+    let mut arquivos = Vec::new();
+    let mut entradas = tokio::fs::read_dir(dir).await?;
+    while let Some(e) = entradas.next_entry().await? {
+        if e.path().is_file() {
+            arquivos.push(e.path());
+        }
+    }
+    arquivos.sort();
+    // Saída zero não prova nada: o que vale é ter trecho em disco, e nenhum deles vazio.
+    if arquivos.is_empty()
+        || arquivos
+            .iter()
+            .any(|p| p.metadata().is_ok_and(|m| m.len() == 0))
+    {
+        bail!(
+            "o ffmpeg não produziu trecho utilizável: {}",
+            String::from_utf8_lossy(&saida.stderr).trim()
+        );
+    }
+    Ok(arquivos)
+}
+
+async fn duracao_de(caminho: &Path) -> Result<f64> {
+    let saida = tokio::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=nw=1:nk=1",
+        ])
+        .arg(caminho)
+        .output()
+        .await
+        .context("rodando o ffprobe")?;
+    String::from_utf8_lossy(&saida.stdout)
+        .trim()
+        .parse::<f64>()
+        .context("duração ilegível")
+}
+
+/// O ffmpeg está por aqui? Sem ele, vídeo grande cai nos volumes como qualquer outro arquivo.
+pub fn tem_ffmpeg() -> bool {
+    std::process::Command::new("ffmpeg")
+        .arg("-version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Alvo padrão de cada trecho.
+pub fn alvo_trecho() -> u64 {
+    ALVO_TRECHO
 }
 
 fn agora() -> i64 {
@@ -752,6 +924,61 @@ mod tests {
         let dir = partes.dir.clone();
         partes.limpa().await;
         assert!(!dir.exists(), "as partes têm que sumir depois do envio");
+    }
+
+    /// Corta um vídeo de verdade, gerado na hora, com alvo pequeno para caber no teste.
+    #[tokio::test]
+    async fn video_vira_trechos_que_tocam_sozinhos() {
+        if !tem_ffmpeg() {
+            return;
+        }
+        let raiz = tempfile::tempdir().unwrap();
+        let video = raiz.path().join("fonte.mp4");
+        let feito = tokio::process::Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=15:duration=12",
+                "-c:v",
+                "libx264",
+                "-g",
+                "15",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&video)
+            .status()
+            .await;
+        if !feito.is_ok_and(|s| s.success()) {
+            return; // sem codificador de vídeo nesta máquina
+        }
+
+        let tamanho = std::fs::metadata(&video).unwrap().len();
+        // Alvo de um terço do arquivo: tem que sair mais de um trecho.
+        let partes = corta_video(&video, raiz.path().join("trechos"), tamanho / 3)
+            .await
+            .unwrap();
+        assert!(partes.arquivos.len() > 1, "era para cortar em mais de um");
+        assert_eq!(partes.corte, Corte::Trechos);
+        assert!(partes.primeiro.ends_with(".mp4"), "{}", partes.primeiro);
+        for p in &partes.arquivos {
+            let m = p.metadata().unwrap();
+            assert!(m.len() > 0, "trecho vazio em {}", p.display());
+        }
+        // Cada trecho tem que ser um vídeo legível por si: é essa a razão de cortar por tempo.
+        for p in &partes.arquivos {
+            assert!(
+                duracao_de(p).await.unwrap_or(0.0) > 0.0,
+                "{} não é vídeo",
+                p.display()
+            );
+        }
+        partes.limpa().await;
     }
 
     #[test]
