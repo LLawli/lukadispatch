@@ -102,6 +102,19 @@ fn desenha(store: &Store) -> anyhow::Result<String> {
         s.push_str("\n<i>nenhuma sessão viva</i>\n");
     }
     for sessao in &sessoes {
+        // Sessão que já estava aberta quando a telemetria foi instalada não passou pelo hook
+        // SessionStart, então o modelo dela nunca foi gravado. O transcript sabe: descobre uma
+        // vez e guarda, para o painel não ficar incompleto para sempre.
+        let modelo = match (&sessao.model, &sessao.transcript_path) {
+            (None, Some(caminho)) => {
+                let achado = context::model_from_transcript(std::path::Path::new(caminho));
+                if let Some(m) = &achado {
+                    let _ = store.set_model(&sessao.session_id, Some(m), None);
+                }
+                achado
+            }
+            (m, _) => m.clone(),
+        };
         let dono = if sessao.owned_by_bot() {
             "🤖"
         } else {
@@ -114,7 +127,7 @@ fn desenha(store: &Store) -> anyhow::Result<String> {
         ));
 
         let mut detalhe = Vec::new();
-        if let Some(m) = &sessao.model {
+        if let Some(m) = &modelo {
             let esforco = sessao
                 .effort
                 .as_deref()
@@ -126,7 +139,7 @@ fn desenha(store: &Store) -> anyhow::Result<String> {
             .transcript_path
             .as_deref()
             .map(std::path::Path::new)
-            .and_then(context::read)
+            .and_then(|p| context::read_with_model(p, modelo.as_deref()))
         {
             detalhe.push(format!(
                 "contexto {} / {} ({:.0}%)",

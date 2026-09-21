@@ -957,7 +957,7 @@ impl App {
                     .transcript_path
                     .as_deref()
                     .map(std::path::Path::new)
-                    .and_then(context::read);
+                    .and_then(|p| context::read_with_model(p, s.model.as_deref()));
                 s.summary(ctx)
             })
             .collect())

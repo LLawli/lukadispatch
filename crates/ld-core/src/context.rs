@@ -88,6 +88,45 @@ fn model_id_da_linha(linha: &str) -> Option<String> {
     Some(id.to_string())
 }
 
+/// O modelo que a sessão está usando, lido do transcript.
+///
+/// Serve para sessão que o daemon não viu nascer (já estava aberta quando a telemetria foi
+/// instalada): sem isto ela fica sem modelo no painel para sempre. A busca é de trás para
+/// frente, então uma troca de modelo no meio da conversa aparece com o valor atual.
+pub fn model_from_transcript(transcript: &Path) -> Option<String> {
+    for bytes in CAUDAS {
+        let texto = cauda(transcript, bytes)?;
+        for linha in texto.lines().rev() {
+            if let Some(id) = model_id_da_linha(linha) {
+                return Some(id);
+            }
+        }
+        if bytes == u64::MAX {
+            break;
+        }
+    }
+    None
+}
+
+/// Contexto atual, com o limite do modelo que o daemon já conhece.
+///
+/// Preferir o modelo conhecido importa: o marcador `[1m]` só aparece no transcript num
+/// `attachment` de modelo, que costuma estar no começo do arquivo, longe da cauda que esta
+/// leitura varre. Sem isto, uma sessão de 1M aparecia no painel como `323k / 200k (100%)`, que
+/// além de errado é impossível.
+pub fn read_with_model(transcript: &Path, model: Option<&str>) -> Option<ContextUsage> {
+    let mut uso = read(transcript)?;
+    if let Some(m) = model {
+        uso.limit = limit_for_model(m);
+    }
+    // Rede de segurança para quando nem o modelo se sabe (sessão que já estava aberta antes de a
+    // telemetria ser instalada): contexto maior que o limite prova que o limite está errado.
+    if uso.tokens > uso.limit {
+        uso.limit = LIMITE_1M;
+    }
+    Some(uso)
+}
+
 /// Contexto atual da sessão, ou `None` quando o transcript ainda não tem nenhuma resposta do
 /// assistente (sessão recém-criada) ou o arquivo não existe.
 pub fn read(transcript: &Path) -> Option<ContextUsage> {
@@ -194,6 +233,50 @@ mod tests {
         )
         .unwrap();
         assert_eq!(read(&p).unwrap().tokens, 42);
+    }
+
+    #[test]
+    fn modelo_sai_do_transcript_quando_o_daemon_nao_viu_a_sessao_nascer() {
+        let (_d, p) = transcript(&[
+            r#"{"attachment":{"type":"model","identity":{"modelId":"claude-sonnet-5[1m]"}}}"#,
+            r#"{"type":"assistant","message":{"usage":{"input_tokens":10}}}"#,
+        ]);
+        assert_eq!(
+            model_from_transcript(&p).as_deref(),
+            Some("claude-sonnet-5[1m]")
+        );
+    }
+
+    #[test]
+    fn modelo_conhecido_manda_no_limite() {
+        // O caso do painel: transcript sem o attachment de modelo na cauda, mas o daemon sabe
+        // qual modelo a sessão usa.
+        let (_d, p) = transcript(&[
+            r#"{"type":"assistant","message":{"usage":{"input_tokens":1,"cache_read_input_tokens":322999}}}"#,
+        ]);
+        let c = read_with_model(&p, Some("claude-opus-5[1m]")).unwrap();
+        assert_eq!(c.limit, LIMITE_1M);
+        assert_eq!(c.tokens, 323_000);
+        assert!(c.pct() < 40.0);
+    }
+
+    #[test]
+    fn contexto_maior_que_o_limite_corrige_o_limite() {
+        // Sem modelo conhecido, 323k num limite de 200k seria "100%", que é impossível.
+        let (_d, p) = transcript(&[
+            r#"{"type":"assistant","message":{"usage":{"input_tokens":1,"cache_read_input_tokens":322999}}}"#,
+        ]);
+        let c = read_with_model(&p, None).unwrap();
+        assert_eq!(c.limit, LIMITE_1M);
+    }
+
+    #[test]
+    fn dentro_do_limite_o_modelo_conhecido_nao_infla() {
+        let (_d, p) = transcript(&[
+            r#"{"type":"assistant","message":{"usage":{"input_tokens":1,"cache_read_input_tokens":53999}}}"#,
+        ]);
+        let c = read_with_model(&p, Some("claude-sonnet-5")).unwrap();
+        assert_eq!(c.limit, LIMITE_PADRAO);
     }
 
     #[test]
