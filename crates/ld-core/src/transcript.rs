@@ -166,6 +166,22 @@ const ABERTURAS_ANTIGAS: [&str; 3] = [
     "Esta conversa foi retomada pelo lukadispatch",
 ];
 
+/// `true` quando o texto é algo que uma pessoa digitou, e não encanamento.
+///
+/// Usada em dois lugares que precisam concordar: o replay de uma conversa retomada e o espelho
+/// ao vivo do que você digita no `tmux attach`. O `UserPromptSubmit` dispara para tudo que entra
+/// como prompt, e isso inclui os prompts que o próprio daemon injeta e as notificações de evento
+/// do Monitor. Sem este filtro, o tópico recebe o bootstrap inteiro e cada expiração de monitor
+/// como se fossem mensagens suas.
+pub fn e_fala_digitada(bruto: &str) -> bool {
+    let texto = bruto.trim();
+    !texto.is_empty()
+        && !e_do_sistema(texto)
+        && !texto.starts_with("<task-notification>")
+        && !texto.starts_with("<system-reminder>")
+        && !texto.starts_with("<command-name>")
+}
+
 /// Texto que o próprio lukadispatch injetou como prompt.
 fn e_do_sistema(bruto: &str) -> bool {
     let texto = bruto.trim();
@@ -297,6 +313,21 @@ mod tests {
         assert_eq!(falas.len(), 2, "só a conversa de verdade: {falas:?}");
         assert_eq!(falas[0].texto, "agora sim, roda os testes");
         assert_eq!(falas[1].texto, "rodei");
+    }
+
+    #[test]
+    fn so_e_fala_digitada_o_que_veio_de_gente() {
+        assert!(e_fala_digitada("roda os testes"));
+        assert!(!e_fala_digitada(&format!(
+            "{MARCA_SISTEMA}\nArme o monitor"
+        )));
+        assert!(!e_fala_digitada(
+            "Você está rodando dentro do lukadispatch..."
+        ));
+        assert!(!e_fala_digitada(
+            "<task-notification>\n<event>{}</event>\n</task-notification>"
+        ));
+        assert!(!e_fala_digitada("   "));
     }
 
     #[test]

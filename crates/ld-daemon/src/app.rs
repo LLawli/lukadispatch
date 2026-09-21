@@ -53,6 +53,17 @@ pub struct App {
     /// cada toque de botão. A data de modificação do binário é a chave: atualizar o Claude Code
     /// derruba o cache sozinho, e modelos novos aparecem sem reiniciar o daemon.
     catalogo: Mutex<Option<(std::time::SystemTime, Vec<ld_core::models::Modelo>)>>,
+    /// Sessões com um turno pedido por gente esperando resposta.
+    ///
+    /// O hook `Stop` dispara no fim de QUALQUER turno, e a sessão tem turnos que ninguém pediu:
+    /// o bootstrap, o re-arme depois de uma troca de modelo, e a re-armação depois que o Monitor
+    /// expira sozinho a cada 30 minutos. Todos terminam com o agente dizendo algo como "Monitor
+    /// rearmado", que ia para o tópico como se fosse resposta a você.
+    ///
+    /// A regra que substitui isso é simples: só vai para o tópico a resposta de um turno que
+    /// alguém pediu, seja pelo Telegram ou pelo teclado do PC. A marca é consumida no `Stop`.
+    com_pedido: Mutex<std::collections::HashSet<String>>,
+
     /// Sessões que estão trocando de modelo agora, com a hora em que a troca começou.
     ///
     /// Relançar exige matar o processo, e matar dispara o hook `SessionEnd`. Sem esta marca o
@@ -84,6 +95,7 @@ impl App {
             panel,
             avisos: Arc::new(Mutex::new(HashMap::new())),
             catalogo: Mutex::new(None),
+            com_pedido: Mutex::new(std::collections::HashSet::new()),
             relancando: Mutex::new(HashMap::new()),
             entregues: Mutex::new(HashMap::new()),
         }
@@ -231,6 +243,22 @@ impl App {
 
     /// Uma troca de modelo em andamento silencia o fim da sessão antiga por esta janela.
     const JANELA_RELANCAMENTO: std::time::Duration = std::time::Duration::from_secs(90);
+
+    /// Registra que alguém pediu alguma coisa a esta sessão.
+    fn marca_pedido(&self, session_id: &str) {
+        self.com_pedido
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(session_id.to_string());
+    }
+
+    /// Consome a marca: devolve `true` uma vez só, no `Stop` daquele turno.
+    fn tinha_pedido(&self, session_id: &str) -> bool {
+        self.com_pedido
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(session_id)
+    }
 
     fn marca_relancamento(&self, session_id: &str) {
         self.relancando
@@ -507,6 +535,7 @@ impl App {
             self.tg.delete(id).await;
         }
 
+        self.marca_pedido(&s.session_id);
         self.store.set_status(&s.session_id, "pensando")?;
         self.status
             .set(&self.ctx(), &s.session_id, topic, "Pensando...".into());
@@ -547,7 +576,9 @@ impl App {
                 at: agora(),
             },
         );
-        if !entregue {
+        if entregue {
+            self.marca_pedido(session_id);
+        } else {
             self.store.enqueue(session_id, texto, "pc")?;
         }
         Ok(entregue)
@@ -621,10 +652,13 @@ impl App {
                     .set(&self.ctx(), &ev.session_id, topic, "Escrevendo...".into());
             }
             EventKind::UserPrompt { text } => {
-                if self.e_eco(&ev.session_id, text) {
+                // Guarda repetida de propósito: o hook já filtra, mas um binário velho no PATH
+                // mandaria encanamento para o tópico e ninguém veria o erro.
+                if !ld_core::transcript::e_fala_digitada(text) || self.e_eco(&ev.session_id, text) {
                     return Ok(());
                 }
                 info!(sessao = %ev.session_id, "prompt digitado no PC, espelhado no tópico");
+                self.marca_pedido(&ev.session_id);
                 self.store.set_status(&ev.session_id, "pensando")?;
                 let corpo = format!("👤 <i>do PC</i>\n{}", escape_html(&corta(text, 1200)));
                 let tg = self.tg.clone();
@@ -683,8 +717,15 @@ impl App {
 
         if let Some(topic) = s.topic_id {
             self.status.clear(&self.ctx(), &r.session_id, topic);
-            if let Some(texto) = r.last_assistant_message.as_deref()
-                && !texto.trim().is_empty()
+            let pedida = self.tinha_pedido(&r.session_id);
+            let tem_texto = r
+                .last_assistant_message
+                .as_deref()
+                .is_some_and(|t| !t.trim().is_empty());
+            info!(sessao = %r.session_id, pedida, tem_texto, "fim de turno");
+            if pedida
+                && let Some(texto) = r.last_assistant_message.as_deref()
+                && tem_texto
             {
                 self.tg.send(Some(topic), texto).await?;
             }

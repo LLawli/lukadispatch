@@ -93,6 +93,12 @@ pub fn run(evento: &str) -> i32 {
             else {
                 return 0;
             };
+            // O evento dispara para TUDO que entra como prompt: inclusive os prompts que o
+            // daemon injeta e as notificações de evento do Monitor. Espelhar isso encheria o
+            // tópico de encanamento assinado como se fosse você.
+            if !ld_core::transcript::e_fala_digitada(&texto_prompt) {
+                return 0;
+            }
             client::send(&Request::Event(SessionEvent {
                 session_id,
                 event: EventKind::UserPrompt { text: texto_prompt },
