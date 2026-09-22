@@ -142,7 +142,14 @@ async fn em_topico(
     // não corrigir a transcrição.
     if !comando.starts_with('/') && app.confirmacoes.tem(topic) {
         if let Some(p) = app.confirmacoes.tira(topic) {
-            app.tg.delete(p.msg).await;
+            // A correção que você digitou some, e o card vira o registro dos dois textos juntos.
+            // Deixar a sua mensagem solta no tópico espalharia em três lugares (áudio, card,
+            // mensagem) uma coisa só, e nenhum deles mostraria o que a sessão de fato recebeu.
+            app.tg.delete(msg).await;
+            let _ = app
+                .tg
+                .edit_keyboard(p.msg, &registro(&p.texto, Some(texto)), sem_botoes())
+                .await;
             info!(sessao = %p.session_id, "transcrição enviada com correção escrita");
             let junto = p.para_sessao(Some(texto));
             return app
@@ -321,29 +328,35 @@ async fn com_arquivos(
         return Ok(());
     };
 
+    // Áudio que vai virar card de transcrição não ganha card de anexo: o caminho do .oga no meio
+    // do tópico é ruído, e a transcrição já mostra o que interessa.
+    let calado = app.cfg.transcricao.ativa && lista.iter().all(|a| ehaudio(a.tipo));
+
     let mut caminhos = Vec::new();
     for anexo in &lista {
         match arquivos::baixa(app.tg.bot(), &s.session_id, anexo).await {
             Ok(caminho) => {
                 info!(sessao = %s.session_id, arquivo = %caminho.display(), "anexo recebido");
-                let _ = app
-                    .tg
-                    .send_html(
-                        Some(topic),
-                        &format!(
-                            "📎 <b>{}</b> · {}\n<code>{}</code>",
-                            escape_html(
-                                caminho
-                                    .file_name()
-                                    .map(|n| n.to_string_lossy())
-                                    .unwrap_or_default()
-                                    .as_ref()
+                if !calado {
+                    let _ = app
+                        .tg
+                        .send_html(
+                            Some(topic),
+                            &format!(
+                                "📎 <b>{}</b> · {}\n<code>{}</code>",
+                                escape_html(
+                                    caminho
+                                        .file_name()
+                                        .map(|n| n.to_string_lossy())
+                                        .unwrap_or_default()
+                                        .as_ref()
+                                ),
+                                arquivos::humano(anexo.tamanho),
+                                escape_html(&caminho.to_string_lossy())
                             ),
-                            arquivos::humano(anexo.tamanho),
-                            escape_html(&caminho.to_string_lossy())
-                        ),
-                    )
-                    .await;
+                        )
+                        .await;
+                }
                 caminhos.push(caminho.to_string_lossy().into_owned());
             }
             Err(e) => {
@@ -379,6 +392,64 @@ async fn com_arquivos(
 
     app.on_incoming_com_arquivos(topic, &texto_com_anexo(legenda, &caminhos), de, caminhos)
         .await
+}
+
+#[cfg(test)]
+mod tests_registro {
+    use super::*;
+
+    #[test]
+    fn registro_sem_ratificacao_mostra_so_a_transcricao() {
+        let t = registro("roda os testes", None);
+        assert!(t.contains("Transcrição"), "{t}");
+        assert!(t.contains("roda os testes"), "{t}");
+        assert!(!t.contains("Ratificação"), "{t}");
+    }
+
+    #[test]
+    fn registro_com_ratificacao_mostra_os_dois() {
+        let t = registro("roda os testes do arquivos", Some("é do transcricao"));
+        assert!(t.contains("🎤 <b>Transcrição</b>"), "{t}");
+        assert!(t.contains("✍️ <b>Ratificação</b>"), "{t}");
+        assert!(t.contains("é do transcricao"), "{t}");
+    }
+
+    #[test]
+    fn ratificacao_em_branco_nao_cria_secao_vazia() {
+        assert!(!registro("texto", Some("   ")).contains("Ratificação"));
+    }
+
+    #[test]
+    fn html_do_seu_texto_nao_escapa_para_a_marcacao() {
+        // Falar de "<b>" num áudio não pode quebrar o card nem injetar marcação.
+        let t = registro(
+            "use <b>negrito</b> & cia",
+            Some("na verdade <i>itálico</i>"),
+        );
+        assert!(t.contains("&lt;b&gt;negrito&lt;/b&gt; &amp; cia"), "{t}");
+        assert!(t.contains("&lt;i&gt;itálico&lt;/i&gt;"), "{t}");
+    }
+
+    #[test]
+    fn teclado_vazio_e_mesmo_vazio() {
+        assert!(sem_botoes().inline_keyboard.is_empty());
+    }
+}
+
+/// O card depois de resolvido: o que a sessão recebeu, sem botão para tocar de novo.
+fn registro(transcricao: &str, ratificacao: Option<&str>) -> String {
+    let mut t = format!("🎤 <b>Transcrição</b>\n{}", escape_html(transcricao.trim()));
+    if let Some(r) = ratificacao.map(str::trim).filter(|r| !r.is_empty()) {
+        t.push_str(&format!("\n\n✍️ <b>Ratificação</b>\n{}", escape_html(r)));
+    }
+    t
+}
+
+/// Teclado vazio: o Telegram não tem "remover botões", então se edita com nenhum.
+fn sem_botoes() -> teloxide::types::InlineKeyboardMarkup {
+    teloxide::types::InlineKeyboardMarkup::new(
+        Vec::<Vec<teloxide::types::InlineKeyboardButton>>::new(),
+    )
 }
 
 fn ehaudio(tipo: &str) -> bool {
@@ -651,12 +722,18 @@ async fn botao(
             }
             return Ok(());
         };
-        app.tg.delete(p.msg).await;
         if acao == "no" {
-            // "Finge que não existiu": a sessão nunca soube que houve áudio.
+            // "Finge que não existiu": some tudo, e a sessão nunca soube que houve áudio.
+            app.tg.delete(p.msg).await;
             info!(sessao = %p.session_id, "transcrição descartada");
             return Ok(());
         }
+        // O card não some: vira o registro do que foi enviado. Sem isso o tópico fica com um
+        // áudio seu e nenhuma pista do texto que a sessão recebeu.
+        let _ = app
+            .tg
+            .edit_keyboard(p.msg, &registro(&p.texto, None), sem_botoes())
+            .await;
         let texto = p.para_sessao(None);
         return app
             .on_incoming_com_arquivos(topic, &texto, &p.de, p.arquivos)

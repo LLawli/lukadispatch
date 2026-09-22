@@ -144,6 +144,11 @@ saídas:
   como correção, e a sessão sabe que a versão escrita é a que vale. É para o caso de "está quase
   certo, só essa palavra" — reescrever a frase inteira anularia o ganho de ter falado.
 
+Resolvido o card, ele perde os botões e vira o registro do que a sessão recebeu (`Transcrição` e,
+quando houve, `Ratificação`); a mensagem que você digitou é apagada, para a mesma coisa não ficar
+espalhada em três lugares. Só o descarte não deixa registro, que é o sentido dele. Áudio destinado
+à transcrição também não gera o card de anexo com o caminho do arquivo.
+
 Comando (`/kill`, `/mode`…) continua sendo comando mesmo com um card aberto. O áudio guardado
 expira em `transcricao.guardar_audio_dias`.
 
