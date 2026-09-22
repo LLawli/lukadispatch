@@ -131,8 +131,21 @@ nota de vídeo, figurinha, áudio, mensagem de voz) é baixado na hora para
 `~/.local/share/lukadispatch/arquivos/<sessão>/` e chega à sessão como caminho absoluto, no campo
 `files` da linha NDJSON e dentro do texto. A legenda vira a mensagem; sem legenda, o texto é a
 própria linha do arquivo. O teto é 20 MB, que é o do Bot API. Os arquivos são apagados junto com a
-sessão. Voz chega como `.oga` e ainda não vem transcrita: quem quiser o texto roda o transcritor
-sobre o caminho recebido.
+sessão.
+
+**Voz vira texto.** Mensagem de voz é transcrita e chega à sessão como se você tivesse escrito,
+com o caminho do `.oga` junto para conferir quando a transcrição sair estranha. A transcrição roda
+fora do turno: ela leva mais tempo que o hook `Stop` espera (a configuração padrão gasta ~44 s por
+minuto de fala), então o tópico mostra `transcrevendo…` e a mensagem chega quando fica pronta. O
+áudio guardado expira em `transcricao.guardar_audio_dias`.
+
+O motor é plugável e mora no `config.toml`, não no código, porque a escolha é do hardware. O padrão
+é o que ganhou o benchmark num Ryzen 5700U com Radeon Vega sem VRAM dedicada: whisper.cpp com
+`large-v3-turbo` quantizado em q5_0, no backend Vulkan (12,9% de erro por palavra em áudio real,
+~1 GB de memória). Trocar é editar `transcricao.comando`, `transcricao.modelo` e `transcricao.saida`
+— os marcadores são `{audio}` (WAV mono 16 kHz que o daemon prepara), `{modelo}` e `{saida}`. O tipo
+`Transcricao` traz presets medidos para CPU e para o FastConformer-pt, que é 5x mais rápido e cabe
+em 417 MB, cobrando quase o dobro de erro em jargão e nome próprio.
 
 No sentido contrário, o agente **não chama ferramenta nenhuma**: ele escreve na resposta uma linha
 sozinha com `@arquivo:` seguido do caminho absoluto (e, se quiser, ` | legenda`). O hook `Stop`
