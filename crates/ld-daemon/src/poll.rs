@@ -84,7 +84,7 @@ async fn trata(app: Arc<App>, u: Update) -> anyhow::Result<()> {
                     }
                     Achado::Nada if texto.is_empty() => Ok(()),
                     Achado::Nada => {
-                        let alvo = msg.reply_to_message().map(|r| r.id);
+                        let alvo = resposta_de_verdade(&msg, t.0.0);
                         em_topico(&app, t.0.0, texto, &nome, msg.id, alvo).await
                     }
                 },
@@ -444,6 +444,27 @@ mod tests_registro {
     use super::*;
 
     #[test]
+    fn reply_automatico_do_topico_nao_conta_como_resposta() {
+        // Num fórum, toda mensagem do tópico responde à mensagem que o abriu, cujo id É o
+        // thread_id. Tratar isso como resposta fazia texto solto se passar por correção e
+        // desarmava a guarda de pendência inteira.
+        let topico = 630;
+        let raiz = teloxide::types::MessageId(630);
+        let outra = teloxide::types::MessageId(700);
+        assert_eq!(
+            filtra_reply(Some(raiz), topico),
+            None,
+            "o reply do tópico não é resposta"
+        );
+        assert_eq!(
+            filtra_reply(Some(outra), topico),
+            Some(outra),
+            "responder a um card é resposta"
+        );
+        assert_eq!(filtra_reply(None, topico), None);
+    }
+
+    #[test]
     fn texto_solto_espera_a_pendencia() {
         assert!(segura_por_pendencia("oi", false));
         assert!(segura_por_pendencia("escrevi outra coisa", false));
@@ -499,6 +520,27 @@ mod tests_registro {
     fn teclado_vazio_e_mesmo_vazio() {
         assert!(sem_botoes().inline_keyboard.is_empty());
     }
+}
+
+/// A qual mensagem você respondeu de verdade, se respondeu a alguma.
+///
+/// Num fórum do Telegram, TODA mensagem dentro de um tópico vem com `reply_to_message`
+/// preenchido, apontando para a mensagem que abriu o tópico — e o id dessa mensagem é o próprio
+/// `thread_id`. Ou seja, "respondeu a alguma coisa" é verdadeiro sempre, e usar isso direto faz
+/// texto solto se passar por resposta.
+///
+/// Custou um bug silencioso: a guarda de pendência nunca disparava e a correção por reply nunca
+/// casava, porque as duas liam esse campo sem descontar o reply automático do tópico.
+fn resposta_de_verdade(msg: &Message, topic: i32) -> Option<teloxide::types::MessageId> {
+    filtra_reply(msg.reply_to_message().map(|r| r.id), topic)
+}
+
+/// A regra acima, sem a `Message` em volta, para poder ser testada.
+fn filtra_reply(
+    alvo: Option<teloxide::types::MessageId>,
+    topic: i32,
+) -> Option<teloxide::types::MessageId> {
+    alvo.filter(|id| id.0 != topic)
 }
 
 /// Esta mensagem deve esperar a pendência do tópico ser resolvida?
