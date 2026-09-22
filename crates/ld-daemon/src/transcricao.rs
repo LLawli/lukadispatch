@@ -25,7 +25,19 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use ld_core::config::Transcricao as Cfg;
 use tokio::process::Command;
+use tokio::sync::Semaphore;
 use tracing::{info, warn};
+
+/// Uma transcrição por vez, sempre.
+///
+/// Não é sobre CPU: no Vulkan o trabalho ocupa 0,3 dos 8 núcleos. É sobre memória. Cada
+/// transcrição pede ~1 GB (quase todo em GTT) e esta máquina tem por volta de 1,2 GB livres, então
+/// dois áudios que cheguem juntos somam ~2 GB e empurram a máquina para swap — e swap aqui é zram,
+/// que não devolve a memória, comprime e segura.
+///
+/// Esperar é melhor que engasgar: a transcrição já acontece fora do turno, então a fila só atrasa
+/// a mensagem, enquanto o swap atrasaria a máquina inteira.
+static UMA_POR_VEZ: Semaphore = Semaphore::const_new(1);
 
 /// O que o transcritor produziu, com o tempo que levou (vai para o log, e ajuda a perceber
 /// quando uma troca de modelo saiu cara).
@@ -85,6 +97,17 @@ pub async fn transcreve(cfg: &Cfg, audio: &Path) -> Result<Option<Transcrito>> {
 
     let prefixo = temp.path().join("saida");
     let argumentos = monta(&cfg.comando, &wav, &modelo, &prefixo)?;
+
+    // A vez chega antes do relógio começar: o tempo que interessa medir é o da transcrição, não
+    // o da espera na fila, senão o log passa a acusar lentidão que é só concorrência.
+    if UMA_POR_VEZ.available_permits() == 0 {
+        info!(arquivo = %audio.display(), "outra transcrição está rodando; entro na fila");
+    }
+    let _vez = UMA_POR_VEZ
+        .acquire()
+        .await
+        .expect("o semáforo da transcrição nunca é fechado");
+
     let inicio = Instant::now();
     let texto = roda(&argumentos, saida, &prefixo, cfg.timeout_s).await?;
     let duracao = inicio.elapsed();
@@ -340,6 +363,43 @@ mod tests {
         let e = transcreve(&c, Path::new("/tmp/x.oga")).await.unwrap_err();
         let msg = format!("{e:#}");
         assert!(msg.contains("/nao/existe/modelo.bin"), "{msg}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn duas_transcricoes_nao_rodam_juntas() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Um "transcritor" que só marca quantos estão dentro ao mesmo tempo. O que importa provar
+        // não é que o comando roda, é que nunca há dois ocupando memória de uma vez.
+        let dentro = Arc::new(AtomicUsize::new(0));
+        let maximo = Arc::new(AtomicUsize::new(0));
+
+        let mut tarefas = Vec::new();
+        for _ in 0..4 {
+            let (dentro, maximo) = (Arc::clone(&dentro), Arc::clone(&maximo));
+            tarefas.push(tokio::spawn(async move {
+                let _vez = UMA_POR_VEZ.acquire().await.unwrap();
+                let agora = dentro.fetch_add(1, Ordering::SeqCst) + 1;
+                maximo.fetch_max(agora, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+                dentro.fetch_sub(1, Ordering::SeqCst);
+            }));
+        }
+        for t in tarefas {
+            t.await.unwrap();
+        }
+
+        assert_eq!(
+            maximo.load(Ordering::SeqCst),
+            1,
+            "duas transcrições rodaram juntas: seriam ~2 GB de pico numa máquina com ~1,2 GB livres"
+        );
+        assert_eq!(
+            UMA_POR_VEZ.available_permits(),
+            1,
+            "a vez não foi devolvida no fim"
+        );
     }
 
     #[test]
