@@ -351,8 +351,95 @@ async fn com_arquivos(
         return Ok(());
     }
 
+    // Voz é o único anexo que não se entrega sozinho: um `.oga` não diz nada à sessão, e
+    // transcrevê-lo leva mais que o turno inteiro. Sai do caminho da resposta e volta como
+    // mensagem própria quando ficar pronto.
+    if lista.iter().all(|a| ehaudio(a.tipo)) && app.cfg.transcricao.ativa {
+        transcreve_depois(app, topic, legenda, de, caminhos);
+        return Ok(());
+    }
+
     app.on_incoming_com_arquivos(topic, &texto_com_anexo(legenda, &caminhos), de, caminhos)
         .await
+}
+
+fn ehaudio(tipo: &str) -> bool {
+    matches!(tipo, "mensagem de voz" | "áudio")
+}
+
+/// Transcreve fora do turno e entrega o texto como se você o tivesse escrito.
+///
+/// Em segundo plano porque o número manda: a configuração escolhida leva 44 s por minuto de
+/// fala, e o hook `Stop` desiste em 60 s. Transcrever antes de responder faria um áudio de dois
+/// minutos derrubar a resposta inteira.
+fn transcreve_depois(app: &Arc<App>, topic: i32, legenda: &str, de: &str, caminhos: Vec<String>) {
+    let app = Arc::clone(app);
+    let legenda = legenda.to_string();
+    let de = de.to_string();
+    tokio::spawn(async move {
+        let aviso = app
+            .tg
+            .send_html(Some(topic), "🎤 <i>transcrevendo…</i>")
+            .await;
+
+        let mut partes = Vec::new();
+        for caminho in &caminhos {
+            match crate::transcricao::transcreve(
+                &app.cfg.transcricao,
+                std::path::Path::new(caminho),
+            )
+            .await
+            {
+                Ok(Some(t)) => {
+                    info!(sessao = %topic, segundos = t.duracao.as_secs_f32(), "voz transcrita");
+                    partes.push(t.texto);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    warn!(arquivo = %caminho, erro = %e, "não consegui transcrever");
+                    let _ = app
+                        .tg
+                        .send_html(
+                            Some(topic),
+                            &format!(
+                                "⚠️ não consegui transcrever: {}\nO áudio está em <code>{}</code>.",
+                                escape_html(&format!("{e:#}")),
+                                escape_html(caminho)
+                            ),
+                        )
+                        .await;
+                }
+            }
+        }
+        if let Ok(id) = aviso {
+            app.tg.delete(id).await;
+        }
+        if partes.is_empty() {
+            return;
+        }
+
+        // O texto transcrito É a mensagem; o caminho do .oga vai junto para quem quiser conferir
+        // o que foi dito de verdade quando a transcrição sair estranha.
+        let transcrito = partes.join("\n");
+        let texto = if legenda.trim().is_empty() {
+            transcrito.clone()
+        } else {
+            format!("{legenda}\n\n{transcrito}")
+        };
+        let _ = app
+            .tg
+            .send_html(
+                Some(topic),
+                &format!("🎤 <i>{}</i>", escape_html(&transcrito)),
+            )
+            .await;
+        if let Err(e) = app
+            .on_incoming_com_arquivos(topic, &texto, &de, caminhos)
+            .await
+        {
+            warn!(erro = %e, "transcrição pronta mas não chegou à sessão");
+        }
+    });
 }
 
 /// O que a sessão lê quando chega um arquivo.
