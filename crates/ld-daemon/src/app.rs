@@ -297,8 +297,13 @@ impl App {
         // vale para o caso comum. Se um arquivo precisa sobreviver, ele sai daqui pela sessão,
         // que grava onde você mandar.
         crate::arquivos::limpa(session_id).await;
-        // Card de transcrição de uma sessão que acabou não pode sobreviver a ela.
-        self.confirmacoes.limpa_sessao(session_id);
+        // Card de transcrição de uma sessão que acabou não pode sobreviver a ela: o tópico vai
+        // embora junto, mas um card órfão ainda responderia a toques até o daemon reiniciar.
+        for p in self.confirmacoes.limpa_sessao(session_id) {
+            if let Some(m) = p.msg {
+                self.tg.delete(m).await;
+            }
+        }
 
         self.store.end(session_id)?;
         self.panel.refresh();

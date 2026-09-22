@@ -206,12 +206,40 @@ impl Tg {
         html: &str,
         teclado: InlineKeyboardMarkup,
     ) -> Result<MessageId> {
+        self.send_keyboard_reply(topic, html, teclado, None).await
+    }
+
+    /// O mesmo, respondendo a uma mensagem.
+    ///
+    /// É o que amarra o card de transcrição ao áudio que o gerou: com dois áudios seguidos no
+    /// tópico, a seta do Telegram é o que diz qual card é de qual voz, sem precisar repetir o
+    /// texto nem numerar nada.
+    pub async fn send_keyboard_reply(
+        &self,
+        topic: Option<i32>,
+        html: &str,
+        teclado: InlineKeyboardMarkup,
+        responde_a: Option<MessageId>,
+    ) -> Result<MessageId> {
         let mut req = self.bot.send_message(self.chat, html);
         req.parse_mode = Some(ParseMode::Html);
         req.reply_markup = Some(teclado.into());
         req.link_preview_options = Some(sem_preview());
         if let Some(t) = topic {
             req.message_thread_id = Some(ThreadId(MessageId(t)));
+        }
+        if let Some(alvo) = responde_a {
+            // `allow_sending_without_reply`: se você apagar o áudio antes de decidir, o card
+            // ainda precisa aparecer, senão a transcrição some sem explicação.
+            req.reply_parameters = Some(teloxide::types::ReplyParameters {
+                message_id: alvo,
+                chat_id: None,
+                allow_sending_without_reply: Some(true),
+                quote: None,
+                quote_parse_mode: None,
+                quote_entities: None,
+                quote_position: None,
+            });
         }
         Ok(req.await.context("enviando teclado")?.id)
     }

@@ -79,7 +79,9 @@ async fn trata(app: Arc<App>, u: Update) -> anyhow::Result<()> {
 
             match msg.thread_id {
                 Some(t) => match achado {
-                    Achado::Arquivos(lista) => com_arquivos(&app, t.0.0, texto, &nome, lista).await,
+                    Achado::Arquivos(lista) => {
+                        com_arquivos(&app, t.0.0, texto, &nome, lista, Some(msg.id)).await
+                    }
                     Achado::Nada if texto.is_empty() => Ok(()),
                     Achado::Nada => em_topico(&app, t.0.0, texto, &nome, msg.id).await,
                 },
@@ -140,22 +142,26 @@ async fn em_topico(
     //
     // Comando continua sendo comando: quem manda /kill com um card aberto quer fechar a sessão,
     // não corrigir a transcrição.
-    if !comando.starts_with('/') && app.confirmacoes.tem(topic) {
-        if let Some(p) = app.confirmacoes.tira(topic) {
-            // A correção que você digitou some, e o card vira o registro dos dois textos juntos.
-            // Deixar a sua mensagem solta no tópico espalharia em três lugares (áudio, card,
-            // mensagem) uma coisa só, e nenhum deles mostraria o que a sessão de fato recebeu.
-            app.tg.delete(msg).await;
+    if !comando.starts_with('/')
+        && let Some(p) = app.confirmacoes.tira_da_tela(topic)
+    {
+        // A correção que você digitou some, e o card vira o registro dos dois textos juntos.
+        // Deixar a sua mensagem solta no tópico espalharia em três lugares (áudio, card,
+        // mensagem) uma coisa só, e nenhum deles mostraria o que a sessão de fato recebeu.
+        app.tg.delete(msg).await;
+        if let Some(m) = p.msg {
             let _ = app
                 .tg
-                .edit_keyboard(p.msg, &registro(&p.texto, Some(texto)), sem_botoes())
-                .await;
-            info!(sessao = %p.session_id, "transcrição enviada com correção escrita");
-            let junto = p.para_sessao(Some(texto));
-            return app
-                .on_incoming_com_arquivos(topic, &junto, de, p.arquivos)
+                .edit_keyboard(m, &registro(&p.texto, Some(texto)), sem_botoes())
                 .await;
         }
+        info!(sessao = %p.session_id, "transcrição enviada com correção escrita");
+        let junto = p.para_sessao(Some(texto));
+        let r = app
+            .on_incoming_com_arquivos(topic, &junto, de, p.arquivos)
+            .await;
+        mostra_proximo(app, topic).await;
+        return r;
     }
 
     match comando {
@@ -319,6 +325,8 @@ async fn com_arquivos(
     legenda: &str,
     de: &str,
     lista: Vec<Anexo>,
+    // A mensagem do áudio, para o card de transcrição responder a ela.
+    origem: Option<teloxide::types::MessageId>,
 ) -> anyhow::Result<()> {
     let Some(s) = app.session_for_topic(topic).await? else {
         let _ = app
@@ -386,7 +394,7 @@ async fn com_arquivos(
     // transcrevê-lo leva mais que o turno inteiro. Sai do caminho da resposta e volta como
     // mensagem própria quando ficar pronto.
     if lista.iter().all(|a| ehaudio(a.tipo)) && app.cfg.transcricao.ativa {
-        transcreve_depois(app, topic, legenda, de, caminhos);
+        transcreve_depois(app, topic, legenda, de, caminhos, origem);
         return Ok(());
     }
 
@@ -436,6 +444,47 @@ mod tests_registro {
     }
 }
 
+/// Sobe o card da próxima transcrição da fila, se não houver nenhum na tela.
+///
+/// Chamada depois de cada resolução, e é o que faz a fila andar: você decide uma, a seguinte
+/// aparece. Mostrar todas de uma vez tornaria ambíguo a qual delas uma correção escrita se
+/// refere, e numerar cards para desfazer essa ambiguidade seria pior que esperar a vez.
+async fn mostra_proximo(app: &Arc<App>, topic: i32) {
+    let Some(p) = app.confirmacoes.proximo_sem_card(topic) else {
+        return;
+    };
+    let atras = app.confirmacoes.na_fila(topic).saturating_sub(1);
+    let rodape = if atras > 0 {
+        format!("<i>Confirme, descarte, ou escreva a correção. Mais {atras} na fila.</i>")
+    } else {
+        "<i>Confirme, descarte, ou escreva a correção.</i>".to_string()
+    };
+    match app
+        .tg
+        .send_keyboard_reply(
+            Some(topic),
+            &format!(
+                "🎤 <b>Transcrição</b>\n\n{}\n\n{rodape}",
+                escape_html(&p.texto)
+            ),
+            coluna(vec![
+                ("✅ Enviar".into(), format!("t:ok:{}", p.id)),
+                ("🗑 Descartar".into(), format!("t:no:{}", p.id)),
+            ]),
+            // A seta do Telegram é o que amarra o card ao áudio que o gerou.
+            p.origem,
+        )
+        .await
+    {
+        Ok(m) => app.confirmacoes.marca_na_tela(&p.id, m),
+        Err(e) => {
+            // Sem card, o pendente ficaria preso na fila para sempre e seguraria os próximos.
+            warn!(erro = %e, "não consegui mostrar a transcrição; tiro da fila");
+            app.confirmacoes.tira_por_id(&p.id);
+        }
+    }
+}
+
 /// O card depois de resolvido: o que a sessão recebeu, sem botão para tocar de novo.
 fn registro(transcricao: &str, ratificacao: Option<&str>) -> String {
     let mut t = format!("🎤 <b>Transcrição</b>\n{}", escape_html(transcricao.trim()));
@@ -461,7 +510,14 @@ fn ehaudio(tipo: &str) -> bool {
 /// Em segundo plano porque o número manda: a configuração escolhida leva 44 s por minuto de
 /// fala, e o hook `Stop` desiste em 60 s. Transcrever antes de responder faria um áudio de dois
 /// minutos derrubar a resposta inteira.
-fn transcreve_depois(app: &Arc<App>, topic: i32, legenda: &str, de: &str, caminhos: Vec<String>) {
+fn transcreve_depois(
+    app: &Arc<App>,
+    topic: i32,
+    legenda: &str,
+    de: &str,
+    caminhos: Vec<String>,
+    origem: Option<teloxide::types::MessageId>,
+) {
     let app = Arc::clone(app);
     let legenda = legenda.to_string();
     let de = de.to_string();
@@ -514,42 +570,19 @@ fn transcreve_depois(app: &Arc<App>, topic: i32, legenda: &str, de: &str, caminh
         let Some(sessao) = app.session_for_topic(topic).await.ok().flatten() else {
             return;
         };
-        let msg = match app
-            .tg
-            .send_keyboard(
-                Some(topic),
-                &format!(
-                    "🎤 <b>Transcrição</b>\n\n{}\n\n<i>Confirme, descarte, ou escreva a correção.</i>",
-                    escape_html(&transcrito)
-                ),
-                coluna(vec![
-                    ("✅ Enviar".into(), "t:ok".into()),
-                    ("🗑 Descartar".into(), "t:no".into()),
-                ]),
-            )
-            .await
-        {
-            Ok(m) => m,
-            Err(e) => {
-                warn!(erro = %e, "não consegui mostrar a transcrição para confirmar");
-                return;
-            }
-        };
-
-        // Card novo no mesmo tópico aposenta o anterior: dois abertos tornariam ambíguo a qual
-        // deles uma correção escrita se refere.
-        let anterior = app.confirmacoes.guarda(crate::confirmacao::Pendente {
+        // Entra na fila; o card só sobe quando for a vez dele.
+        app.confirmacoes.guarda(crate::confirmacao::Pendente {
+            id: app.confirmacoes.novo_id(),
             session_id: sessao.session_id.clone(),
             topic,
-            msg,
+            origem,
+            msg: None,
             texto: transcrito,
             legenda: legenda.clone(),
             de: de.clone(),
             arquivos: caminhos,
         });
-        if let Some(velho) = anterior {
-            app.tg.delete(velho.msg).await;
-        }
+        mostra_proximo(&app, topic).await;
     });
 }
 
@@ -710,11 +743,12 @@ async fn botao(
 ) -> anyhow::Result<()> {
     // Transcrição esperando aval: confirmar manda para a sessão, descartar apaga sem deixar
     // rastro. Nos dois casos o card some, porque um teclado que já foi tocado só confunde.
-    if let Some(acao) = dado.strip_prefix("t:")
+    if let Some(resto) = dado.strip_prefix("t:")
+        && let Some((acao, id)) = resto.split_once(':')
         && matches!(acao, "ok" | "no")
         && let Some(topic) = topico
     {
-        let Some(p) = app.confirmacoes.tira(topic) else {
+        let Some(p) = app.confirmacoes.tira_por_id(id) else {
             // Card de um daemon anterior, ou tocado duas vezes. Some em silêncio: dizer
             // "expirou" seria barulho sobre algo que não tem conserto.
             if let Some(m) = msg {
@@ -724,20 +758,27 @@ async fn botao(
         };
         if acao == "no" {
             // "Finge que não existiu": some tudo, e a sessão nunca soube que houve áudio.
-            app.tg.delete(p.msg).await;
+            if let Some(m) = p.msg {
+                app.tg.delete(m).await;
+            }
             info!(sessao = %p.session_id, "transcrição descartada");
+            mostra_proximo(app, topic).await;
             return Ok(());
         }
         // O card não some: vira o registro do que foi enviado. Sem isso o tópico fica com um
         // áudio seu e nenhuma pista do texto que a sessão recebeu.
-        let _ = app
-            .tg
-            .edit_keyboard(p.msg, &registro(&p.texto, None), sem_botoes())
-            .await;
+        if let Some(m) = p.msg {
+            let _ = app
+                .tg
+                .edit_keyboard(m, &registro(&p.texto, None), sem_botoes())
+                .await;
+        }
         let texto = p.para_sessao(None);
-        return app
+        let r = app
             .on_incoming_com_arquivos(topic, &texto, &p.de, p.arquivos)
             .await;
+        mostra_proximo(app, topic).await;
+        return r;
     }
 
     if let Some(idx) = dado.strip_prefix("n:") {

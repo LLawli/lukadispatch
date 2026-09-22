@@ -144,10 +144,16 @@ saídas:
   como correção, e a sessão sabe que a versão escrita é a que vale. É para o caso de "está quase
   certo, só essa palavra" — reescrever a frase inteira anularia o ganho de ter falado.
 
-Resolvido o card, ele perde os botões e vira o registro do que a sessão recebeu (`Transcrição` e,
-quando houve, `Ratificação`); a mensagem que você digitou é apagada, para a mesma coisa não ficar
-espalhada em três lugares. Só o descarte não deixa registro, que é o sentido dele. Áudio destinado
-à transcrição também não gera o card de anexo com o caminho do arquivo.
+O card responde ao áudio que o gerou, então a seta do Telegram diz de qual voz ele saiu. Resolvido,
+ele perde os botões e vira o registro do que a sessão recebeu (`Transcrição` e, quando houve,
+`Ratificação`); a mensagem que você digitou é apagada, para a mesma coisa não ficar espalhada em
+três lugares. Só o descarte não deixa registro, que é o sentido dele. Áudio destinado à transcrição
+também não gera o card de anexo com o caminho do arquivo.
+
+**Um card por vez, em fila.** Dois áudios seguidos são duas mensagens suas e merecem duas decisões,
+mas os dois cards juntos tornariam ambíguo a qual deles uma correção escrita se refere. Então o
+segundo espera: resolvido o primeiro, o próximo sobe, como nos cards de pergunta e permissão. O
+rodapé do card diz quantos ainda estão na fila. Tópicos diferentes têm filas independentes.
 
 Comando (`/kill`, `/mode`…) continua sendo comando mesmo com um card aberto. O áudio guardado
 expira em `transcricao.guardar_audio_dias`.

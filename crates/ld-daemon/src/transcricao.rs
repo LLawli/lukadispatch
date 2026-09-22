@@ -395,10 +395,147 @@ mod tests {
             1,
             "duas transcrições rodaram juntas: seriam ~2 GB de pico numa máquina com ~1,2 GB livres"
         );
-        assert_eq!(
-            UMA_POR_VEZ.available_permits(),
-            1,
-            "a vez não foi devolvida no fim"
+        // Nada de assertar `available_permits() == 1` aqui: o semáforo é global de propósito, e
+        // os outros testes deste módulo chamam `transcreve`, que também o toma. Em paralelo essa
+        // asserção falha sem que nada esteja errado, e teste que falha à toa treina a gente a
+        // ignorar falha. Que a vez É devolvida, prova o próprio `maximo == 1`: sem devolução, as
+        // quatro tarefas não teriam entrado uma a uma.
+    }
+
+    /// Um cfg que roda um comando de shell no lugar do transcritor. Os edge cases abaixo são
+    /// sobre o que o daemon faz quando o transcritor se comporta mal, e para isso não é preciso
+    /// (nem honesto) carregar um modelo de 548 MB.
+    fn cfg_com(comando: &[&str], saida: &str, timeout_s: u64) -> Cfg {
+        Cfg {
+            ativa: true,
+            comando: comando.iter().map(|s| s.to_string()).collect(),
+            modelo: String::new(),
+            saida: saida.into(),
+            timeout_s,
+            guardar_audio_dias: 7,
+        }
+    }
+
+    /// Um .oga de verdade, pequeno, gerado pelo ffmpeg. Sem ele o teste mediria a conversão
+    /// falhando, e não o caso que se quer.
+    fn audio_curto(dir: &Path) -> Option<PathBuf> {
+        let destino = dir.join("t.oga");
+        let ok = std::process::Command::new("ffmpeg")
+            .args([
+                "-nostdin",
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=0.3",
+                "-c:a",
+                "libopus",
+            ])
+            .arg(&destino)
+            .status()
+            .ok()
+            .is_some_and(|s| s.success());
+        ok.then_some(destino)
+    }
+
+    #[tokio::test]
+    async fn transcritor_que_nao_devolve_texto_e_erro_e_nao_mensagem_vazia() {
+        // O Parakeet fez exatamente isto durante o benchmark: saiu com código 0 e string vazia.
+        // Mensagem vazia some sem rastro; erro pelo menos aparece no tópico.
+        let dir = tempfile::tempdir().unwrap();
+        let Some(audio) = audio_curto(dir.path()) else {
+            return; // sem ffmpeg na máquina, o teste não tem o que medir
+        };
+        let e = transcreve(&cfg_com(&["true"], "stdout", 60), &audio)
+            .await
+            .unwrap_err();
+        assert!(format!("{e:#}").contains("não devolveu texto"), "{e:#}");
+    }
+
+    #[tokio::test]
+    async fn audio_longo_que_estoura_o_prazo_e_derrubado() {
+        // Sem o teto, um transcritor travado seguraria o semáforo e nenhuma voz seria
+        // transcrita de novo até o daemon reiniciar.
+        let dir = tempfile::tempdir().unwrap();
+        let Some(audio) = audio_curto(dir.path()) else {
+            return;
+        };
+        let inicio = std::time::Instant::now();
+        let e = transcreve(&cfg_com(&["sleep", "30"], "stdout", 1), &audio)
+            .await
+            .unwrap_err();
+        assert!(format!("{e:#}").contains("passou de 1s"), "{e:#}");
+        assert!(
+            inicio.elapsed() < std::time::Duration::from_secs(10),
+            "o prazo não interrompeu de verdade: levou {:?}",
+            inicio.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn transcritor_que_falha_diz_o_que_ele_reclamou() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(audio) = audio_curto(dir.path()) else {
+            return;
+        };
+        let e = transcreve(
+            &cfg_com(
+                &["sh", "-c", "echo deu ruim no modelo >&2; exit 3"],
+                "stdout",
+                60,
+            ),
+            &audio,
+        )
+        .await
+        .unwrap_err();
+        let msg = format!("{e:#}");
+        assert!(
+            msg.contains("deu ruim no modelo"),
+            "a queixa do transcritor sumiu: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn arquivo_que_nao_e_audio_falha_na_conversao_e_nao_no_modelo() {
+        let dir = tempfile::tempdir().unwrap();
+        let falso = dir.path().join("nao-e-audio.oga");
+        std::fs::write(&falso, b"isto nao e um ogg").unwrap();
+        let e = transcreve(&cfg_com(&["true"], "stdout", 60), &falso)
+            .await
+            .unwrap_err();
+        assert!(format!("{e:#}").contains("ffmpeg"), "{e:#}");
+    }
+
+    #[tokio::test]
+    async fn saida_por_arquivo_le_o_txt_que_o_comando_escreveu() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(audio) = audio_curto(dir.path()) else {
+            return;
+        };
+        // É assim que o whisper-cli entrega: escreve <prefixo>.txt e não imprime nada.
+        let cfg = cfg_com(
+            &["sh", "-c", "printf 'oi do arquivo' > \"$0.txt\"", "{saida}"],
+            "arquivo",
+            60,
+        );
+        let t = transcreve(&cfg, &audio).await.unwrap().unwrap();
+        assert_eq!(t.texto, "oi do arquivo");
+    }
+
+    #[tokio::test]
+    async fn comando_que_nao_existe_nao_derruba_o_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(audio) = audio_curto(dir.path()) else {
+            return;
+        };
+        let e = transcreve(&cfg_com(&["/nao/existe/transcritor"], "stdout", 60), &audio)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{e:#}").contains("/nao/existe/transcritor"),
+            "{e:#}"
         );
     }
 
