@@ -18,6 +18,7 @@ use ld_core::paths;
 use teloxide::net::Download;
 use teloxide::prelude::*;
 use teloxide::types::{FileId, Message};
+use tracing::warn;
 
 /// Teto do Bot API para baixar: acima disso o `getFile` recusa, então nem tentamos.
 pub const LIMITE: u32 = 20 * 1024 * 1024;
@@ -101,10 +102,12 @@ pub async fn baixa(bot: &Bot, session_id: &str, anexo: &Anexo) -> Result<PathBuf
         );
     }
 
-    let arquivo = bot
-        .get_file(anexo.file_id.clone())
-        .await
-        .context("pedindo o arquivo ao Telegram")?;
+    let arquivo = com_retentativa("pedindo o arquivo ao Telegram", || {
+        let bot = bot.clone();
+        let id = anexo.file_id.clone();
+        async move { bot.get_file(id).await }
+    })
+    .await?;
 
     // Sem `file_name` (foto, figurinha), o caminho do lado do Telegram é a única fonte de
     // extensão: ele vem como "photos/file_42.jpg".
@@ -136,6 +139,43 @@ pub async fn baixa(bot: &Bot, session_id: &str, anexo: &Anexo) -> Result<PathBuf
     }
 
     Ok(destino)
+}
+
+/// Repete o pedido quando a rede falha, e só quando a rede falha.
+///
+/// Um timeout ao pedir o arquivo perdia a mensagem inteira: o áudio ficava no Telegram, o erro
+/// aparecia no tópico e não havia segunda chance. Só que repetir tudo também é errado: um
+/// "arquivo grande demais" ou um file_id vencido são respostas definitivas da API, e insistir
+/// neles só atrasa o aviso de que não vai dar.
+async fn com_retentativa<T, F, Fut>(o_que: &str, mut tentar: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<T, teloxide::RequestError>>,
+{
+    const ESPERAS: [u64; 3] = [1, 3, 8];
+    for (n, espera) in ESPERAS.iter().enumerate() {
+        match tentar().await {
+            Ok(v) => return Ok(v),
+            Err(e) if transitorio(&e) => {
+                warn!(tentativa = n + 1, erro = %e, "{o_que}: a rede falhou, tento de novo em {espera}s");
+                tokio::time::sleep(std::time::Duration::from_secs(*espera)).await;
+            }
+            Err(e) => return Err(e).context(o_que.to_string()),
+        }
+    }
+    tentar()
+        .await
+        .with_context(|| format!("{o_que} (mesmo depois de {} tentativas)", ESPERAS.len() + 1))
+}
+
+/// Vale a pena tentar de novo? Rede e I/O sim; resposta da API não.
+fn transitorio(e: &teloxide::RequestError) -> bool {
+    matches!(
+        e,
+        teloxide::RequestError::Network(_)
+            | teloxide::RequestError::Io(_)
+            | teloxide::RequestError::RetryAfter(_)
+    )
 }
 
 /// Apaga os arquivos de uma sessão que acabou. Best-effort: diretório que não existe (sessão que
