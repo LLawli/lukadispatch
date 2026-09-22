@@ -14,3 +14,4 @@ pub mod sessions;
 pub mod socket;
 pub mod status;
 pub mod telegram;
+pub mod transcricao;

@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     pub telegram: Telegram,
     pub scan: Scan,
+    /// Como o áudio que chega vira texto. O motor é trocável sem recompilar.
+    pub transcricao: Transcricao,
     /// Projetos fixados: aparecem primeiro no seletor e podem trazer regra própria.
     pub projects: Vec<Project>,
     /// Modo de permissão usado quando o projeto não declara o dele.
@@ -51,6 +53,7 @@ impl Default for Config {
         Self {
             telegram: Telegram::default(),
             scan: Scan::default(),
+            transcricao: Transcricao::default(),
             projects: Vec::new(),
             default_permission_mode: "auto".into(),
             trust_projects: true,
@@ -81,6 +84,81 @@ pub struct Telegram {
     /// Só estes usuários são obedecidos. Vazio significa "ninguém", de propósito: um bot de
     /// controle de máquina que aceita qualquer um é um backdoor.
     pub allowed_user_ids: Vec<i64>,
+}
+
+/// Como o áudio que chega vira texto.
+///
+/// O motor mora aqui e não no código porque a escolha é do hardware, não do projeto. O padrão é
+/// o que ganhou o benchmark neste notebook (Ryzen 5700U, Radeon Vega sem VRAM dedicada):
+/// whisper.cpp com large-v3-turbo quantizado em q5_0, no backend Vulkan. Ali ele fez 12,9% de
+/// erro nos áudios reais a 44 s por minuto de fala, usando ~1 GB.
+///
+/// Trocar é editar `comando`, `modelo` e `saida`. Alguns pontos de partida medidos:
+///
+/// ```toml
+/// # Mesmo motor na CPU: mesmo erro, 67 s por minuto, mas 155 MB a menos (não usa a GTT).
+/// comando = ["~/.local/share/lukadispatch/asr/whisper-cli-cpu", "-m", "{modelo}",
+///            "-f", "{audio}", "-l", "pt", "-t", "8", "-otxt", "-of", "{saida}", "-nt"]
+///
+/// # FastConformer-pt (sherpa-onnx): 8 s por minuto e 417 MB, com 21,6% de erro. Bom para
+/// # fala corrida, ruim para jargão e nome próprio.
+/// comando = ["~/.cache/asr-bench/venv/bin/python", "~/.cache/asr-bench/sherpa_worker.py",
+///            "--tipo", "nemo_transducer", "--dir", "{modelo}", "--audio", "{audio}"]
+/// saida = "stdout"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Transcricao {
+    /// Desligada, áudio continua chegando como arquivo, só não vira texto.
+    pub ativa: bool,
+    /// O comando, já dividido em argumentos (nada de shell no meio).
+    ///
+    /// Marcadores: `{audio}` é o WAV mono 16 kHz que o daemon prepara, `{modelo}` é o campo
+    /// abaixo e `{saida}` é o prefixo do arquivo de texto, sem extensão.
+    pub comando: Vec<String>,
+    /// Caminho do modelo (ou do diretório dele). `~` é expandido. Vazio quando o comando já
+    /// sabe onde está o seu.
+    pub modelo: String,
+    /// Onde o comando deixa o texto: `"arquivo"` (escreve `{saida}.txt`) ou `"stdout"`.
+    pub saida: String,
+    /// Teto de tempo por áudio. Transcrever é lento aqui: um minuto de fala leva de 8 s a 128 s
+    /// dependendo do motor, e um áudio longo multiplica isso.
+    pub timeout_s: u64,
+    /// Por quantos dias o `.oga` original fica em disco depois de transcrito.
+    ///
+    /// Guardar tem um motivo concreto: quando a transcrição sai estranha, o áudio é a única
+    /// forma de saber se o erro foi do modelo ou da gravação. Zero desliga a expiração.
+    pub guardar_audio_dias: u64,
+}
+
+impl Default for Transcricao {
+    fn default() -> Self {
+        Self {
+            ativa: true,
+            comando: [
+                "~/.local/share/lukadispatch/asr/whisper-cli-vulkan",
+                "-m",
+                "{modelo}",
+                "-f",
+                "{audio}",
+                "-l",
+                "pt",
+                "-t",
+                "8",
+                "-otxt",
+                "-of",
+                "{saida}",
+                "-nt",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+            modelo: "~/.local/share/lukadispatch/asr/modelos/ggml-large-v3-turbo-q5_0.bin".into(),
+            saida: "arquivo".into(),
+            timeout_s: 900,
+            guardar_audio_dias: 7,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
