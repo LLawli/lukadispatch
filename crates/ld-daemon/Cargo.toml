@@ -30,3 +30,4 @@ tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "net", "io-
 tempfile = "3"
 
 [dev-dependencies]
+filetime = "0.2"

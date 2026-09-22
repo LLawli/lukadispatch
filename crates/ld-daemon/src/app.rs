@@ -583,6 +583,18 @@ impl App {
             info!(apagados, "arquivos de sessões mortas removidos");
         }
 
+        // Áudio guardado tem prazo: ele existe para conferir uma transcrição estranha, e isso
+        // ninguém faz semanas depois.
+        let velhos =
+            crate::arquivos::varre_audio_velho(self.cfg.transcricao.guardar_audio_dias).await;
+        if velhos > 0 {
+            info!(
+                velhos,
+                dias = self.cfg.transcricao.guardar_audio_dias,
+                "áudios expirados removidos"
+            );
+        }
+
         // O contrário também acontece: o tmux ficou vivo com a sessão já encerrada no banco (um
         // relançamento interrompido no meio, por exemplo). Ninguém mais fala com ele, e o tópico
         // dele já foi apagado, então é lixo que só consome memória.

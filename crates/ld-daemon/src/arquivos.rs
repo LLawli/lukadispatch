@@ -177,6 +177,63 @@ async fn varre_em(raiz: &Path, vivas: &std::collections::HashSet<String>) -> usi
     apagados
 }
 
+/// Apaga áudio transcrito que já passou da validade, sessão viva ou não.
+///
+/// O `.oga` fica porque quando a transcrição sai estranha ele é a única forma de saber se o erro
+/// foi do modelo ou da gravação. Mas fica por um prazo: voz acumula rápido e ninguém audita uma
+/// transcrição de semanas atrás.
+///
+/// Só mexe em áudio. Os outros anexos seguem a vida da sessão, e apagá-los por idade tiraria da
+/// sessão um arquivo que ela ainda pode estar usando.
+pub async fn varre_audio_velho(dias: u64) -> usize {
+    if dias == 0 {
+        return 0;
+    }
+    varre_audio_velho_em(&paths::arquivos_base(), dias).await
+}
+
+async fn varre_audio_velho_em(raiz: &Path, dias: u64) -> usize {
+    let limite = std::time::Duration::from_secs(dias * 24 * 60 * 60);
+    let agora = std::time::SystemTime::now();
+    let Ok(mut sessoes) = tokio::fs::read_dir(raiz).await else {
+        return 0;
+    };
+    let mut apagados = 0;
+    while let Ok(Some(sessao)) = sessoes.next_entry().await {
+        let Ok(mut entradas) = tokio::fs::read_dir(sessao.path()).await else {
+            continue;
+        };
+        while let Ok(Some(e)) = entradas.next_entry().await {
+            let caminho = e.path();
+            if !ehaudio(&caminho) {
+                continue;
+            }
+            // Sem data legível, não apaga: melhor guardar demais que apagar o que não devia.
+            let Ok(idade) = e
+                .metadata()
+                .await
+                .and_then(|m| m.modified())
+                .map(|t| agora.duration_since(t).unwrap_or_default())
+            else {
+                continue;
+            };
+            if idade > limite && tokio::fs::remove_file(&caminho).await.is_ok() {
+                apagados += 1;
+            }
+        }
+    }
+    apagados
+}
+
+/// Extensões que o Telegram usa para voz e áudio.
+fn ehaudio(caminho: &Path) -> bool {
+    caminho
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .is_some_and(|e| matches!(e.as_str(), "oga" | "ogg" | "opus" | "m4a" | "mp3" | "wav"))
+}
+
 /// Teto do Bot API para o bot mandar arquivo. É maior que o de baixar, e não é engano: a
 /// assimetria está na documentação do Telegram.
 pub const LIMITE_ENVIO: u64 = 50 * 1024 * 1024;
@@ -803,6 +860,65 @@ mod tests {
             anexos(&msg(serde_json::json!({"text": "oi"}))),
             Achado::Nada
         );
+    }
+
+    #[tokio::test]
+    async fn audio_velho_sai_e_o_resto_fica() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessao = dir.path().join("sessao-1");
+        tokio::fs::create_dir_all(&sessao).await.unwrap();
+
+        let antigo = std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 24 * 3600);
+        for (nome, velho) in [
+            ("voz_velha.oga", true),
+            ("voz_nova.oga", false),
+            ("relatorio_velho.pdf", true),
+        ] {
+            let f = sessao.join(nome);
+            tokio::fs::write(&f, b"x").await.unwrap();
+            if velho {
+                let ft = filetime::FileTime::from_system_time(antigo);
+                filetime::set_file_mtime(&f, ft).unwrap();
+            }
+        }
+
+        let apagados = varre_audio_velho_em(dir.path(), 7).await;
+
+        // A contagem sozinha passaria com 0 == 0: o que prende o teste é QUAL arquivo sobrou.
+        assert_eq!(apagados, 1, "só o áudio velho devia sair");
+        assert!(!sessao.join("voz_velha.oga").exists(), "áudio velho ficou");
+        assert!(
+            sessao.join("voz_nova.oga").exists(),
+            "áudio novo foi apagado"
+        );
+        assert!(
+            sessao.join("relatorio_velho.pdf").exists(),
+            "a varredura mexeu num anexo que não é áudio"
+        );
+    }
+
+    #[tokio::test]
+    async fn prazo_zero_desliga_a_varredura() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessao = dir.path().join("s");
+        tokio::fs::create_dir_all(&sessao).await.unwrap();
+        let f = sessao.join("voz.oga");
+        tokio::fs::write(&f, b"x").await.unwrap();
+        let antigo = std::time::SystemTime::now() - std::time::Duration::from_secs(400 * 24 * 3600);
+        filetime::set_file_mtime(&f, filetime::FileTime::from_system_time(antigo)).unwrap();
+
+        assert_eq!(varre_audio_velho(0).await, 0);
+        assert!(f.exists(), "prazo zero não pode apagar nada");
+    }
+
+    #[test]
+    fn so_extensao_de_audio_conta() {
+        for bom in ["a.oga", "a.OGG", "a.opus", "a.m4a", "a.mp3", "a.wav"] {
+            assert!(ehaudio(Path::new(bom)), "{bom}");
+        }
+        for ruim in ["a.pdf", "a.png", "a.ogv", "a", "a.ogg.pdf"] {
+            assert!(!ehaudio(Path::new(ruim)), "{ruim}");
+        }
     }
 
     #[test]
