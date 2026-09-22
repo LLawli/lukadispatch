@@ -83,7 +83,10 @@ async fn trata(app: Arc<App>, u: Update) -> anyhow::Result<()> {
                         com_arquivos(&app, t.0.0, texto, &nome, lista, Some(msg.id)).await
                     }
                     Achado::Nada if texto.is_empty() => Ok(()),
-                    Achado::Nada => em_topico(&app, t.0.0, texto, &nome, msg.id).await,
+                    Achado::Nada => {
+                        let alvo = msg.reply_to_message().map(|r| r.id);
+                        em_topico(&app, t.0.0, texto, &nome, msg.id, alvo).await
+                    }
                 },
                 None if texto.is_empty() => Ok(()),
                 None => {
@@ -133,6 +136,9 @@ async fn em_topico(
     texto: &str,
     de: &str,
     msg: teloxide::types::MessageId,
+    // A qual mensagem você respondeu, quando respondeu. É o que distingue corrigir uma
+    // transcrição de simplesmente escrever outra coisa com um card aberto.
+    responde_a: Option<teloxide::types::MessageId>,
 ) -> anyhow::Result<()> {
     let comando = texto.split_whitespace().next().unwrap_or("");
 
@@ -142,8 +148,12 @@ async fn em_topico(
     //
     // Comando continua sendo comando: quem manda /kill com um card aberto quer fechar a sessão,
     // não corrigir a transcrição.
+    // Correção de transcrição exige responder ao card. Sem essa exigência, QUALQUER texto
+    // digitado com um card aberto virava correção, e não havia como mandar uma mensagem nova e
+    // independente enquanto uma transcrição esperava confirmação.
     if !comando.starts_with('/')
-        && let Some(p) = app.confirmacoes.tira_da_tela(topic)
+        && let Some(alvo) = responde_a
+        && let Some(p) = app.confirmacoes.tira_por_msg(alvo)
     {
         // A correção que você digitou some, e o card vira o registro dos dois textos juntos.
         // Deixar a sua mensagem solta no tópico espalharia em três lugares (áudio, card,
@@ -455,9 +465,11 @@ async fn mostra_proximo(app: &Arc<App>, topic: i32) {
     };
     let atras = app.confirmacoes.na_fila(topic).saturating_sub(1);
     let rodape = if atras > 0 {
-        format!("<i>Confirme, descarte, ou escreva a correção. Mais {atras} na fila.</i>")
+        format!(
+            "<i>Confirme, descarte, ou <b>responda a esta mensagem</b> com a correção. Mais {atras} na fila.</i>"
+        )
     } else {
-        "<i>Confirme, descarte, ou escreva a correção.</i>".to_string()
+        "<i>Confirme, descarte, ou <b>responda a esta mensagem</b> com a correção.</i>".to_string()
     };
     match app
         .tg

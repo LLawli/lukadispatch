@@ -140,9 +140,11 @@ saídas:
 
 - **Enviar**: vai para a sessão como se você tivesse digitado, com o caminho do `.oga` junto.
 - **Descartar**: some sem deixar rastro, e a sessão nunca soube que houve áudio.
-- **Escrever qualquer coisa** no tópico: a transcrição vai junto com o que você escreveu, marcada
-  como correção, e a sessão sabe que a versão escrita é a que vale. É para o caso de "está quase
-  certo, só essa palavra" — reescrever a frase inteira anularia o ganho de ter falado.
+- **Responder ao card** com a correção: a transcrição vai junto com o que você escreveu, marcada
+  como tal, e a sessão sabe que a versão escrita é a que vale. É para o caso de "está quase certo,
+  só essa palavra" — reescrever a frase inteira anularia o ganho de ter falado. Exige responder
+  (reply) ao card: texto solto continua sendo mensagem comum, então dá para falar de outro assunto
+  enquanto uma transcrição espera.
 
 O card responde ao áudio que o gerou, então a seta do Telegram diz de qual voz ele saiu. Resolvido,
 ele perde os botões e vira o registro do que a sessão recebeu (`Transcrição` e, quando houve,

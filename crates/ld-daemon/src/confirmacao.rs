@@ -10,9 +10,13 @@
 //! - **Confirmar**: o texto vai para a sessão como se você o tivesse digitado.
 //! - **Descartar**: some sem deixar rastro. A sessão nunca soube que houve áudio, e é isso que
 //!   se quer quando a transcrição saiu irreconhecível ou o áudio foi sem querer.
-//! - **Escrever algo**: a transcrição vai junto com o que você escreveu, marcado como correção.
-//!   É o caso comum de "está quase certo, só essa palavra que ficou errada" — reescrever a
-//!   mensagem inteira à mão anularia o ganho de ter falado.
+//! - **Responder ao card**: a transcrição vai junto com o que você escreveu, marcado como
+//!   correção. É o caso comum de "está quase certo, só essa palavra que ficou errada" —
+//!   reescrever a mensagem inteira à mão anularia o ganho de ter falado.
+//!
+//! A correção exige responder ao card, e não qualquer texto. Na primeira versão bastava escrever,
+//! e o efeito era que NENHUMA outra mensagem podia ser mandada enquanto uma transcrição esperava:
+//! tudo que você digitasse seria anexado a ela.
 //!
 //! **Um card por vez, em fila.** Dois áudios seguidos são duas mensagens suas e merecem duas
 //! decisões, mas mostrar os dois cards juntos tornaria ambíguo a qual deles uma correção escrita
@@ -133,13 +137,22 @@ impl Confirmacoes {
         Some(f.remove(i))
     }
 
-    /// Tira o que está na tela neste tópico: é o caminho da correção escrita.
-    ///
-    /// Como só um card fica visível por vez, não há ambiguidade: o que você está vendo é o que a
-    /// sua correção corrige.
+    /// Tira o que está na tela neste tópico.
     pub fn tira_da_tela(&self, topic: i32) -> Option<Pendente> {
         let mut f = self.fila.lock().unwrap();
         let i = f.iter().position(|p| p.topic == topic && p.msg.is_some())?;
+        Some(f.remove(i))
+    }
+
+    /// Tira o card cuja mensagem é esta: é o caminho da correção, que agora exige responder
+    /// ao card.
+    ///
+    /// Exigir o reply custa um toque a mais e paga por si: sem ele, QUALQUER texto digitado com
+    /// um card aberto virava correção, e não havia como mandar uma mensagem nova e independente
+    /// enquanto uma transcrição esperava confirmação.
+    pub fn tira_por_msg(&self, msg: MessageId) -> Option<Pendente> {
+        let mut f = self.fila.lock().unwrap();
+        let i = f.iter().position(|p| p.msg == Some(msg))?;
         Some(f.remove(i))
     }
 
@@ -251,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn correcao_escrita_resolve_o_card_que_esta_na_tela() {
+    fn responder_ao_card_resolve_aquele_card() {
         let c = Confirmacoes::default();
         let p = pendente(&c, 3, "na tela");
         let id = p.id.clone();
@@ -259,7 +272,9 @@ mod tests {
         c.guarda(pendente(&c, 3, "esperando"));
         c.marca_na_tela(&id, MessageId(200));
 
-        let resolvido = c.tira_da_tela(3).expect("tem card na tela");
+        let resolvido = c
+            .tira_por_msg(MessageId(200))
+            .expect("respondi a este card");
         assert_eq!(resolvido.texto, "na tela");
         assert!(
             !c.tem_card_na_tela(3),
@@ -268,12 +283,30 @@ mod tests {
     }
 
     #[test]
-    fn sem_card_na_tela_nao_ha_o_que_corrigir() {
+    fn responder_a_outra_mensagem_nao_corrige_transcricao_nenhuma() {
+        // O ponto da regra: com um card aberto, escrever (ou responder a outra coisa) tem de
+        // continuar sendo uma mensagem comum. Antes disso, qualquer texto virava correção e não
+        // dava para falar de outro assunto enquanto uma transcrição esperava.
+        let c = Confirmacoes::default();
+        let p = pendente(&c, 3, "esperando confirmação");
+        let id = p.id.clone();
+        c.guarda(p);
+        c.marca_na_tela(&id, MessageId(200));
+
+        assert!(
+            c.tira_por_msg(MessageId(999)).is_none(),
+            "responder a outra mensagem não pode consumir o card"
+        );
+        assert!(c.tem_card_na_tela(3), "o card tem de continuar esperando");
+    }
+
+    #[test]
+    fn responder_a_um_card_da_fila_que_ainda_nao_subiu_nao_resolve() {
         let c = Confirmacoes::default();
         c.guarda(pendente(&c, 5, "só na fila"));
         assert!(
-            c.tira_da_tela(5).is_none(),
-            "texto solto não pode resolver algo que você ainda não viu"
+            c.tira_por_msg(MessageId(1)).is_none(),
+            "não há card na tela para responder"
         );
     }
 
@@ -291,7 +324,7 @@ mod tests {
 
         // Um tópico ocupado não pode segurar a fila do outro.
         assert!(c.tem_card_na_tela(1) && c.tem_card_na_tela(2));
-        assert_eq!(c.tira_da_tela(1).unwrap().texto, "de um");
+        assert_eq!(c.tira_por_msg(MessageId(1)).unwrap().texto, "de um");
         assert!(c.tem_card_na_tela(2), "mexer num tópico afetou o outro");
         assert_eq!(c.tira_por_id(&idb).unwrap().texto, "de outro");
     }
