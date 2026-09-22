@@ -133,11 +133,19 @@ nota de vídeo, figurinha, áudio, mensagem de voz) é baixado na hora para
 própria linha do arquivo. O teto é 20 MB, que é o do Bot API. Os arquivos são apagados junto com a
 sessão.
 
-**Voz vira texto.** Mensagem de voz é transcrita e chega à sessão como se você tivesse escrito,
-com o caminho do `.oga` junto para conferir quando a transcrição sair estranha. A transcrição roda
-fora do turno: ela leva mais tempo que o hook `Stop` espera (a configuração padrão gasta ~44 s por
-minuto de fala), então o tópico mostra `transcrevendo…` e a mensagem chega quando fica pronta. O
-áudio guardado expira em `transcricao.guardar_audio_dias`.
+**Voz vira texto, depois do seu aval.** Mensagem de voz é transcrita fora do turno (ela leva mais
+tempo que o hook `Stop` espera: a configuração padrão gasta ~44 s por minuto de fala), então o
+tópico mostra `transcrevendo…` e, quando fica pronta, a transcrição aparece num card com três
+saídas:
+
+- **Enviar**: vai para a sessão como se você tivesse digitado, com o caminho do `.oga` junto.
+- **Descartar**: some sem deixar rastro, e a sessão nunca soube que houve áudio.
+- **Escrever qualquer coisa** no tópico: a transcrição vai junto com o que você escreveu, marcada
+  como correção, e a sessão sabe que a versão escrita é a que vale. É para o caso de "está quase
+  certo, só essa palavra" — reescrever a frase inteira anularia o ganho de ter falado.
+
+Comando (`/kill`, `/mode`…) continua sendo comando mesmo com um card aberto. O áudio guardado
+expira em `transcricao.guardar_audio_dias`.
 
 O motor é plugável e mora no `config.toml`, não no código, porque a escolha é do hardware. O padrão
 é o que ganhou o benchmark num Ryzen 5700U com Radeon Vega sem VRAM dedicada: whisper.cpp com

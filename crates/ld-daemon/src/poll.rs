@@ -133,6 +133,24 @@ async fn em_topico(
     msg: teloxide::types::MessageId,
 ) -> anyhow::Result<()> {
     let comando = texto.split_whitespace().next().unwrap_or("");
+
+    // Escrever com uma transcrição à espera é o terceiro caminho: os dois vão juntos, com a
+    // correção mandando. É o caso de "está quase certo, só essa palavra" — reescrever a frase
+    // inteira à mão anularia o ganho de ter falado.
+    //
+    // Comando continua sendo comando: quem manda /kill com um card aberto quer fechar a sessão,
+    // não corrigir a transcrição.
+    if !comando.starts_with('/') && app.confirmacoes.tem(topic) {
+        if let Some(p) = app.confirmacoes.tira(topic) {
+            app.tg.delete(p.msg).await;
+            info!(sessao = %p.session_id, "transcrição enviada com correção escrita");
+            let junto = p.para_sessao(Some(texto));
+            return app
+                .on_incoming_com_arquivos(topic, &junto, de, p.arquivos)
+                .await;
+        }
+    }
+
     match comando {
         "/kill" | "/fechar" => {
             let Some(s) = app.session_for_topic(topic).await? else {
@@ -418,26 +436,48 @@ fn transcreve_depois(app: &Arc<App>, topic: i32, legenda: &str, de: &str, caminh
             return;
         }
 
-        // O texto transcrito É a mensagem; o caminho do .oga vai junto para quem quiser conferir
-        // o que foi dito de verdade quando a transcrição sair estranha.
+        // A transcrição NÃO vai direto para a sessão: ela erra, e a sessão agindo sobre algo
+        // que o Luka não disse custa mais que o tempo que a voz economizou. Vira um card, e ele
+        // decide.
         let transcrito = partes.join("\n");
-        let texto = if legenda.trim().is_empty() {
-            transcrito.clone()
-        } else {
-            format!("{legenda}\n\n{transcrito}")
+        let Some(sessao) = app.session_for_topic(topic).await.ok().flatten() else {
+            return;
         };
-        let _ = app
+        let msg = match app
             .tg
-            .send_html(
+            .send_keyboard(
                 Some(topic),
-                &format!("🎤 <i>{}</i>", escape_html(&transcrito)),
+                &format!(
+                    "🎤 <b>Transcrição</b>\n\n{}\n\n<i>Confirme, descarte, ou escreva a correção.</i>",
+                    escape_html(&transcrito)
+                ),
+                coluna(vec![
+                    ("✅ Enviar".into(), "t:ok".into()),
+                    ("🗑 Descartar".into(), "t:no".into()),
+                ]),
             )
-            .await;
-        if let Err(e) = app
-            .on_incoming_com_arquivos(topic, &texto, &de, caminhos)
             .await
         {
-            warn!(erro = %e, "transcrição pronta mas não chegou à sessão");
+            Ok(m) => m,
+            Err(e) => {
+                warn!(erro = %e, "não consegui mostrar a transcrição para confirmar");
+                return;
+            }
+        };
+
+        // Card novo no mesmo tópico aposenta o anterior: dois abertos tornariam ambíguo a qual
+        // deles uma correção escrita se refere.
+        let anterior = app.confirmacoes.guarda(crate::confirmacao::Pendente {
+            session_id: sessao.session_id.clone(),
+            topic,
+            msg,
+            texto: transcrito,
+            legenda: legenda.clone(),
+            de: de.clone(),
+            arquivos: caminhos,
+        });
+        if let Some(velho) = anterior {
+            app.tg.delete(velho.msg).await;
         }
     });
 }
@@ -597,6 +637,32 @@ async fn botao(
     topico: Option<i32>,
     msg: Option<teloxide::types::MessageId>,
 ) -> anyhow::Result<()> {
+    // Transcrição esperando aval: confirmar manda para a sessão, descartar apaga sem deixar
+    // rastro. Nos dois casos o card some, porque um teclado que já foi tocado só confunde.
+    if let Some(acao) = dado.strip_prefix("t:")
+        && matches!(acao, "ok" | "no")
+        && let Some(topic) = topico
+    {
+        let Some(p) = app.confirmacoes.tira(topic) else {
+            // Card de um daemon anterior, ou tocado duas vezes. Some em silêncio: dizer
+            // "expirou" seria barulho sobre algo que não tem conserto.
+            if let Some(m) = msg {
+                app.tg.delete(m).await;
+            }
+            return Ok(());
+        };
+        app.tg.delete(p.msg).await;
+        if acao == "no" {
+            // "Finge que não existiu": a sessão nunca soube que houve áudio.
+            info!(sessao = %p.session_id, "transcrição descartada");
+            return Ok(());
+        }
+        let texto = p.para_sessao(None);
+        return app
+            .on_incoming_com_arquivos(topic, &texto, &p.de, p.arquivos)
+            .await;
+    }
+
     if let Some(idx) = dado.strip_prefix("n:") {
         // O dado do botão é índice, e não caminho, porque callback_data do Telegram só tem 64
         // bytes: caminho de projeto não cabe.

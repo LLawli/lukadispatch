@@ -70,6 +70,8 @@ pub struct App {
     pub hub: Hub,
     pub status: StatusBoard,
     pub cards: Cards,
+    /// Transcrições esperando seu aval antes de virarem mensagem para a sessão.
+    pub confirmacoes: crate::confirmacao::Confirmacoes,
     pub panel: Panel,
     /// Último aviso de ociosidade ("Claude is waiting for your input") por sessão.
     ///
@@ -122,6 +124,7 @@ impl App {
             hub: Hub::new(),
             status: StatusBoard::new(),
             cards: Cards::new(),
+            confirmacoes: Default::default(),
             panel,
             avisos: Arc::new(Mutex::new(HashMap::new())),
             catalogo: Mutex::new(None),
@@ -294,6 +297,8 @@ impl App {
         // vale para o caso comum. Se um arquivo precisa sobreviver, ele sai daqui pela sessão,
         // que grava onde você mandar.
         crate::arquivos::limpa(session_id).await;
+        // Card de transcrição de uma sessão que acabou não pode sobreviver a ela.
+        self.confirmacoes.limpa_sessao(session_id);
 
         self.store.end(session_id)?;
         self.panel.refresh();

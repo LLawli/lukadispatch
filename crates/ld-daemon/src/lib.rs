@@ -7,6 +7,7 @@
 pub mod app;
 pub mod arquivos;
 pub mod cards;
+pub mod confirmacao;
 pub mod hub;
 pub mod panel;
 pub mod poll;
