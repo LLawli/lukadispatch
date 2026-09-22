@@ -148,6 +148,33 @@ async fn em_topico(
     //
     // Comando continua sendo comando: quem manda /kill com um card aberto quer fechar a sessão,
     // não corrigir a transcrição.
+    // Pendência aberta no tópico segura o resto. Texto solto com um card à espera some, e o
+    // aviso diz o que fazer.
+    //
+    // Sem isto a mensagem ia para a sessão enquanto um card de permissão continuava na tela, e o
+    // que chegava ao Claude era um pedido novo no meio de um que ele ainda não pôde executar.
+    // Perguntar e ser atropelado é pior que esperar.
+    if segura_por_pendencia(comando, responde_a.is_some())
+        && let Some(o_que) = pendencia_aberta(app, topic).await
+    {
+        app.tg.delete(msg).await;
+        if let Ok(aviso) = app
+            .tg
+            .send_html(
+                Some(topic),
+                &format!(
+                    "⏳ <b>Tem {o_que} esperando você.</b>\nResponda primeiro; depois disso o tópico volta ao normal.\n\n<i>Sua mensagem não foi enviada:</i>\n{}",
+                    escape_html(texto)
+                ),
+            )
+            .await
+        {
+            // O aviso é conversa de um instante: some sozinho para não virar entulho no tópico.
+            app.tg.efemera(aviso, TTL_RESPOSTA);
+        }
+        return Ok(());
+    }
+
     // Correção de transcrição exige responder ao card. Sem essa exigência, QUALQUER texto
     // digitado com um card aberto virava correção, e não havia como mandar uma mensagem nova e
     // independente enquanto uma transcrição esperava confirmação.
@@ -417,6 +444,26 @@ mod tests_registro {
     use super::*;
 
     #[test]
+    fn texto_solto_espera_a_pendencia() {
+        assert!(segura_por_pendencia("oi", false));
+        assert!(segura_por_pendencia("escrevi outra coisa", false));
+    }
+
+    #[test]
+    fn resposta_ao_card_passa_porque_e_a_resposta_esperada() {
+        assert!(!segura_por_pendencia("a correção", true));
+    }
+
+    #[test]
+    fn comando_passa_sempre_senao_o_topico_tranca_por_dentro() {
+        // `/kill` é a válvula de escape: um card preso por bug não pode deixar o tópico
+        // inutilizável, sem nem como fechar a sessão.
+        for c in ["/kill", "/mode", "/ls", "/model"] {
+            assert!(!segura_por_pendencia(c, false), "{c} ficou preso");
+        }
+    }
+
+    #[test]
     fn registro_sem_ratificacao_mostra_so_a_transcricao() {
         let t = registro("roda os testes", None);
         assert!(t.contains("Transcrição"), "{t}");
@@ -451,6 +498,33 @@ mod tests_registro {
     #[test]
     fn teclado_vazio_e_mesmo_vazio() {
         assert!(sem_botoes().inline_keyboard.is_empty());
+    }
+}
+
+/// Esta mensagem deve esperar a pendência do tópico ser resolvida?
+///
+/// Duas exceções, e as duas são necessárias:
+///
+/// - **Comando passa sempre.** `/kill` é a válvula de escape: se um card ficar preso por bug, o
+///   tópico não pode virar uma sala trancada por dentro.
+/// - **Reply passa sempre**, porque responder a um card É a resposta que se está esperando.
+fn segura_por_pendencia(comando: &str, e_resposta: bool) -> bool {
+    !comando.starts_with('/') && !e_resposta
+}
+
+/// O que está esperando resposta neste tópico, em palavras, se há algo.
+///
+/// Cobre os três pedidos que param o tópico: a pergunta e o pedido de permissão do Claude, e a
+/// transcrição esperando seu aval. Todos têm a mesma propriedade: são uma pergunta feita a você,
+/// e mandar outra coisa por cima não responde nenhuma delas.
+async fn pendencia_aberta(app: &Arc<App>, topic: i32) -> Option<&'static str> {
+    if app.confirmacoes.tem_card_na_tela(topic) {
+        return Some("uma transcrição");
+    }
+    let s = app.session_for_topic(topic).await.ok().flatten()?;
+    match app.cards.aberto_da_sessao(&s.session_id)? {
+        (_, crate::cards::Kind::Pergunta) => Some("uma pergunta"),
+        (_, crate::cards::Kind::Permissao) => Some("um pedido de permissão"),
     }
 }
 

@@ -152,6 +152,12 @@ ele perde os botões e vira o registro do que a sessão recebeu (`Transcrição`
 três lugares. Só o descarte não deixa registro, que é o sentido dele. Áudio destinado à transcrição
 também não gera o card de anexo com o caminho do arquivo.
 
+**Pendência aberta segura o tópico.** Com uma pergunta, um pedido de permissão ou uma transcrição
+esperando resposta, texto solto é apagado e um aviso efêmero explica o que falta responder (a
+mensagem que você escreveu vai citada nele, para não se perder). Responder ao card passa, porque é
+a resposta esperada, e **comando passa sempre**: `/kill` é a válvula de escape para o caso de um
+card ficar preso.
+
 **Um card por vez, em fila.** Dois áudios seguidos são duas mensagens suas e merecem duas decisões,
 mas os dois cards juntos tornariam ambíguo a qual deles uma correção escrita se refere. Então o
 segundo espera: resolvido o primeiro, o próximo sobe, como nos cards de pergunta e permissão. O
