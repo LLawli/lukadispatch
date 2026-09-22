@@ -148,57 +148,56 @@ async fn em_topico(
     //
     // Comando continua sendo comando: quem manda /kill com um card aberto quer fechar a sessão,
     // não corrigir a transcrição.
-    // Pendência aberta no tópico segura o resto. Texto solto com um card à espera some, e o
-    // aviso diz o que fazer.
+    // Com pendência aberta, o tópico só aceita duas coisas: a resposta a ela, e comando.
     //
-    // Sem isto a mensagem ia para a sessão enquanto um card de permissão continuava na tela, e o
-    // que chegava ao Claude era um pedido novo no meio de um que ele ainda não pôde executar.
-    // Perguntar e ser atropelado é pior que esperar.
-    if segura_por_pendencia(comando, responde_a.is_some())
-        && let Some(o_que) = pendencia_aberta(app, topic).await
-    {
-        app.tg.delete(msg).await;
-        if let Ok(aviso) = app
-            .tg
-            .send_html(
-                Some(topic),
-                &format!(
-                    "⏳ <b>Tem {o_que} esperando você.</b>\nResponda primeiro; depois disso o tópico volta ao normal.\n\n<i>Sua mensagem não foi enviada:</i>\n{}",
-                    escape_html(texto)
-                ),
-            )
-            .await
+    // A ordem aqui importa. Primeiro tenta-se casar a correção com o card; só o que NÃO for
+    // resposta àquele card cai na guarda. Antes a guarda liberava qualquer reply, e responder a
+    // uma mensagem antiga qualquer passava por cima de um card aberto.
+    if !comando.starts_with('/') {
+        // Correção: responder ao card manda a transcrição junto com o que você escreveu.
+        if let Some(alvo) = responde_a
+            && let Some(p) = app.confirmacoes.tira_por_msg(alvo)
         {
-            // O aviso é conversa de um instante: some sozinho para não virar entulho no tópico.
-            app.tg.efemera(aviso, TTL_RESPOSTA);
-        }
-        return Ok(());
-    }
-
-    // Correção de transcrição exige responder ao card. Sem essa exigência, QUALQUER texto
-    // digitado com um card aberto virava correção, e não havia como mandar uma mensagem nova e
-    // independente enquanto uma transcrição esperava confirmação.
-    if !comando.starts_with('/')
-        && let Some(alvo) = responde_a
-        && let Some(p) = app.confirmacoes.tira_por_msg(alvo)
-    {
-        // A correção que você digitou some, e o card vira o registro dos dois textos juntos.
-        // Deixar a sua mensagem solta no tópico espalharia em três lugares (áudio, card,
-        // mensagem) uma coisa só, e nenhum deles mostraria o que a sessão de fato recebeu.
-        app.tg.delete(msg).await;
-        if let Some(m) = p.msg {
-            let _ = app
-                .tg
-                .edit_keyboard(m, &registro(&p.texto, Some(texto)), sem_botoes())
+            // A correção que você digitou some, e o card vira o registro dos dois textos juntos.
+            // Deixar a sua mensagem solta no tópico espalharia em três lugares (áudio, card,
+            // mensagem) uma coisa só, e nenhum deles mostraria o que a sessão de fato recebeu.
+            app.tg.delete(msg).await;
+            if let Some(m) = p.msg {
+                let _ = app
+                    .tg
+                    .edit_keyboard(m, &registro(&p.texto, Some(texto)), sem_botoes())
+                    .await;
+            }
+            info!(sessao = %p.session_id, "transcrição enviada com correção escrita");
+            let junto = p.para_sessao(Some(texto));
+            let r = app
+                .on_incoming_com_arquivos(topic, &junto, de, p.arquivos)
                 .await;
+            mostra_proximo(app, topic).await;
+            return r;
         }
-        info!(sessao = %p.session_id, "transcrição enviada com correção escrita");
-        let junto = p.para_sessao(Some(texto));
-        let r = app
-            .on_incoming_com_arquivos(topic, &junto, de, p.arquivos)
-            .await;
-        mostra_proximo(app, topic).await;
-        return r;
+
+        // Qualquer outra coisa espera: texto solto, e também resposta a outra mensagem. O que
+        // chegaria ao Claude seria um pedido novo no meio de um que ele ainda não pôde executar,
+        // e perguntar para ser atropelado é pior que esperar.
+        if let Some(o_que) = pendencia_aberta(app, topic).await {
+            app.tg.delete(msg).await;
+            if let Ok(aviso) = app
+                .tg
+                .send_html(
+                    Some(topic),
+                    &format!(
+                        "⏳ <b>Tem {o_que} esperando você.</b>\nResponda a ela primeiro; depois disso o tópico volta ao normal.\n\n<i>Sua mensagem não foi enviada:</i>\n{}",
+                        escape_html(texto)
+                    ),
+                )
+                .await
+            {
+                // O aviso é conversa de um instante: some sozinho para não virar entulho.
+                app.tg.efemera(aviso, TTL_RESPOSTA);
+            }
+            return Ok(());
+        }
     }
 
     match comando {
@@ -465,26 +464,6 @@ mod tests_registro {
     }
 
     #[test]
-    fn texto_solto_espera_a_pendencia() {
-        assert!(segura_por_pendencia("oi", false));
-        assert!(segura_por_pendencia("escrevi outra coisa", false));
-    }
-
-    #[test]
-    fn resposta_ao_card_passa_porque_e_a_resposta_esperada() {
-        assert!(!segura_por_pendencia("a correção", true));
-    }
-
-    #[test]
-    fn comando_passa_sempre_senao_o_topico_tranca_por_dentro() {
-        // `/kill` é a válvula de escape: um card preso por bug não pode deixar o tópico
-        // inutilizável, sem nem como fechar a sessão.
-        for c in ["/kill", "/mode", "/ls", "/model"] {
-            assert!(!segura_por_pendencia(c, false), "{c} ficou preso");
-        }
-    }
-
-    #[test]
     fn registro_sem_ratificacao_mostra_so_a_transcricao() {
         let t = registro("roda os testes", None);
         assert!(t.contains("Transcrição"), "{t}");
@@ -541,17 +520,6 @@ fn filtra_reply(
     topic: i32,
 ) -> Option<teloxide::types::MessageId> {
     alvo.filter(|id| id.0 != topic)
-}
-
-/// Esta mensagem deve esperar a pendência do tópico ser resolvida?
-///
-/// Duas exceções, e as duas são necessárias:
-///
-/// - **Comando passa sempre.** `/kill` é a válvula de escape: se um card ficar preso por bug, o
-///   tópico não pode virar uma sala trancada por dentro.
-/// - **Reply passa sempre**, porque responder a um card É a resposta que se está esperando.
-fn segura_por_pendencia(comando: &str, e_resposta: bool) -> bool {
-    !comando.starts_with('/') && !e_resposta
 }
 
 /// O que está esperando resposta neste tópico, em palavras, se há algo.

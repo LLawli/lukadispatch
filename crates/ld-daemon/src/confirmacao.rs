@@ -301,6 +301,35 @@ mod tests {
     }
 
     #[test]
+    fn responder_a_mensagem_antiga_nao_libera_o_topico() {
+        // O furo que isto tranca: responder a QUALQUER mensagem passava pela guarda, porque ela
+        // só perguntava "é reply?". Reply que não casa com o card na tela não resolve nada, e a
+        // pendência continua de pé para a guarda segurar.
+        let c = Confirmacoes::default();
+        let p = pendente(&c, 4, "esperando");
+        let id = p.id.clone();
+        c.guarda(p);
+        c.marca_na_tela(&id, MessageId(500));
+
+        assert!(
+            c.tira_por_msg(MessageId(499)).is_none(),
+            "reply a outra mensagem casou"
+        );
+        assert!(
+            c.tira_por_msg(MessageId(501)).is_none(),
+            "reply a outra mensagem casou"
+        );
+        assert!(
+            c.tem_card_na_tela(4),
+            "a pendência tem de continuar de pé para a guarda segurar a mensagem"
+        );
+        assert!(
+            c.tira_por_msg(MessageId(500)).is_some(),
+            "o reply ao card tem de casar"
+        );
+    }
+
+    #[test]
     fn responder_a_um_card_da_fila_que_ainda_nao_subiu_nao_resolve() {
         let c = Confirmacoes::default();
         c.guarda(pendente(&c, 5, "só na fila"));
