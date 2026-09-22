@@ -80,18 +80,6 @@ async fn trata(app: Arc<App>, u: Update) -> anyhow::Result<()> {
             match msg.thread_id {
                 Some(t) => match achado {
                     Achado::Arquivos(lista) => com_arquivos(&app, t.0.0, texto, &nome, lista).await,
-                    // Sem transcrição, um .ogg salvo em disco não serve para nada à sessão. O que
-                    // não pode acontecer é o áudio sumir calado, como se ninguém tivesse ouvido.
-                    Achado::Audio => {
-                        let _ = app
-                            .tg
-                            .send_html(
-                                Some(t.0.0),
-                                "🎤 <i>áudio ainda não: falta a transcrição, e sem ela o arquivo não diz nada à sessão. Por enquanto, escreva.</i>",
-                            )
-                            .await;
-                        Ok(())
-                    }
                     Achado::Nada if texto.is_empty() => Ok(()),
                     Achado::Nada => em_topico(&app, t.0.0, texto, &nome, msg.id).await,
                 },
@@ -389,7 +377,7 @@ fn texto_com_anexo(legenda: &str, caminhos: &[String]) -> String {
 /// "a foto", "o documento": o tipo do anexo já vem em português, só falta concordar.
 fn artigo(tipo: &str) -> &'static str {
     match tipo {
-        "foto" | "animação" | "figurinha" | "nota de vídeo" => "a",
+        "foto" | "animação" | "figurinha" | "nota de vídeo" | "mensagem de voz" => "a",
         _ => "o",
     }
 }

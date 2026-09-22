@@ -43,16 +43,17 @@ pub struct Anexo {
 pub enum Achado {
     Nada,
     Arquivos(Vec<Anexo>),
-    /// Áudio ou mensagem de voz. Não baixamos de propósito: sem transcrição, um `.ogg` parado
-    /// numa pasta não serve para nada à sessão, e entregá-lo caladamente seria pior do que
-    /// dizer que ainda não dá.
-    Audio,
 }
 
 /// O que dá para baixar nesta mensagem.
 pub fn anexos(msg: &Message) -> Achado {
-    if msg.audio().is_some() || msg.voice().is_some() {
-        return Achado::Audio;
+    // Voz antes de áudio: quem grava segurando o microfone manda `voice`, e é esse o caso comum.
+    // O `.oga` cai em disco como qualquer anexo; transcrever é outro passo, do lado de quem lê.
+    if let Some(v) = msg.voice() {
+        return um(&v.file, None, "mensagem de voz");
+    }
+    if let Some(a) = msg.audio() {
+        return um(&a.file, a.file_name.clone(), "áudio");
     }
 
     if let Some(d) = msg.document() {
@@ -725,6 +726,84 @@ pub fn humano_u64(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Uma `Message` como o Telegram manda, com só o que o `anexos` precisa ler.
+    fn msg(anexo: serde_json::Value) -> Message {
+        let mut v = serde_json::json!({
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private", "first_name": "Luka"}
+        });
+        let obj = v.as_object_mut().unwrap();
+        for (k, val) in anexo.as_object().unwrap() {
+            obj.insert(k.clone(), val.clone());
+        }
+        serde_json::from_value(v).expect("Message válida")
+    }
+
+    fn tipos(achado: &Achado) -> Vec<&'static str> {
+        match achado {
+            Achado::Arquivos(l) => l.iter().map(|a| a.tipo).collect(),
+            Achado::Nada => vec![],
+        }
+    }
+
+    /// `voice` como o Telegram manda. Os `Option` do teloxide não têm `default` e o `mime_type`
+    /// usa desserializador próprio, então campo que falta derruba a mensagem inteira para
+    /// `MediaKind::Empty` em vez de dar erro: o fixture precisa ser completo para valer de teste.
+    fn voz(mime: &str) -> serde_json::Value {
+        serde_json::json!({"voice": {
+            "file_id": "v1", "file_unique_id": "u1", "file_size": 12345,
+            "duration": 7, "mime_type": mime
+        }, "caption": null})
+    }
+
+    fn audio(nome: Option<&str>) -> serde_json::Value {
+        serde_json::json!({"audio": {
+            "file_id": "a1", "file_unique_id": "u2", "file_size": 999,
+            "duration": 90, "performer": null, "title": null,
+            "file_name": nome, "mime_type": "audio/mpeg", "thumbnail": null
+        }, "caption": null, "media_group_id": null})
+    }
+
+    #[test]
+    fn mensagem_de_voz_e_baixavel_como_qualquer_anexo() {
+        let a = anexos(&msg(voz("audio/ogg")));
+        assert_eq!(
+            tipos(&a),
+            ["mensagem de voz"],
+            "voz não pode mais ser recusada"
+        );
+    }
+
+    #[test]
+    fn audio_enviado_como_musica_mantem_o_nome() {
+        match anexos(&msg(audio(Some("recado.m4a")))) {
+            Achado::Arquivos(l) => {
+                assert_eq!(l[0].tipo, "áudio");
+                assert_eq!(l[0].nome.as_deref(), Some("recado.m4a"));
+            }
+            Achado::Nada => panic!("áudio deveria ser baixável"),
+        }
+    }
+
+    #[test]
+    fn voz_sem_nome_cai_no_caminho_do_telegram_para_achar_a_extensao() {
+        match anexos(&msg(voz("audio/ogg"))) {
+            Achado::Arquivos(l) => assert!(l[0].nome.is_none(), "voz não tem file_name"),
+            Achado::Nada => panic!("voz deveria ser baixável"),
+        }
+        // É o `sanitiza` do path do Telegram que salva a extensão nesse caso.
+        assert_eq!(sanitiza("voice/file_5.oga"), "file_5.oga");
+    }
+
+    #[test]
+    fn mensagem_so_de_texto_nao_tem_anexo() {
+        assert_eq!(
+            anexos(&msg(serde_json::json!({"text": "oi"}))),
+            Achado::Nada
+        );
+    }
 
     #[test]
     fn caminho_no_nome_vira_nome_simples() {

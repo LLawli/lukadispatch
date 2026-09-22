@@ -127,11 +127,12 @@ Dentro do tópico de uma sessão, qualquer mensagem vai para o Claude. Além dis
 - `/kill` fecha a sessão e apaga o tópico.
 
 **Arquivo nos dois sentidos.** Anexo que você manda no tópico (documento, foto, vídeo, animação,
-nota de vídeo, figurinha) é baixado na hora para
+nota de vídeo, figurinha, áudio, mensagem de voz) é baixado na hora para
 `~/.local/share/lukadispatch/arquivos/<sessão>/` e chega à sessão como caminho absoluto, no campo
 `files` da linha NDJSON e dentro do texto. A legenda vira a mensagem; sem legenda, o texto é a
-própria linha do arquivo. Áudio e voz ficam de fora enquanto não houver transcrição, e dizem isso
-no tópico. O teto é 20 MB, que é o do Bot API. Os arquivos são apagados junto com a sessão.
+própria linha do arquivo. O teto é 20 MB, que é o do Bot API. Os arquivos são apagados junto com a
+sessão. Voz chega como `.oga` e ainda não vem transcrita: quem quiser o texto roda o transcritor
+sobre o caminho recebido.
 
 No sentido contrário, o agente **não chama ferramenta nenhuma**: ele escreve na resposta uma linha
 sozinha com `@arquivo:` seguido do caminho absoluto (e, se quiser, ` | legenda`). O hook `Stop`
