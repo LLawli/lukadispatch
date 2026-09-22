@@ -188,11 +188,15 @@ async fn roda(
             erro.trim().lines().last().unwrap_or("(sem mensagem)")
         );
     }
-    // Aviso do transcritor não derruba a transcrição, mas some do log se ninguém o registrar:
-    // é assim que um "Fallback to cpu" passaria despercebido por semanas.
+    // Queda silenciosa de backend não derruba a transcrição, e é justamente por isso que precisa
+    // aparecer: foi assim que o sherpa-onnx rodou em CPU dizendo "webgpu" durante o benchmark.
+    //
+    // Casar só a palavra "fallback" não serve: o whisper.cpp imprime `fallbacks = 0 p / 0 h` nos
+    // timings de toda execução normal, e o aviso passaria a gritar sempre. Quem grita sempre não
+    // é lido no dia em que a queda for real.
     let erro = String::from_utf8_lossy(&fim.stderr);
-    if let Some(linha) = erro.lines().find(|l| l.to_lowercase().contains("fallback")) {
-        warn!(aviso = %linha.trim(), "o transcritor avisou algo ao subir");
+    if let Some(linha) = erro.lines().find(|l| caiu_para_cpu(l)) {
+        warn!(aviso = %linha.trim(), "o transcritor não usou o backend pedido");
     }
 
     match saida {
@@ -207,6 +211,15 @@ async fn roda(
             })
         }
     }
+}
+
+/// A linha avisa que o backend pedido não subiu?
+///
+/// "fallback" precisa vir junto de um destino ("to cpu"), que é como os runtimes escrevem a
+/// queda de verdade. Uma contagem de fallbacks de decodificação não é isso.
+fn caiu_para_cpu(linha: &str) -> bool {
+    let l = linha.to_lowercase();
+    (l.contains("fallback") || l.contains("falling back")) && l.contains("cpu")
 }
 
 /// `~` no começo vira o home. O resto do caminho fica como está.
@@ -278,6 +291,24 @@ mod tests {
             a[0]
         );
         assert!(a[0].ends_with("/bin/whisper"), "{:?}", a[0]);
+    }
+
+    #[test]
+    fn contagem_de_fallback_nao_e_queda_de_backend() {
+        // O whisper.cpp imprime isto em TODA execução normal; tratar como aviso faria o log
+        // gritar sempre e o alerta real passar batido.
+        assert!(!caiu_para_cpu(
+            "whisper_print_timings:     fallbacks =   0 p /   0 h"
+        ));
+        assert!(!caiu_para_cpu("total fallbacks = 3"));
+        // Estas são as quedas de verdade, escritas como os runtimes escrevem.
+        assert!(caiu_para_cpu(
+            "provider.cc:StringToProvider:37 Unsupported string: webgpu. Fallback to cpu"
+        ));
+        assert!(caiu_para_cpu(
+            "Available providers: CPUExecutionProvider. Fallback to cpu!"
+        ));
+        assert!(caiu_para_cpu("WARNING: falling back to CPU"));
     }
 
     #[test]
