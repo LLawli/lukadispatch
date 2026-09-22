@@ -378,28 +378,60 @@ pub struct Marcado {
     pub como_arquivo: bool,
 }
 
-/// Separa os marcadores do texto: devolve o texto sem eles e o que há para enviar.
+/// Um pedaço da resposta, na ordem em que o agente escreveu.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Pedaco {
+    Texto(String),
+    Envio(Marcado),
+}
+
+/// Quebra a resposta em pedaços, preservando a ordem entre texto e arquivo.
 ///
-/// O reconhecimento é deliberadamente estreito, porque o custo de errar é alto nos dois sentidos:
-/// um falso positivo manda um arquivo que ninguém pediu, e um falso negativo deixa uma linha de
-/// sintaxe crua aparecendo no celular. Por isso a linha precisa ser **só** o marcador, do começo
-/// ao fim: um `@arquivo:` no meio de uma frase, dentro de crase ou depois de um hífen de lista é
-/// o agente FALANDO do formato, não usando ele.
-pub fn separa_marcadores(texto: &str) -> (String, Vec<Marcado>) {
-    let mut linhas = Vec::new();
-    let mut achados = Vec::new();
+/// A ordem é o ponto: uma resposta que explica, mostra o gráfico, explica de novo e mostra o
+/// log só faz sentido se chegar nessa sequência. Mandar tudo que é arquivo antes de tudo que é
+/// texto embaralha o raciocínio, e no celular a legenda de uma imagem fica a três mensagens de
+/// distância dela.
+///
+/// O reconhecimento do marcador é deliberadamente estreito, porque o custo de errar é alto nos
+/// dois sentidos: um falso positivo manda um arquivo que ninguém pediu, e um falso negativo
+/// deixa uma linha de sintaxe crua aparecendo no celular. Por isso a linha precisa ser **só** o
+/// marcador, do começo ao fim: um `@arquivo:` no meio de uma frase, dentro de crase ou depois
+/// de um hífen de lista é o agente FALANDO do formato, não usando ele.
+pub fn divide_resposta(texto: &str) -> Vec<Pedaco> {
+    // Resposta sem marcador nenhum sai byte a byte como o agente escreveu. É a esmagadora
+    // maioria delas, e não há por que esta função tocar no que não veio mexer.
+    if !texto.lines().any(|l| marcador(l).is_some()) {
+        return if texto.trim().is_empty() {
+            Vec::new()
+        } else {
+            vec![Pedaco::Texto(texto.to_string())]
+        };
+    }
+
+    let mut pedacos = Vec::new();
+    let mut acumulado: Vec<&str> = Vec::new();
+
+    // Texto acumulado vira um pedaço só quando algo o interrompe: assim parágrafos seguidos
+    // continuam numa mensagem única, em vez de virar uma mensagem por linha.
+    let fecha = |acumulado: &mut Vec<&str>, pedacos: &mut Vec<Pedaco>| {
+        let junto = acumulado.join("\n");
+        acumulado.clear();
+        if !junto.trim().is_empty() {
+            pedacos.push(Pedaco::Texto(junto.trim().to_string()));
+        }
+    };
 
     for linha in texto.lines() {
         match marcador(linha) {
-            Some(m) => achados.push(m),
-            None => linhas.push(linha),
+            Some(m) => {
+                fecha(&mut acumulado, &mut pedacos);
+                pedacos.push(Pedaco::Envio(m));
+            }
+            None => acumulado.push(linha),
         }
     }
-
-    if achados.is_empty() {
-        return (texto.to_string(), achados);
-    }
-    (linhas.join("\n").trim().to_string(), achados)
+    fecha(&mut acumulado, &mut pedacos);
+    pedacos
 }
 
 fn marcador(linha: &str) -> Option<Marcado> {
@@ -1058,17 +1090,32 @@ mod tests {
         assert!(!para_enviar(&log, false).unwrap().como_foto);
     }
 
+    /// Achata os pedaços de volta em (texto, envios). Os testes que não são sobre ORDEM
+    /// continuam mais legíveis assim.
+    fn separa_para_teste(texto: &str) -> (String, Vec<Marcado>) {
+        let mut t = Vec::new();
+        let mut e = Vec::new();
+        for p in divide_resposta(texto) {
+            match p {
+                Pedaco::Texto(s) => t.push(s),
+                Pedaco::Envio(m) => e.push(m),
+            }
+        }
+        (t.join("\n"), e)
+    }
+
     #[test]
     fn marcador_sozinho_na_linha_e_um_envio() {
-        let (texto, envios) = separa_marcadores("olha o gráfico\n\n@arquivo: /tmp/g.png\n");
-        assert_eq!(texto, "olha o gráfico");
         assert_eq!(
-            envios,
-            vec![Marcado {
-                caminho: "/tmp/g.png".into(),
-                legenda: None,
-                como_arquivo: false,
-            }]
+            divide_resposta("olha o gráfico\n\n@arquivo: /tmp/g.png\n"),
+            vec![
+                Pedaco::Texto("olha o gráfico".into()),
+                Pedaco::Envio(Marcado {
+                    caminho: "/tmp/g.png".into(),
+                    legenda: None,
+                    como_arquivo: false,
+                }),
+            ]
         );
     }
 
@@ -1084,7 +1131,7 @@ mod tests {
             "@arquivo: relativo/g.png",
             "@arquivos: /tmp/g.png",
         ] {
-            let (texto, envios) = separa_marcadores(linha);
+            let (texto, envios) = separa_para_teste(linha);
             assert!(envios.is_empty(), "{linha:?} não podia virar envio");
             assert_eq!(texto, linha, "e o texto tem que sair intacto");
         }
@@ -1092,7 +1139,7 @@ mod tests {
 
     #[test]
     fn legenda_e_documento_forcado() {
-        let (texto, envios) = separa_marcadores("  @documento: /tmp/dados.csv | a planilha crua  ");
+        let (texto, envios) = separa_para_teste("  @documento: /tmp/dados.csv | a planilha crua  ");
         assert!(texto.is_empty(), "sobrou {texto:?}");
         assert_eq!(envios[0].caminho, "/tmp/dados.csv");
         assert_eq!(envios[0].legenda.as_deref(), Some("a planilha crua"));
@@ -1101,11 +1148,54 @@ mod tests {
 
     #[test]
     fn varios_arquivos_na_mesma_resposta() {
-        let (texto, envios) = separa_marcadores(
+        // O que esta mudança comprou: antes os dois arquivos saíam juntos, antes de "antes",
+        // e a legenda de cada um ficava longe do parágrafo que falava dele.
+        let p = divide_resposta(
             "antes\n@arquivo: /tmp/a.png\nmeio\n@arquivo: /tmp/b.log | o log\ndepois",
         );
-        assert_eq!(envios.len(), 2);
-        assert_eq!(texto, "antes\nmeio\ndepois");
+        assert_eq!(
+            p,
+            vec![
+                Pedaco::Texto("antes".into()),
+                Pedaco::Envio(Marcado {
+                    caminho: "/tmp/a.png".into(),
+                    legenda: None,
+                    como_arquivo: false,
+                }),
+                Pedaco::Texto("meio".into()),
+                Pedaco::Envio(Marcado {
+                    caminho: "/tmp/b.log".into(),
+                    legenda: Some("o log".into()),
+                    como_arquivo: false,
+                }),
+                Pedaco::Texto("depois".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn paragrafos_seguidos_continuam_numa_mensagem_so() {
+        // Sem isto, cada linha em branco viraria uma notificação separada no celular.
+        let p = divide_resposta("primeira\n\nsegunda\n\nterceira");
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert_eq!(
+            p[0],
+            Pedaco::Texto("primeira\n\nsegunda\n\nterceira".into())
+        );
+    }
+
+    #[test]
+    fn resposta_que_e_so_marcador_nao_gera_mensagem_vazia() {
+        let p = divide_resposta("@arquivo: /tmp/g.png");
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert!(matches!(p[0], Pedaco::Envio(_)));
+    }
+
+    #[test]
+    fn arquivo_no_comeco_sai_antes_do_texto() {
+        let p = divide_resposta("@arquivo: /tmp/g.png\ncomentário depois");
+        assert!(matches!(p[0], Pedaco::Envio(_)), "{p:?}");
+        assert_eq!(p[1], Pedaco::Texto("comentário depois".into()));
     }
 
     #[test]
@@ -1113,14 +1203,14 @@ mod tests {
         // Sem mexer no HOME do processo: outros testes leem o mesmo env, e trocá-lo aqui
         // quebraria quem estivesse rodando ao lado.
         let home = std::env::var("HOME").expect("HOME");
-        let (_, envios) = separa_marcadores("@arquivo: ~/nota.pdf");
+        let (_, envios) = separa_para_teste("@arquivo: ~/nota.pdf");
         assert_eq!(envios[0].caminho, format!("{home}/nota.pdf"));
     }
 
     #[test]
     fn resposta_sem_marcador_nao_e_tocada() {
         let original = "uma resposta normal\n\ncom duas linhas\n";
-        let (texto, envios) = separa_marcadores(original);
+        let (texto, envios) = separa_para_teste(original);
         assert!(envios.is_empty());
         assert_eq!(
             texto, original,

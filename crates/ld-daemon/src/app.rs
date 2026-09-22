@@ -944,15 +944,19 @@ impl App {
                 "fim de turno"
             );
             if pedida && let Some(texto) = resposta {
-                // Arquivo marcado na resposta sai ANTES do texto: no celular, ler "segue o
-                // gráfico" e só depois ver o gráfico chegar é a ordem certa.
-                let (texto, envios) = crate::arquivos::separa_marcadores(&texto);
-                for envio in &envios {
-                    self.envia_marcado(&r.session_id, topic, envio).await;
-                }
-                // Resposta que era só o marcador não vira mensagem vazia.
-                if !texto.trim().is_empty() {
-                    self.tg.send(Some(topic), &texto).await?;
+                // Texto e arquivo saem na ordem em que o agente os escreveu. Uma resposta que
+                // explica, mostra o gráfico, explica de novo e mostra o log só funciona nessa
+                // sequência: agrupar os arquivos num bloco separaria cada imagem do parágrafo
+                // que fala dela.
+                for pedaco in crate::arquivos::divide_resposta(&texto) {
+                    match pedaco {
+                        crate::arquivos::Pedaco::Envio(envio) => {
+                            self.envia_marcado(&r.session_id, topic, &envio).await;
+                        }
+                        crate::arquivos::Pedaco::Texto(t) => {
+                            self.tg.send(Some(topic), &t).await?;
+                        }
+                    }
                 }
             }
         }
