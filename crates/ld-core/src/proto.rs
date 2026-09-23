@@ -271,7 +271,10 @@ pub struct SessionSummary {
     pub session_id: String,
     pub project: String,
     pub cwd: String,
-    pub topic_id: Option<i32>,
+    /// Id opaco do canal no frontend em uso. `topic_id` é o nome antigo, de quando o único
+    /// frontend era o Telegram; o alias mantém compatibilidade com quem ainda lê a linha assim.
+    #[serde(alias = "topic_id")]
+    pub canal_id: Option<String>,
     pub status: String,
     pub context_tokens: Option<u64>,
     pub context_limit: Option<u64>,
@@ -373,7 +376,7 @@ mod tests {
                     session_id: "s1".into(),
                     project: "p".into(),
                     cwd: "/tmp".into(),
-                    topic_id: Some(7),
+                    canal_id: Some("7".into()),
                     status: "ocioso".into(),
                     context_tokens: Some(10),
                     context_limit: Some(200_000),

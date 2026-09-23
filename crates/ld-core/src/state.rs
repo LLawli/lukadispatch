@@ -34,9 +34,14 @@ pub struct Session {
     /// Nome da sessão tmux. `None` em sessão que o usuário abriu no terminal: ela entra no
     /// painel, mas o bot não a controla.
     pub tmux: Option<String>,
-    pub topic_id: Option<i32>,
+    /// Id opaco do canal no frontend em uso: um tópico do Telegram (`"630"`) ou um grupo do
+    /// WhatsApp (`"120363...@g.us"`). Só o adaptador do frontend sabe o que fazer com o valor;
+    /// aqui é só texto.
+    pub canal_id: Option<String>,
     pub status: String,
-    pub status_message_id: Option<i32>,
+    /// Id opaco da mensagem de status no frontend em uso. Mesmo motivo do `canal_id`: cada
+    /// frontend tem seu próprio formato de id de mensagem.
+    pub status_msg_id: Option<String>,
     /// Modelo e esforço em vigor. Vêm do hook `SessionStart`, da troca pedida no Telegram ou do
     /// `PostModelSwitch` (quando você troca pelo `/model` no teclado do PC).
     pub model: Option<String>,
@@ -65,9 +70,14 @@ CREATE TABLE IF NOT EXISTS sessions (
     cwd               TEXT NOT NULL,
     transcript_path   TEXT,
     tmux              TEXT,
-    topic_id          INTEGER,
+    -- Nomes de coluna herdados de quando o único frontend era o Telegram e os ids eram inteiros
+    -- dele. Ficam TEXT desde que o frontend virou trocável (id opaco de qualquer adaptador), mas
+    -- o NOME não muda: renomear pediria recriar a tabela, e isso não compra nada. Um banco criado
+    -- antes desta mudança ainda tem a coluna como INTEGER; a leitura trata os dois casos (veja
+    -- `coluna_como_texto`).
+    topic_id          TEXT,
     status            TEXT NOT NULL DEFAULT 'idle',
-    status_message_id INTEGER,
+    status_message_id TEXT,
     model             TEXT,
     effort            TEXT,
     permission_mode   TEXT,
@@ -158,6 +168,7 @@ impl Store {
                 transcript_path = COALESCE(excluded.transcript_path, sessions.transcript_path),
                 tmux            = COALESCE(excluded.tmux, sessions.tmux),
                 topic_id        = COALESCE(excluded.topic_id, sessions.topic_id),
+                -- (nome de coluna herdado; guarda o canal_id, veja o comentário no esquema)
                 model           = COALESCE(excluded.model, sessions.model),
                 effort          = COALESCE(excluded.effort, sessions.effort),
                 permission_mode = COALESCE(excluded.permission_mode, sessions.permission_mode),
@@ -173,9 +184,9 @@ impl Store {
                 s.cwd,
                 s.transcript_path,
                 s.tmux,
-                s.topic_id,
+                s.canal_id,
                 s.status,
-                s.status_message_id,
+                s.status_msg_id,
                 s.model,
                 s.effort,
                 s.permission_mode,
@@ -198,16 +209,21 @@ impl Store {
         Ok(s)
     }
 
-    /// Sessão viva (não encerrada) de um tópico. É o caminho de volta: chegou mensagem no tópico
+    /// Sessão viva (não encerrada) de um canal. É o caminho de volta: chegou mensagem no canal
     /// X, para qual sessão ela vai?
-    pub fn by_topic(&self, topic_id: i32) -> Result<Option<Session>> {
+    ///
+    /// O `CAST` é por causa do banco antigo: a coluna nasceu INTEGER (id do Telegram), e a
+    /// afinidade dela pode converter o parâmetro texto de volta para número na comparação. O
+    /// `CAST` torna a busca por texto confiável nos dois casos, sem depender de como a
+    /// afinidade decide converter.
+    pub fn by_canal(&self, canal_id: &str) -> Result<Option<Session>> {
         let c = self.conn();
         let s = c
             .query_row(
                 "SELECT session_id, project, cwd, transcript_path, tmux, topic_id, status, status_message_id, model, effort, permission_mode, created_at, ended_at
-                 FROM sessions WHERE topic_id = ?1 AND ended_at IS NULL
+                 FROM sessions WHERE CAST(topic_id AS TEXT) = ?1 AND ended_at IS NULL
                  ORDER BY created_at DESC LIMIT 1",
-                [topic_id],
+                [canal_id],
                 linha_para_sessao,
             )
             .optional()?;
@@ -302,10 +318,10 @@ impl Store {
         Ok(())
     }
 
-    pub fn set_status_message(&self, session_id: &str, message_id: Option<i32>) -> Result<()> {
+    pub fn set_status_msg(&self, session_id: &str, msg_id: Option<&str>) -> Result<()> {
         self.conn().execute(
             "UPDATE sessions SET status_message_id = ?2, updated_at = ?3 WHERE session_id = ?1",
-            params![session_id, message_id, agora()],
+            params![session_id, msg_id, agora()],
         )?;
         Ok(())
     }
@@ -417,19 +433,24 @@ impl Store {
     /// o processo vivo com a sessão já morta no banco, e aí ele é lixo que ninguém mais alcança.
     /// Sessões encerradas que ainda carregam tópico: o tópico não foi apagado (daemon caiu no
     /// meio, API fora do ar) e virou um canal morto no grupo.
-    pub fn topicos_vazados(&self) -> Result<Vec<(String, i32)>> {
+    pub fn canais_vazados(&self) -> Result<Vec<(String, String)>> {
         let c = self.conn();
         let mut stmt = c.prepare(
             "SELECT session_id, topic_id FROM sessions
              WHERE ended_at IS NOT NULL AND topic_id IS NOT NULL",
         )?;
-        let linhas = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        Ok(linhas.flatten().collect())
+        let linhas = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, coluna_como_texto(r, 1)?))
+        })?;
+        Ok(linhas
+            .flatten()
+            .filter_map(|(id, canal)| canal.map(|c| (id, c)))
+            .collect())
     }
 
-    /// Esquece o tópico de uma sessão. Chamado depois de apagá-lo de verdade, para a varredura
-    /// de tópico vazado saber o que já foi resolvido.
-    pub fn clear_topic(&self, session_id: &str) -> Result<()> {
+    /// Esquece o canal de uma sessão. Chamado depois de apagá-lo de verdade, para a varredura
+    /// de canal vazado saber o que já foi resolvido.
+    pub fn clear_canal(&self, session_id: &str) -> Result<()> {
         self.conn().execute(
             "UPDATE sessions SET topic_id = NULL, updated_at = ?2 WHERE session_id = ?1",
             params![session_id, agora()],
@@ -466,6 +487,22 @@ impl Store {
     }
 }
 
+/// Lê `topic_id`/`status_message_id` como texto seja qual for o tipo real gravado na coluna.
+///
+/// Num banco criado antes desta mudança as duas colunas são INTEGER (id do Telegram). Num banco
+/// novo elas nascem TEXT. `rusqlite::types::ValueRef` cobre os dois casos sem exigir migração de
+/// tabela: inteiro vira `to_string()`, texto vem como está, nulo vira `None`.
+fn coluna_como_texto(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<Option<String>> {
+    use rusqlite::types::ValueRef;
+    Ok(match row.get_ref(idx)? {
+        ValueRef::Null => None,
+        ValueRef::Integer(i) => Some(i.to_string()),
+        ValueRef::Text(t) => Some(String::from_utf8_lossy(t).into_owned()),
+        // Não esperado nestas colunas, mas um tipo estranho não pode travar a leitura da sessão.
+        ValueRef::Real(_) | ValueRef::Blob(_) => None,
+    })
+}
+
 fn linha_para_sessao(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
     Ok(Session {
         session_id: row.get(0)?,
@@ -473,9 +510,9 @@ fn linha_para_sessao(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
         cwd: row.get(2)?,
         transcript_path: row.get(3)?,
         tmux: row.get(4)?,
-        topic_id: row.get(5)?,
+        canal_id: coluna_como_texto(row, 5)?,
         status: row.get(6)?,
-        status_message_id: row.get(7)?,
+        status_msg_id: coluna_como_texto(row, 7)?,
         model: row.get(8)?,
         effort: row.get(9)?,
         permission_mode: row.get(10)?,
@@ -490,7 +527,7 @@ impl Session {
             session_id: self.session_id.clone(),
             project: self.project.clone(),
             cwd: self.cwd.clone(),
-            topic_id: self.topic_id,
+            canal_id: self.canal_id.clone(),
             status: self.status.clone(),
             context_tokens: context.map(|c| c.tokens),
             context_limit: context.map(|c| c.limit),
@@ -512,9 +549,9 @@ mod tests {
             cwd: "/tmp/proj".into(),
             transcript_path: Some("/tmp/t.jsonl".into()),
             tmux: Some("ld-proj".into()),
-            topic_id: Some(7),
+            canal_id: Some("7".into()),
             status: "idle".into(),
-            status_message_id: None,
+            status_msg_id: None,
             model: Some("opus".into()),
             effort: None,
             permission_mode: Some("auto".into()),
@@ -528,22 +565,22 @@ mod tests {
         let st = Store::open_memory().unwrap();
         st.upsert(&sessao("s1")).unwrap();
         let s = st.get("s1").unwrap().unwrap();
-        assert_eq!(s.topic_id, Some(7));
+        assert_eq!(s.canal_id.as_deref(), Some("7"));
         assert!(s.owned_by_bot());
     }
 
     #[test]
     fn upsert_nao_apaga_topico_com_valor_nulo() {
-        // O hook SessionStart não sabe o tópico; se ele sobrescrevesse com NULL, a sessão criada
+        // O hook SessionStart não sabe o canal; se ele sobrescrevesse com NULL, a sessão criada
         // pelo bot perderia o vínculo no primeiro evento.
         let st = Store::open_memory().unwrap();
         st.upsert(&sessao("s1")).unwrap();
         let mut sem_topico = sessao("s1");
-        sem_topico.topic_id = None;
+        sem_topico.canal_id = None;
         sem_topico.tmux = None;
         st.upsert(&sem_topico).unwrap();
         let s = st.get("s1").unwrap().unwrap();
-        assert_eq!(s.topic_id, Some(7));
+        assert_eq!(s.canal_id.as_deref(), Some("7"));
         assert_eq!(s.tmux.as_deref(), Some("ld-proj"));
     }
 
@@ -564,9 +601,9 @@ mod tests {
     fn busca_por_topico_ignora_encerrada() {
         let st = Store::open_memory().unwrap();
         st.upsert(&sessao("s1")).unwrap();
-        assert_eq!(st.by_topic(7).unwrap().unwrap().session_id, "s1");
+        assert_eq!(st.by_canal("7").unwrap().unwrap().session_id, "s1");
         st.end("s1").unwrap();
-        assert!(st.by_topic(7).unwrap().is_none());
+        assert!(st.by_canal("7").unwrap().is_none());
     }
 
     #[test]
@@ -576,17 +613,21 @@ mod tests {
         st.enqueue("velha", "oi", "luka", &[]).unwrap();
 
         let mut nova = sessao("nova");
-        nova.topic_id = None;
+        nova.canal_id = None;
         nova.tmux = None;
         st.upsert(&nova).unwrap();
         st.rekey("velha", "nova").unwrap();
 
         let n = st.get("nova").unwrap().unwrap();
-        assert_eq!(n.topic_id, Some(7), "o tópico foi para a sessão nova");
+        assert_eq!(
+            n.canal_id.as_deref(),
+            Some("7"),
+            "o tópico foi para a sessão nova"
+        );
         assert_eq!(n.tmux.as_deref(), Some("ld-proj"));
         let v = st.get("velha").unwrap().unwrap();
-        assert!(v.ended_at.is_some() && v.topic_id.is_none());
-        assert_eq!(st.by_topic(7).unwrap().unwrap().session_id, "nova");
+        assert!(v.ended_at.is_some() && v.canal_id.is_none());
+        assert_eq!(st.by_canal("7").unwrap().unwrap().session_id, "nova");
         assert_eq!(st.drain("nova").unwrap().len(), 1, "a fila seguiu junto");
     }
 
@@ -595,13 +636,16 @@ mod tests {
         let st = Store::open_memory().unwrap();
         st.upsert(&sessao("s1")).unwrap();
         assert!(
-            st.topicos_vazados().unwrap().is_empty(),
+            st.canais_vazados().unwrap().is_empty(),
             "sessão viva não vaza"
         );
         st.end("s1").unwrap();
-        assert_eq!(st.topicos_vazados().unwrap(), vec![("s1".to_string(), 7)]);
-        st.clear_topic("s1").unwrap();
-        assert!(st.topicos_vazados().unwrap().is_empty());
+        assert_eq!(
+            st.canais_vazados().unwrap(),
+            vec![("s1".to_string(), "7".to_string())]
+        );
+        st.clear_canal("s1").unwrap();
+        assert!(st.canais_vazados().unwrap().is_empty());
     }
 
     #[test]
@@ -672,3 +716,7 @@ mod tests {
         assert_eq!(st.kv_get("painel").unwrap().as_deref(), Some("43"));
     }
 }
+
+#[cfg(test)]
+#[path = "state_canal_testes.rs"]
+mod canal_testes;
