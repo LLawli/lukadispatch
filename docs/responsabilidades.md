@@ -29,6 +29,7 @@ lugar errado.
 | `panel` | o painel do canal principal: uma mensagem, fixada, redesenhada com debounce a partir do banco e do uso da conta | responder comando |
 | `arquivos` | o lado do domínio dos arquivos: o marcador `@arquivo:` na resposta, a validação do que o agente pediu para mandar, a raiz de anexos por sessão, a limpeza de anexo de sessão morta e de áudio vencido | baixar da plataforma (é `Frontend::baixa`); partir arquivo (é `Divisor`) |
 | `socket` | servir o protocolo NDJSON do `ld-core::proto` aos hooks e ao `listen` | lógica de negócio (repassa para o `app`) |
+| `setup` | o `lukadispatchd setup`: os seletores, a conversa no terminal (`Tela`), o rascunho do config e do `.env` editado no lugar (`Rascunho`), e o passo de cada implementação de porta (`Peca`), com o do Telegram atrás de `ApiDoBot` | gravar antes do fim da conversa; confiar no que a pessoa diz quando a API pode conferir (privacidade, fórum e direitos são perguntados ao Telegram) |
 | `main` | ler o config, montar as portas, preparar a máquina para o agente, subir o socket, a escuta do frontend e o relógio do painel | qualquer regra; ele só liga as peças |
 
 ### Portas (traits) e adaptadores
