@@ -28,8 +28,13 @@ Primeira versão pública.
 - Peças trocáveis pelo `config.toml`, sem recompilar: aplicativo de chat, agente, envelope,
   motor de transcrição e divisor de arquivos.
 - `usuario` no config diz à sessão como chamar você.
-- Instalação de um comando (`install.sh`), tarball por arquitetura com sha256, fórmula do
-  Homebrew e instalação pelo mise.
+- `lukadispatch setup` configura tudo conversando: cria o bot com você, acha o grupo e o seu id
+  por uma mensagem que você manda nele, confere na API do Telegram o Group Privacy, os tópicos e
+  os direitos do bot, e liga os hooks e o serviço. `--frontend`, `--agent`, `--session` e
+  `--envelope` escolhem a implementação de cada peça.
+- Instalação de um comando (`install.sh`, que emenda no setup), tarball por arquitetura com
+  sha256, fórmula do Homebrew e instalação pelo mise.
+- `hospedeiro` no config escolhe onde as sessões rodam (hoje, `tmux`).
 
 ### Corrigido
 

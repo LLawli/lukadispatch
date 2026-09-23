@@ -28,6 +28,30 @@ let app = App::new(cfg, store, Portas {
 O porquê desse desenho (traits com `async-trait`, objeto dinâmico, escolha em tempo de execução)
 está em [decisoes/0002](decisoes/0002-portas-e-adaptadores.md).
 
+## O setup de uma implementação nova
+
+`lukadispatch setup` escolhe uma implementação por porta, com os mesmos nomes do config:
+
+```text
+lukadispatch setup --frontend telegram --agent claude-code --session tmux --envelope ai-memory
+```
+
+Cada implementação traz o próprio passo de setup, a trait `Peca` em
+`crates/ld-daemon/src/setup/pecas.rs`: `configura` confere o que ela precisa na máquina, pergunta
+o que faltar e escreve no rascunho do config e do `.env`; `ativa`, opcional, roda depois de
+gravar (é onde o Claude Code instala os hooks). Uma implementação nova se registra em dois
+lugares, do mesmo jeito:
+
+1. no `da_config` da porta (e na lista de nomes dela: `AGENTES`, `ENVELOPES`, `HOSPEDEIROS`), para
+   o daemon subir com ela;
+2. no registro da porta em `setup/pecas.rs` (`frontend`, `agente`, `hospedeiro`, `envelope`), para
+   o setup saber configurá-la.
+
+O passo do Telegram é o modelo para um frontend: a API fica atrás de uma trait (`ApiDoBot`), e o
+teste roteiriza um bot de mentira que passa por todos os laços (token errado, privacidade ligada,
+grupo sem tópicos, bot sem direitos). Um passo de setup que só funciona com o serviço de verdade
+não tem como ser testado no CI.
+
 ## Regra de ouro ao escrever uma implementação
 
 Cada trait tem, na doc do módulo, uma lista de contrato. Ela não é sugestão: o domínio conta com

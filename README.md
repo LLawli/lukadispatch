@@ -36,9 +36,22 @@ Linux x86_64 ou aarch64, com o systemd de usuário.
 curl -fsSL https://raw.githubusercontent.com/LLawli/lukadispatch/master/install.sh | sh
 ```
 
-O script baixa o binário da última release, confere o sha256, instala em `~/.local/bin`, põe o
-serviço do systemd e deixa um `.env` e um `config.toml` de exemplo em `~/.config/lukadispatch/`.
-Rodar de novo atualiza. Outros caminhos:
+O script baixa o binário da última release, confere o sha256, instala em `~/.local/bin` e emenda
+no `lukadispatch setup`, que conversa com você até o bot estar respondendo:
+
+1. confere o que a máquina tem (Claude Code, tmux, ai-memory) e diz o que falta;
+2. pede o token do bot que você cria no [@BotFather](https://t.me/BotFather), e confere nele se
+   o Group Privacy está desligado;
+3. explica como criar o grupo com tópicos e, por uma mensagem que você manda nele, descobre
+   sozinho o grupo e o seu id;
+4. confere se o bot é administrador com os direitos que ele usa, e diz o que ajustar se não for;
+5. pergunta seu nome, onde ficam seus projetos e o modo de permissão;
+6. grava o config e o `.env` (só você lê), e liga os hooks e o serviço, perguntando antes.
+
+Rodar o `lukadispatch setup` de novo é seguro: ele oferece o que já está configurado e edita o
+config no lugar, com backup. Rodar o `install.sh` de novo atualiza.
+
+Outros caminhos de instalação (depois de qualquer um deles, `lukadispatch setup`):
 
 ```bash
 brew install LLawli/tap/lukadispatch                 # Homebrew no Linux (compila do fonte)
@@ -50,53 +63,31 @@ Ou baixe o `lukadispatch-linux-<arq>.tar.gz` da [página de releases](https://gi
 e rode o `install.sh --de .` que vem dentro dele.
 
 **Precisa ter:** [Claude Code](https://docs.claude.com/en/docs/claude-code) 2.1.274 ou mais
-novo, `tmux`, e gtk4 e libadwaita 1.5+ para a janela de pergunta no PC. Por padrão as sessões
-sobem dentro do [ai-memory](https://github.com/akitaonrails/ai-memory); sem ele, use
-`envelope = "nenhum"` no config. Para dividir arquivos grandes: `7z` (ou `rar`) e `ffmpeg`.
-Para transcrever voz: um programa local de voz para texto (o padrão é o whisper.cpp).
+novo, `tmux`, e gtk4 e libadwaita 1.5+ para a janela de pergunta no PC. O
+[ai-memory](https://github.com/akitaonrails/ai-memory) é opcional: sem ele, o setup oferece rodar
+as sessões direto. Para dividir arquivos grandes: `7z` (ou `rar`) e `ffmpeg`. Para transcrever
+voz: um programa local de voz para texto (o padrão é o whisper.cpp; sem ele, o setup desliga a
+transcrição e a voz chega como arquivo).
 
-## Configurar
+### Peças
 
-**1. O bot e o grupo.**
-
-1. Fale com o [@BotFather](https://t.me/BotFather), mande `/newbot` e guarde o token.
-2. Em `/mybots > seu bot > Bot Settings > Group Privacy`, **desligue** o modo de privacidade.
-   Sem isso o bot só recebe mensagens que começam com `/`.
-3. Crie um grupo, adicione o bot e ligue os tópicos em `Editar > Tópicos`. O Telegram converte o
-   grupo em supergrupo nessa hora.
-4. Promova o bot a administrador com **Gerenciar tópicos** e **Apagar mensagens**.
-5. Mande qualquer mensagem no grupo e rode
-   `curl -s "https://api.telegram.org/bot<TOKEN>/getUpdates" | jq '.result[-1].message | {chat: .chat.id, voce: .from.id}'`.
-   O `chat` começa com `-100`; o `voce` é o seu `user_id`.
-
-**2. Os arquivos.** Ponha o token em `~/.config/lukadispatch/.env`, e o `chat_id` e o seu
-`user_id` em `~/.config/lukadispatch/config.toml`:
-
-```toml
-usuario = "Maria"                # como a sessão chama você; sem isto, "o seu usuário"
-
-[telegram]
-chat_id = -1001234567890
-allowed_user_ids = [123456789]   # quem o bot obedece; vazio nega todo mundo
-
-[scan]
-roots = ["~/Projetos"]           # tudo com .git aqui dentro aparece no /new
-```
-
-O [`config.example.toml`](dist/config.example.toml) comenta todas as opções: modo de permissão
-padrão, projetos fixados, motor de voz, divisor de arquivos.
-
-**3. Ligar.**
+O setup escolhe uma implementação para cada peça. Os padrões são as que existem hoje:
 
 ```bash
-lukadispatch install --global          # os hooks do Claude Code (desfaz com uninstall)
-systemctl --user enable --now lukadispatch
+lukadispatch setup --frontend telegram --agent claude-code --session tmux --envelope ai-memory
 ```
 
-O `install --global` escreve os hooks completos só nas sessões que o bot abre. No
-`~/.claude/settings.json` ele põe apenas telemetria, para as sessões que você abre no terminal
-aparecerem no painel. Nessas, as perguntas continuam no seu terminal. Os hooks são assíncronos:
-com o daemon fora do ar, nenhuma sessão sua trava.
+Outras entram como implementação nova de cada porta ([`docs/portas.md`](docs/portas.md)), e o
+setup passa a oferecê-las pelo nome. Todas as opções do config, comentadas, estão no
+[`config.example.toml`](dist/config.example.toml).
+
+### O que os hooks mexem
+
+Os hooks completos (os que respondem pergunta e permissão pelo celular) valem só nas sessões que
+o bot abre. No `~/.claude/settings.json` entra apenas telemetria, para as sessões que você abre no
+terminal aparecerem no painel; nelas, as perguntas continuam no seu terminal. Os hooks são
+assíncronos: com o daemon fora do ar, nenhuma sessão sua trava. `lukadispatch uninstall` tira
+tudo, com backup.
 
 ## Usar
 
