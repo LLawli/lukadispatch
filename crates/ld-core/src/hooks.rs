@@ -169,6 +169,29 @@ pub fn strip(settings: &mut Value) {
     }
 }
 
+/// Lê um settings do Claude Code. Ausente é `{}`; presente e ilegível é erro.
+///
+/// Nunca trate o ilegível como vazio: quem chama grava o resultado de volta, e o arquivo do
+/// usuário seria trocado por um só com os nossos hooks.
+pub fn le_settings(caminho: &std::path::Path) -> anyhow::Result<Value> {
+    use anyhow::Context;
+
+    let texto = match std::fs::read_to_string(caminho) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(json!({})),
+        Err(e) => return Err(e).with_context(|| format!("lendo {}", caminho.display())),
+    };
+    if texto.trim().is_empty() {
+        return Ok(json!({}));
+    }
+    serde_json::from_str(&texto).with_context(|| {
+        format!(
+            "{} não é JSON válido; conserte antes, que nada foi alterado",
+            caminho.display()
+        )
+    })
+}
+
 /// Acrescenta os nossos hooks a um settings existente, sem duplicar.
 ///
 /// Sempre faz `strip` antes: instalar duas vezes não pode gerar dois hooks iguais, e reinstalar
@@ -374,6 +397,20 @@ mod tests {
         merge_into(&mut s, &telemetry_hooks("lukadispatch"));
         strip(&mut s);
         assert_eq!(s, original, "sair não pode deixar rastro");
+    }
+
+    #[test]
+    fn settings_que_nao_e_json_e_recusado_e_ausente_e_vazio() {
+        // Tratar o ilegível como vazio faria o install gravar só os nossos hooks por cima dos
+        // do usuário. Ausente, sim, é vazio: é a primeira instalação.
+        let dir = tempfile::tempdir().unwrap();
+        let ausente = dir.path().join("nao-existe.json");
+        assert_eq!(le_settings(&ausente).unwrap(), json!({}));
+
+        let quebrado = dir.path().join("settings.json");
+        std::fs::write(&quebrado, "{\"hooks\": {},}").unwrap();
+        let e = le_settings(&quebrado).err().expect("json inválido");
+        assert!(format!("{e:#}").contains("settings.json"), "{e:#}");
     }
 
     #[test]

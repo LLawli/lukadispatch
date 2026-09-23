@@ -355,7 +355,13 @@ fn install(global: bool) -> i32 {
 
     if global {
         let alvo = paths::claude_settings();
-        let mut settings = ler_json(&alvo);
+        let mut settings = match ld_core::hooks::le_settings(&alvo) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("{e:#}");
+                return 1;
+            }
+        };
         ld_core::hooks::merge_into(&mut settings, &ld_core::hooks::telemetry_hooks(&cli));
         if let Err(e) = escrever_json(&alvo, &settings) {
             eprintln!("não consegui escrever {}: {e}", alvo.display());
@@ -369,7 +375,13 @@ fn install(global: bool) -> i32 {
 
 fn uninstall() -> i32 {
     let alvo = paths::claude_settings();
-    let mut settings = ler_json(&alvo);
+    let mut settings = match ld_core::hooks::le_settings(&alvo) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{e:#}");
+            return 1;
+        }
+    };
     ld_core::hooks::strip(&mut settings);
     if let Err(e) = escrever_json(&alvo, &settings) {
         eprintln!("não consegui escrever {}: {e}", alvo.display());
@@ -377,13 +389,6 @@ fn uninstall() -> i32 {
     }
     println!("hooks removidos de {}", alvo.display());
     0
-}
-
-fn ler_json(caminho: &std::path::Path) -> serde_json::Value {
-    std::fs::read_to_string(caminho)
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_else(|| serde_json::json!({}))
 }
 
 /// Escreve com backup do que estava lá.
