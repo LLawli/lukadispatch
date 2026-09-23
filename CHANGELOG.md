@@ -6,6 +6,8 @@ versão para as notas do GitHub Release, então escreva para quem vai decidir se
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-23
+
 Primeira versão pública.
 
 ### Adicionado
@@ -41,3 +43,10 @@ Primeira versão pública.
 - `trust_projects` marcava a pasta como confiada só quando nenhum diretório acima era confiado.
   O Claude Code só herda a confiança até a raiz do repositório git, então um projeto com `.git`
   dentro de uma home confiada parava no diálogo de confiança, e do celular a sessão ficava muda.
+- Uma sessão que morria ao subir podia sumir antes de a saída dela ser registrada, e o erro
+  chegava sem o motivo. A partida agora espera o registro estar ligado.
+- Com o `~/.claude/settings.json` ilegível, o `install` gravava por cima só os hooks do
+  lukadispatch. Agora ele recusa e não altera nada.
+
+[Unreleased]: https://github.com/LLawli/lukadispatch/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/LLawli/lukadispatch/releases/tag/v0.1.0
