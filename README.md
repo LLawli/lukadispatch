@@ -100,6 +100,7 @@ systemctl --user enable --now lukadispatch
 `~/.config/lukadispatch/config.toml`:
 
 ```toml
+usuario = "Maria"                # como a sessão chama você; sem isto, "o seu usuário"
 default_permission_mode = "auto"
 trust_projects = true            # marca a pasta como confiada antes de abrir (veja abaixo)
 

@@ -196,7 +196,7 @@ pub fn e_recado_de_monitor(texto: &str) -> bool {
 /// tivessem cópias separadas do texto, uma mudança de redação faria os prompts voltarem a
 /// aparecer no replay como se fossem fala sua, e em silêncio.
 pub const MARCA_SISTEMA: &str =
-    "«lukadispatch: mensagem automática do sistema, não é o Luka falando»";
+    "«lukadispatch: mensagem automática do sistema, não é o usuário falando»";
 
 /// O prefixo basta para reconhecer a marca, mesmo que o resto da frase mude.
 const PREFIXO_MARCA: &str = "«lukadispatch:";

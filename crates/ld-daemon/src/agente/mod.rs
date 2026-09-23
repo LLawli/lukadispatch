@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use ld_core::config::{Agente as CfgAgente, Project};
+use ld_core::config::{Config, Project};
 use ld_core::context::ContextUsage;
 use ld_core::models::Modelo;
 use ld_core::state::Session;
@@ -243,12 +243,16 @@ pub fn workstream(session_id: &str) -> String {
 }
 
 /// O agente e o envelope que o config pede. Nome desconhecido é erro na partida do daemon.
-pub fn da_config(cfg: &CfgAgente, claude_binary: Option<String>) -> Result<Pecas> {
+pub fn da_config(config: &Config) -> Result<Pecas> {
+    let cfg = &config.agente;
     let agente: Arc<dyn Agente> = match cfg.tipo.as_str() {
-        "claude-code" => Arc::new(claude_code::ClaudeCode::new(
-            claude_code::Locais::da_maquina(),
-            claude_binary,
-        )),
+        "claude-code" => Arc::new(
+            claude_code::ClaudeCode::new(
+                claude_code::Locais::da_maquina(),
+                config.claude_binary.clone(),
+            )
+            .com_usuario(config.usuario.clone()),
+        ),
         outro => anyhow::bail!("agente desconhecido: {outro:?} (disponíveis: claude-code)"),
     };
     let envelope: Arc<dyn Envelope> = match cfg.envelope.as_str() {

@@ -54,6 +54,10 @@ pub struct Config {
     /// Desligue se algum servidor seu não gostar de ter um processo no meio do cano: as sessões
     /// voltam a falar direto com eles, e o diálogo volta a só dar para responder no PC.
     pub wrap_mcp: bool,
+
+    /// Como a sessão chama você no prompt de partida. Sem nome, ela diz "o seu usuário".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usuario: Option<String>,
 }
 
 impl Default for Config {
@@ -83,6 +87,7 @@ impl Default for Config {
             .map(|s| s.to_string())
             .collect(),
             wrap_mcp: true,
+            usuario: None,
         }
     }
 }

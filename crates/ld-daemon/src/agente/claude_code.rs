@@ -61,6 +61,8 @@ pub struct ClaudeCode {
     /// Catálogo de modelos, relido só quando o binário do Claude Code muda (a data dele é a
     /// chave). Sem isto, cada abertura do `/model` varreria de novo um binário de ~200 MB.
     catalogo: Mutex<Option<(SystemTime, Vec<Modelo>)>>,
+    /// Nome com que o prompt de partida apresenta você à sessão; `None` fica "o seu usuário".
+    usuario: Option<String>,
 }
 
 impl ClaudeCode {
@@ -71,7 +73,14 @@ impl ClaudeCode {
             locais,
             claude_binary: claude_binary.map(PathBuf::from),
             catalogo: Mutex::new(None),
+            usuario: None,
         }
+    }
+
+    /// O nome do `usuario` do config, para a sessão saber com quem fala.
+    pub fn com_usuario(mut self, usuario: Option<String>) -> Self {
+        self.usuario = usuario;
+        self
     }
 }
 
@@ -97,8 +106,19 @@ fn modo_efetivo(modo: &str) -> Option<&str> {
 /// consegue chamá-lo; (2) a resposta vai sozinha pelo hook, senão o agente tenta "mandar" a
 /// mensagem por conta própria e inventa um curl; (3) o monitor expira e precisa voltar; (4)
 /// arquivo se manda escrevendo um marcador na resposta, não chamando ferramenta.
-fn bootstrap_prompt(cli: &str, session_id: &str, chat: &DescricaoDoChat) -> String {
+fn bootstrap_prompt(
+    cli: &str,
+    session_id: &str,
+    chat: &DescricaoDoChat,
+    usuario: Option<&str>,
+) -> String {
     let marca = ld_core::transcript::MARCA_SISTEMA;
+    // O nome aparece uma vez só, aqui; o resto do prompt diz "o seu usuário". Assim o texto não
+    // precisa escolher entre "do" e "da" para um nome que ele não conhece.
+    let quem = match usuario {
+        Some(nome) => format!("o seu usuário ({nome})"),
+        None => "o seu usuário".to_string(),
+    };
     let teto_mb = chat.teto_envio / (1024 * 1024);
     // Sem renderização de Markdown, tabela e diagrama viram sopa de pipes: o agente precisa
     // saber que tem de gerar como imagem. Com renderização, o bloco todo é ruído.
@@ -118,7 +138,7 @@ fn bootstrap_prompt(cli: &str, session_id: &str, chat: &DescricaoDoChat) -> Stri
     };
     format!(
         r#"{marca}
-Você está rodando dentro do lukadispatch. O canal de conversa com o seu usuário (Luka) é {onde}, e NÃO este terminal: ninguém está lendo esta tela.
+Você está rodando dentro do lukadispatch. O canal de conversa com {quem} é {onde}, e NÃO este terminal: ninguém está lendo esta tela.
 
 Faça agora, nesta ordem, e nada além disso:
 
@@ -131,10 +151,10 @@ Faça agora, nesta ordem, e nada além disso:
 
 Como funciona daqui em diante:
 
-- Cada linha que o monitor emitir é uma mensagem do Luka, em JSON: {{"kind":"message","text":"...","from":"...","at":0}}. Trate o campo "text" exatamente como se ele tivesse acabado de digitar aquilo para você, e trabalhe normalmente. O campo "from" diz de ONDE a mensagem saiu (o nome de quem escreveu, ou "pc" quando foi injetada aqui da máquina), e não muda em nada o que você deve fazer.
+- Cada linha que o monitor emitir é uma mensagem do seu usuário, em JSON: {{"kind":"message","text":"...","from":"...","at":0}}. Trate o campo "text" exatamente como se ele tivesse acabado de digitar aquilo para você, e trabalhe normalmente. O campo "from" diz de ONDE a mensagem saiu (o nome de quem escreveu, ou "pc" quando foi injetada aqui da máquina), e não muda em nada o que você deve fazer.
 - Quando ele manda um arquivo (foto, PDF, vídeo), a linha vem com um campo a mais: "files":["/caminho/absoluto"]. O arquivo JÁ ESTÁ em disco nesse caminho, e o mesmo caminho aparece no "text" como "[arquivo recebido: ...]". Abra com Read (ou a ferramenta que couber) antes de responder: ele mandou o arquivo porque quer que você olhe. Não tente baixar nada por conta própria.
-- Para DEVOLVER um arquivo (um gráfico que você gerou, um log, um screenshot, um build), não rode comando nenhum: escreva na sua resposta final uma linha SOZINHA, contendo só isto, com caminho absoluto: "@arquivo: /caminho/do/arquivo.png". Pode ter legenda depois de " | ". O hook tira essa linha da mensagem e manda o arquivo NA POSIÇÃO EXATA em que ela apareceu, então você intercala texto e arquivo à vontade: parágrafo, imagem, parágrafo, log, parágrafo. Ponha cada marcador logo depois do trecho que fala dele. Use "@documento:" no lugar de "@arquivo:" quando os bytes EXATOS importarem (um .csv, um build, um PDF); "@arquivo:" manda imagem como foto, que aparece na conversa e é o que você quer em quase todo caso visual. A linha precisa ser a linha inteira: marcador no meio de uma frase, dentro de crase ou depois de hífen de lista é ignorado de propósito, para você poder FALAR do formato sem disparar envio. Tamanho não é problema seu: até {teto_mb} MB vai direto, e acima disso o daemon divide em partes e manda uma por vez, com a instrução de juntar. Nunca mande um arquivo que o Luka não pediu.{aviso_markdown}
-- Chave, credencial, token e .env são caso à parte: NUNCA saem em claro por este canal. Eles só podem ser enviados criptografados, e só depois que o Luka tiver fornecido a chave pública dele nesta conversa: importe a chave e cifre para ela. A ferramenta se escolhe pelo FORMATO da chave que ele mandou, e não por preferência sua: se ela começa com "ssh-ed25519" ou "ssh-rsa", grave a linha inteira num arquivo e use "age -R chave.pub -o arquivo.age arquivo"; se começa com "age1", use "age -r age1... -o arquivo.age arquivo"; se vier um bloco "-----BEGIN PGP PUBLIC KEY BLOCK-----", use "gpg --import chave.asc" e depois "gpg --encrypt --recipient <id> --output arquivo.gpg arquivo". Nunca converta a chave de um formato para outro, e se não reconhecer o formato, pergunte em vez de tentar. Mande só o arquivo cifrado e nunca o original; apague o original em claro assim que cifrar, e o cifrado só NO TURNO SEGUINTE, porque o envio acontece depois da sua resposta (apagar antes faria o arquivo sumir antes de subir). Sem chave pública fornecida por ele, não mande: diga o que você tem e espere a chave.
+- Para DEVOLVER um arquivo (um gráfico que você gerou, um log, um screenshot, um build), não rode comando nenhum: escreva na sua resposta final uma linha SOZINHA, contendo só isto, com caminho absoluto: "@arquivo: /caminho/do/arquivo.png". Pode ter legenda depois de " | ". O hook tira essa linha da mensagem e manda o arquivo NA POSIÇÃO EXATA em que ela apareceu, então você intercala texto e arquivo à vontade: parágrafo, imagem, parágrafo, log, parágrafo. Ponha cada marcador logo depois do trecho que fala dele. Use "@documento:" no lugar de "@arquivo:" quando os bytes EXATOS importarem (um .csv, um build, um PDF); "@arquivo:" manda imagem como foto, que aparece na conversa e é o que você quer em quase todo caso visual. A linha precisa ser a linha inteira: marcador no meio de uma frase, dentro de crase ou depois de hífen de lista é ignorado de propósito, para você poder FALAR do formato sem disparar envio. Tamanho não é problema seu: até {teto_mb} MB vai direto, e acima disso o daemon divide em partes e manda uma por vez, com a instrução de juntar. Nunca mande um arquivo que o seu usuário não pediu.{aviso_markdown}
+- Chave, credencial, token e .env são caso à parte: NUNCA saem em claro por este canal. Eles só podem ser enviados criptografados, e só depois que o seu usuário tiver fornecido a chave pública dele nesta conversa: importe a chave e cifre para ela. A ferramenta se escolhe pelo FORMATO da chave que ele mandou, e não por preferência sua: se ela começa com "ssh-ed25519" ou "ssh-rsa", grave a linha inteira num arquivo e use "age -R chave.pub -o arquivo.age arquivo"; se começa com "age1", use "age -r age1... -o arquivo.age arquivo"; se vier um bloco "-----BEGIN PGP PUBLIC KEY BLOCK-----", use "gpg --import chave.asc" e depois "gpg --encrypt --recipient <id> --output arquivo.gpg arquivo". Nunca converta a chave de um formato para outro, e se não reconhecer o formato, pergunte em vez de tentar. Mande só o arquivo cifrado e nunca o original; apague o original em claro assim que cifrar, e o cifrado só NO TURNO SEGUINTE, porque o envio acontece depois da sua resposta (apagar antes faria o arquivo sumir antes de subir). Sem chave pública fornecida por ele, não mande: diga o que você tem e espere a chave.
 - VOCÊ NÃO PRECISA ENVIAR NADA DE VOLTA em texto. Um hook pega a sua resposta final e entrega no canal sozinho. Nunca chame curl, nunca use API nenhuma, nunca tente "mandar mensagem": isso duplicaria tudo.
 - Perguntas e pedidos de permissão também saem sozinhos: use AskUserQuestion normalmente, que ela aparece no celular e numa janela no PC ao mesmo tempo.
 - O monitor expira a cada 30 minutos. Quando isso acontecer, arme-o de novo com a mesma chamada do passo 2, SEM ESCREVER NADA sobre isso: não diga "monitor rearmado", não avise, não comente. O re-arme é encanamento, e qualquer frase sua depois de uma resposta vira a mensagem que chega no celular no lugar da resposta. Se você terminar um turno sem monitor armado, um lembrete vai chegar: cumpra-o na hora, senão a sessão fica surda.
@@ -153,13 +173,13 @@ fn rearm_prompt(cli: &str, session_id: &str, retomada: bool, chat: &DescricaoDoC
     let abertura = if retomada {
         format!(
             "Esta conversa foi retomada pelo lukadispatch e agora está ligada a {onde}. Tudo o \
-             que vocês já conversaram continua aqui; o Luka acabou de receber as últimas falas \
+             que vocês já conversaram continua aqui; o seu usuário acabou de receber as últimas falas \
              no celular.",
             onde = chat.onde
         )
     } else {
         "A sua sessão foi reiniciada pelo lukadispatch (troca de modelo ou de esforço). O \
-         contexto continua o mesmo; o que se perdeu foi o canal de conversa com o Luka."
+         contexto continua o mesmo; o que se perdeu foi o canal de conversa com o seu usuário."
             .to_string()
     };
     format!(
@@ -170,7 +190,7 @@ Faça só isto, agora:
 
 1. Chame ToolSearch com query "select:Monitor".
 2. Chame Monitor com command "{cli} listen --session {session_id}", description "mensagens do {plataforma}" e timeout_ms 1800000.
-3. Pare e fique em silêncio até chegar o próximo evento do monitor: nem "pronto", nem "monitor rearmado", nada. Não retome o que estava fazendo por conta própria, não resuma nada e não pergunte se pode continuar: se o Luka quiser seguir, ele manda.
+3. Pare e fique em silêncio até chegar o próximo evento do monitor: nem "pronto", nem "monitor rearmado", nada. Não retome o que estava fazendo por conta própria, não resuma nada e não pergunte se pode continuar: se o seu usuário quiser seguir, ele manda.
 "#,
         plataforma = chat.plataforma,
     )
@@ -311,7 +331,12 @@ impl Agente for ClaudeCode {
 
         let prompt = match pedido.resume {
             Some(_) => rearm_prompt(&self.locais.cli, session_id, pedido.retomada, pedido.chat),
-            None => bootstrap_prompt(&self.locais.cli, session_id, pedido.chat),
+            None => bootstrap_prompt(
+                &self.locais.cli,
+                session_id,
+                pedido.chat,
+                self.usuario.as_deref(),
+            ),
         };
 
         Ok(Invocacao {

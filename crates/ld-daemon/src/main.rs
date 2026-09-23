@@ -35,7 +35,7 @@ async fn main() -> Result<()> {
 
     let cfg = Config::load(&paths::config_file())?;
 
-    let pecas = agente::da_config(&cfg.agente, cfg.claude_binary.clone())?;
+    let pecas = agente::da_config(&cfg)?;
     pecas.agente.prepara()?;
 
     let store = ld_core::state::Store::open(&paths::state_db())?;

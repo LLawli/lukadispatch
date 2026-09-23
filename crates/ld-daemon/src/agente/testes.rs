@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use ld_core::config::{Agente as CfgAgente, Project};
+use ld_core::config::{Agente as CfgAgente, Config, Project};
 use ld_core::state::Session;
 
 use super::claude_code::{ClaudeCode, Locais};
@@ -101,43 +101,41 @@ fn direto_nao_mexe_em_nada() {
     assert_eq!(Direto.embrulha(ID, argv.clone()), argv);
 }
 
+fn config_com(agente: CfgAgente) -> Config {
+    Config {
+        agente,
+        ..Config::default()
+    }
+}
+
 #[test]
 fn config_escolhe_agente_e_envelope() {
-    let p = da_config(&CfgAgente::default(), None).unwrap();
+    let p = da_config(&Config::default()).unwrap();
     assert_eq!(p.agente.nome(), "claude-code");
     assert_eq!(p.envelope.nome(), "ai-memory");
 
-    let p = da_config(
-        &CfgAgente {
-            tipo: "claude-code".into(),
-            envelope: "nenhum".into(),
-        },
-        None,
-    )
+    let p = da_config(&config_com(CfgAgente {
+        tipo: "claude-code".into(),
+        envelope: "nenhum".into(),
+    }))
     .unwrap();
     assert_eq!(p.envelope.nome(), "nenhum");
 }
 
 #[test]
 fn nome_desconhecido_falha_na_partida_dizendo_qual() {
-    let e = da_config(
-        &CfgAgente {
-            tipo: "codex".into(),
-            envelope: "ai-memory".into(),
-        },
-        None,
-    )
+    let e = da_config(&config_com(CfgAgente {
+        tipo: "codex".into(),
+        envelope: "ai-memory".into(),
+    }))
     .err()
     .expect("agente desconhecido");
     assert!(format!("{e:#}").contains("codex"), "{e:#}");
 
-    let e = da_config(
-        &CfgAgente {
-            tipo: "claude-code".into(),
-            envelope: "docker".into(),
-        },
-        None,
-    )
+    let e = da_config(&config_com(CfgAgente {
+        tipo: "claude-code".into(),
+        envelope: "docker".into(),
+    }))
     .err()
     .expect("envelope desconhecido");
     assert!(format!("{e:#}").contains("docker"), "{e:#}");
@@ -265,6 +263,57 @@ fn o_prompt_fala_do_chat_que_esta_em_uso_e_nao_de_um_fixo() {
         prompt.contains("NÃO renderiza Markdown"),
         "sem Markdown, a tabela tem de ir como imagem: {prompt}"
     );
+}
+
+#[test]
+fn sem_usuario_no_config_o_prompt_nao_inventa_nome() {
+    // Quem instala o projeto não é o autor: um nome fixo no prompt faria a sessão chamar a
+    // pessoa errada pelo nome, e o prompt de partida é a primeira coisa que ela lê.
+    let raiz = tempfile::tempdir().unwrap();
+    let cc = claude(raiz.path());
+    let (p, chat) = (projeto(), telegram());
+    let mut ped = pedido(&p, &chat);
+    let mut prompts = vec![cc.invocacao(&ped, ID, raiz.path()).unwrap().prompt.unwrap()];
+    ped.resume = Some(ID);
+    for retomada in [true, false] {
+        ped.retomada = retomada;
+        prompts.push(cc.invocacao(&ped, ID, raiz.path()).unwrap().prompt.unwrap());
+    }
+    for prompt in prompts {
+        assert!(!prompt.contains("Luka"), "nome fixo no prompt: {prompt}");
+        assert!(prompt.contains("o seu usuário"), "{prompt}");
+    }
+}
+
+#[test]
+fn o_nome_do_config_chega_ao_prompt_de_partida() {
+    let raiz = tempfile::tempdir().unwrap();
+    let cc = claude(raiz.path()).com_usuario(Some("Maria".into()));
+    let (p, chat) = (projeto(), telegram());
+    let prompt = cc
+        .invocacao(&pedido(&p, &chat), ID, raiz.path())
+        .unwrap()
+        .prompt
+        .unwrap();
+    assert!(prompt.contains("o seu usuário (Maria)"), "{prompt}");
+}
+
+#[test]
+fn da_config_leva_o_usuario_ate_o_agente() {
+    let raiz = tempfile::tempdir().unwrap();
+    let cfg = Config {
+        usuario: Some("Maria".into()),
+        ..Config::default()
+    };
+    let pecas = da_config(&cfg).unwrap();
+    let (p, chat) = (projeto(), telegram());
+    let prompt = pecas
+        .agente
+        .invocacao(&pedido(&p, &chat), ID, raiz.path())
+        .unwrap()
+        .prompt
+        .unwrap();
+    assert!(prompt.contains("(Maria)"), "{prompt}");
 }
 
 #[test]
