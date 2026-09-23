@@ -25,9 +25,38 @@ Nada disso depende de o agente resolver avisar alguém: quem fala é o hook.
 - `lukadispatch`: o CLI. É o binário dos hooks (`lukadispatch hook <evento>`), o `listen` que o
   Monitor consome e os comandos locais (`ls`, `kill`, `new`, `send`, `install`).
 - `lukadispatch-ask`: a janela GTK4 que aparece no PC quando há pergunta ou permissão.
+- `lukadispatch-mcp`: o proxy entre a sessão e cada servidor MCP, que traz o diálogo do servidor
+  para o celular.
 
 As sessões sobem como `ai-memory run claude` dentro de um tmux próprio, então continuam
 aparecendo na memória de longo prazo e dá para anexar no PC com `tmux attach -t ld-<projeto>-<id>`.
+
+Como o projeto é por dentro, por que cada coisa é como é e como trocar uma peça está em
+[`docs/`](docs/README.md).
+
+### Peças trocáveis
+
+O daemon fala com o mundo por portas (traits), e as implementações se escolhem no
+`config.toml`, sem recompilar:
+
+```toml
+frontend = "telegram"     # o aplicativo de chat; o modo offline usa o frontend nulo
+
+[agente]
+tipo = "claude-code"      # o agente de código das sessões
+envelope = "ai-memory"    # sobe como `ai-memory run --new <workstream> claude`; "nenhum" roda direto
+
+[transcricao]
+motor = "processo"        # qualquer programa local de voz para texto (ver abaixo)
+
+[arquivos]
+divisor = "7z"            # ou "rar": como arquivo grande demais é partido
+cortar_video = true       # vídeo é cortado por tempo antes de cair nos volumes
+```
+
+Mais uma porta, fixa, é onde a sessão roda (hoje, o tmux). Trocar o Telegram pelo WhatsApp, o
+Claude Code pelo Codex, o motor de voz por uma API ou o 7z por outro formato é implementar a trait
+correspondente; o passo a passo está em [`docs/portas.md`](docs/portas.md).
 
 ## Pré-requisitos
 
@@ -173,14 +202,15 @@ expira em `transcricao.guardar_audio_dias`.
 O motor é plugável e mora no `config.toml`, não no código, porque a escolha é do hardware. O padrão
 é o que ganhou o benchmark num Ryzen 5700U com Radeon Vega sem VRAM dedicada: whisper.cpp com
 `large-v3-turbo` quantizado em q5_0, no backend Vulkan (12,9% de erro por palavra em áudio real,
-~1 GB de memória). Trocar é editar `transcricao.comando`, `transcricao.modelo` e `transcricao.saida`
-— os marcadores são `{audio}` (WAV mono 16 kHz que o daemon prepara), `{modelo}` e `{saida}`. O tipo
+~1 GB de memória). Trocar é editar `transcricao.comando`, `transcricao.modelo` e `transcricao.saida`;
+os marcadores são `{audio}` (WAV mono 16 kHz que o daemon prepara), `{modelo}` e `{saida}`. O tipo
 `Transcricao` traz presets medidos para CPU e para o FastConformer-pt, que é 5x mais rápido e cabe
 em 417 MB, cobrando quase o dobro de erro em jargão e nome próprio.
 
 No sentido contrário, o agente **não chama ferramenta nenhuma**: ele escreve na resposta uma linha
 sozinha com `@arquivo:` seguido do caminho absoluto (e, se quiser, ` | legenda`). O hook `Stop`
-manda o arquivo antes do texto e tira a linha da mensagem. `@documento:` força documento quando os
+manda o arquivo na posição em que a linha estava, entre os trechos de texto, e tira a linha da
+mensagem. `@documento:` força documento quando os
 bytes exatos importam; sem isso, imagem até 10 MB vai como foto e aparece na conversa.
 
 Chave, credencial, token e `.env` não saem em claro: o prompt inicial manda a sessão cifrar para
@@ -192,7 +222,9 @@ Acima de 50 MB (o teto do Bot API) o arquivo não é recusado, e o corte depende
 **Vídeo é cortado por tempo** com `ffmpeg -c copy`, sem recodificar: cada trecho é um vídeo de
 verdade, vai como vídeo (com player) e toca sozinho no celular; remontar é opcional, com
 `ffmpeg -f concat`. **O resto vai em volumes de 45 MB do 7z**, que o ZArchiver ou o RAR remontam a
-partir do `.001` no celular, e `7z x nome.7z.001` no PC. Sem `ffmpeg`, ou quando o corte por tempo
+partir do `.001` no celular, e `7z x nome.7z.001` no PC (com `[arquivos] divisor = "rar"`, vão
+volumes de RAR). O teto vem do frontend: noutro aplicativo de chat, com outro limite, o corte
+acompanha. Sem `ffmpeg`, ou quando o corte por tempo
 falha, vídeo também cai nos volumes. O envio dividido sai em segundo plano, porque subir centenas
 de MB demora mais que o prazo do hook `Stop`; o teto é 20 partes.
 
@@ -289,9 +321,15 @@ lukadispatch send <id> "quanto é 2+2?"
 tmux attach -t ld-<projeto>-<id>     # para ver o que a sessão fez
 ```
 
-Em modo offline nenhum tópico é criado e nada é enviado; o resto funciona igual.
+Em modo offline o daemon usa o frontend nulo: as sessões ganham um canal de mentira
+(`nulo-<uuid>`) e nada é enviado a lugar nenhum; o resto funciona igual.
 
-`./ci.sh` roda fmt, clippy com `-D warnings`, os testes e o build release.
+Os fluxos do daemon (card de transcrição, guarda de pendência, envio em partes, fim de turno) têm
+testes em `crates/ld-daemon/tests/fluxos.rs`, que rodam o domínio inteiro contra um frontend em
+memória e dublês das outras portas, sem rede, sem tmux e sem modelo de voz.
+
+`./ci.sh` roda fmt, clippy com `-D warnings` (também com o crate compilado sem o Telegram, para
+garantir que o domínio não depende dele), os testes e o build release.
 
 ## Segurança
 
