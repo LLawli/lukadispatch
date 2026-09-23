@@ -49,24 +49,22 @@ pub fn dir_do_projeto(claude_dir: &Path, cwd: &str) -> PathBuf {
 /// que nunca foi sua.
 pub fn ultima_sessao(claude_dir: &Path, cwd: &str) -> Option<SessaoAnterior> {
     let dir = dir_do_projeto(claude_dir, cwd);
-    let mut candidatos: Vec<(i64, PathBuf)> = std::fs::read_dir(&dir)
+    // Ordena pelo mtime com a precisão inteira: em segundos, duas conversas do mesmo segundo
+    // empatam, e o empate fica na ordem do read_dir, que muda de um sistema de arquivos para outro.
+    let mut candidatos: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(&dir)
         .ok()?
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
-        .filter_map(|p| {
-            let quando = std::fs::metadata(&p)
-                .and_then(|m| m.modified())
-                .ok()?
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()?
-                .as_secs() as i64;
-            Some((quando, p))
-        })
+        .filter_map(|p| Some((std::fs::metadata(&p).and_then(|m| m.modified()).ok()?, p)))
         .collect();
     candidatos.sort_by_key(|(quando, _)| std::cmp::Reverse(*quando));
 
-    for (quando, caminho) in candidatos {
+    for (modificado, caminho) in candidatos {
+        let quando = modificado
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs() as i64;
         if e_sidechain(&caminho) {
             continue;
         }
@@ -508,9 +506,14 @@ mod tests {
             "subagente.jsonl",
             &[r#"{"type":"user","isSidechain":true,"message":{"content":"tarefa interna"}}"#],
         );
-        // Garante ordem de modificação previsível.
         let nova = transcript(&projeto, "nova.jsonl", &CONVERSA);
-        filetime_recente(&nova);
+        // Os três no mesmo segundo, só milissegundos entre eles, e a nova no meio da ordem
+        // alfabética: é o empate que, ordenado em segundos, dependia do sistema de arquivos.
+        let agora = std::time::SystemTime::now();
+        let ms = std::time::Duration::from_millis;
+        muda_mtime(&projeto.join("velha.jsonl"), agora);
+        muda_mtime(&projeto.join("subagente.jsonl"), agora + ms(10));
+        muda_mtime(&nova, agora + ms(5));
 
         let achada = ultima_sessao(dir.path(), "/tmp/x").unwrap();
         assert_eq!(achada.session_id, "nova");
@@ -530,10 +533,12 @@ mod tests {
         assert!(primeira_linha(&longo, 10).ends_with('…'));
     }
 
-    fn filetime_recente(p: &Path) {
-        // Reescreve para garantir mtime maior que o dos outros arquivos do teste.
-        let conteudo = std::fs::read(p).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        std::fs::write(p, conteudo).unwrap();
+    fn muda_mtime(p: &Path, quando: std::time::SystemTime) {
+        std::fs::File::options()
+            .write(true)
+            .open(p)
+            .unwrap()
+            .set_modified(quando)
+            .unwrap();
     }
 }
