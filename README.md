@@ -22,8 +22,8 @@ Nada disso depende de o agente resolver avisar alguém: quem fala é o hook.
 
 - `lukadispatchd`: o daemon. Fala com o Telegram, cria e mata as sessões em tmux, mantém o
   painel e serve o socket de controle.
-- `lukadispatch`: o CLI. É o binário dos hooks (`lukadispatch hook <evento>`), o `listen` que o
-  Monitor consome e os comandos locais (`ls`, `kill`, `new`, `send`, `install`).
+- `lukadispatch`: o CLI. É o binário dos hooks (`lukadispatch hook claude <evento>`), o
+  `listen` que o Monitor consome e os comandos locais (`ls`, `kill`, `new`, `send`, `install`).
 - `lukadispatch-ask`: a janela GTK4 que aparece no PC quando há pergunta ou permissão.
 - `lukadispatch-mcp`: o proxy entre a sessão e cada servidor MCP, que traz o diálogo do servidor
   para o celular.

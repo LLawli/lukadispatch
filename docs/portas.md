@@ -137,16 +137,19 @@ num tmux ld-<projeto>-<id>                              ← Hospedeiro (Tmux)
    linha `@arquivo:`, (c) nunca tentar "mandar mensagem" por conta própria. O que ele diz sobre
    o chat vem pronto em `pedido.chat` (`DescricaoDoChat`): não escreva o nome de plataforma
    nenhum fixo no prompt.
-2. **`prepara`**: instala os ganchos do agente apontando para o `lukadispatch hook`. Rode na
-   partida do daemon.
+2. **`prepara`**: instala os ganchos do agente apontando para `lukadispatch hook <agente>
+   <evento>`, com o nome do agente novo. Roda na partida do daemon.
 3. **`modos` e `valida_modo`**: os modos de permissão que o agente tem, e como o modo
    `perguntar` do lukadispatch se traduz para ele (no Claude Code, `dontAsk` mais o portão no
    `PreToolUse`).
 4. **Leituras** (`historico`, `resposta_do_turno`, `contexto`, `uso`...): o que der para ler da
    conversa gravada. O que não der, devolva vazio: o domínio segue sem histórico ou sem contador.
 5. **O lado de entrada fica no CLI**, não no daemon: os ganchos do agente chamam
-   `lukadispatch hook <evento>`, que traduz o payload dele para o protocolo neutro do socket
-   (`ld_core::proto`). Um agente novo ganha seu tradutor ali, produzindo as mesmas mensagens.
+   `lukadispatch hook <agente> <evento>`, e o tradutor daquele agente converte o payload dele
+   para o protocolo neutro do socket (`ld_core::proto`). Um agente novo é um módulo em
+   `crates/ld-cli/src/hook/` que implemente a trait `Ganchos` e uma linha em `hook::agentes`,
+   produzindo as mesmas mensagens que o `hook/claude.rs` produz. Sem agente na linha de comando
+   (`lukadispatch hook <evento>`), o CLI entende Claude Code: é a forma dos settings antigos.
 6. **Registre** o nome em `agente::da_config`.
 
 O que um agente precisa ter, porque não há como emular: receber mensagem no meio do turno (o

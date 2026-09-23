@@ -74,8 +74,8 @@ isso em `ai-memory run --new <workstream>`; `agente::escreve_partida` grava o sc
 
 **Da sessão para o celular.**
 
-1. Os hooks do Claude Code (`lukadispatch hook <evento>`) falam com o daemon pelo socket
-   unix. Nenhum hook fala com o chat.
+1. Os hooks do Claude Code (`lukadispatch hook claude <evento>`) falam com o daemon pelo
+   socket unix. Nenhum hook fala com o chat.
 2. `PreToolUse` e `PostToolUse` viram a mensagem de status do canal ("⚙️ Bash: cargo test"),
    editada no lugar e com debounce ([decisoes/0010](decisoes/0010-painel-e-status.md)).
 3. `Stop` entrega a resposta do turno, se alguém a pediu

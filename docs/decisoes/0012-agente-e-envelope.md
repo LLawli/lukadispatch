@@ -48,11 +48,11 @@ envelope = "ai-memory"   # ou "nenhum"
 
 - As leituras continuam em `ld_core` (o CLI também as usa); o `ClaudeCode` as reúne atrás da
   trait, com os caminhos explícitos em `Locais`, o que permite testá-lo num tempdir.
-- **O lado de entrada do agente não é uma trait do daemon.** Quem traduz o que o Claude Code
-  emite (os ganchos) para o protocolo do socket é o `lukadispatch hook <evento>`, no `ld-cli`, e o
-  protocolo (`ld_core::proto`) é neutro. Um agente novo precisa de um tradutor equivalente no
-  CLI, que produza as mesmas mensagens (`RegisterSession`, `SessionEvent`, `StopReport`, pergunta
-  e permissão).
+- **O lado de entrada do agente não é uma trait do daemon, e sim do CLI.** Quem traduz o que o
+  agente emite (os ganchos) para o protocolo do socket é `lukadispatch hook <agente> <evento>`,
+  com um tradutor por agente atrás da trait `Ganchos` (`crates/ld-cli/src/hook/`), e o protocolo
+  (`ld_core::proto`) é neutro. Os ganchos gerados escrevem `hook claude <evento>`; sem agente,
+  `hook <evento>` continua sendo o Claude Code, para os settings já instalados não quebrarem.
 - **O que um agente novo precisa ter**, porque o lukadispatch depende disso e não há como
   emular: um jeito de receber mensagem no meio do turno (o Claude Code tem a ferramenta
   `Monitor`, que lê o `lukadispatch listen`), ganchos de fim de turno e de ferramenta, e um

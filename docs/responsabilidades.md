@@ -73,7 +73,8 @@ traits; nenhum adaptador depende do domínio, e o domínio não importa nenhum a
 | Módulo | Responsável por |
 |---|---|
 | `main` | os subcomandos, com parser feito à mão (dependência de CLI pesaria em cada hook) |
-| `hook` | um subcomando por evento do Claude Code. Todos saem com 0, menos o `stop`, que sai com 2 para o `asyncRewake` acordar a sessão quando o monitor precisa voltar |
+| `hook` | `hook [agente] <evento>`: escolhe o tradutor de ganchos do agente (trait `Ganchos`; sem agente, Claude Code) e nunca trava a sessão por agente desconhecido ou entrada ilegível |
+| `hook::claude` | os ganchos do Claude Code: um evento por subcomando, traduzido para o protocolo do socket. Todos saem com 0, menos o `stop`, que sai com 2 para o `asyncRewake` acordar a sessão quando o monitor precisa voltar |
 | `ask` | os hooks que perguntam (pergunta e permissão), traduzindo a resposta para o formato do Claude Code |
 | `listen` | o fluxo de entrada que o `Monitor` da sessão lê: uma linha por mensagem, com flush |
 | `client` | o cliente síncrono do socket, com prazo em toda chamada. Qualquer falha vira "não decidi", nunca trava a sessão |
