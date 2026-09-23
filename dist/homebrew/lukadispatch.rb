@@ -31,16 +31,11 @@ class Lukadispatch < Formula
 
   def caveats
     <<~EOS
-      O daemon roda como serviço de usuário do systemd:
-        mkdir -p ~/.config/systemd/user ~/.config/lukadispatch
+      O daemon roda como serviço de usuário do systemd. Ligue a unit e rode o setup, que cria o
+      bot, o grupo e o config conversando:
+        mkdir -p ~/.config/systemd/user
         ln -sf #{opt_pkgshare}/lukadispatch.service ~/.config/systemd/user/
-        cp -n #{opt_pkgshare}/config.example.toml ~/.config/lukadispatch/config.toml
-        [ -e ~/.config/lukadispatch/.env ] || install -m600 #{opt_pkgshare}/env.example ~/.config/lukadispatch/.env
-
-      Preencha o token e o chat_id no .env e o [telegram] no config.toml (o README explica
-      como criar o bot), e então:
-        lukadispatch install --global
-        systemctl --user enable --now lukadispatch
+        lukadispatch setup
     EOS
   end
 

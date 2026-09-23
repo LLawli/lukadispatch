@@ -1,6 +1,6 @@
 #!/bin/sh
-# Instala o lukadispatch: os binários em ~/.local/bin, o serviço de usuário do systemd e, se
-# ainda não existirem, o .env e o config.toml de exemplo em ~/.config/lukadispatch.
+# Instala o lukadispatch: os binários em ~/.local/bin e o serviço de usuário do systemd. Numa
+# instalação nova, emenda no `lukadispatch setup`, que cria o bot, o grupo e o config.
 #
 #   curl -fsSL https://raw.githubusercontent.com/LLawli/lukadispatch/master/install.sh | sh
 #
@@ -8,8 +8,8 @@
 #   LUKADISPATCH_BIN=/outro/dir sh install.sh  outro diretório para os binários
 #   sh install.sh --de <dir>                   de um pacote já extraído (o bin/deploy usa isto)
 #
-# Rodar de novo atualiza: os binários são trocados, o config existente não é tocado e, se o
-# serviço estiver rodando, ele é reiniciado com a versão nova.
+# Rodar de novo atualiza: os binários são trocados, o config não é tocado e, se o serviço estiver
+# rodando, ele é reiniciado com a versão nova.
 set -eu
 
 REPO=LLawli/lukadispatch
@@ -86,48 +86,27 @@ else
 fi
 diz "serviço em $UNIT_DIR/lukadispatch.service"
 
-mkdir -p "$CONF_DIR"
-falta_configurar=""
-if [ ! -e "$CONF_DIR/.env" ]; then
-  # O .env guarda o token do bot: nasce legível só pelo dono.
-  (umask 077 && cp "$origem/env.example" "$CONF_DIR/.env")
-  falta_configurar=1
-  diz "criado $CONF_DIR/.env"
-fi
-if [ ! -e "$CONF_DIR/config.toml" ]; then
-  cp "$origem/config.example.toml" "$CONF_DIR/config.toml"
-  falta_configurar=1
-  diz "criado $CONF_DIR/config.toml"
-fi
-
-for dep in tmux claude; do
-  command -v "$dep" >/dev/null 2>&1 || avisa "$dep não está no PATH, e as sessões precisam dele"
-done
-command -v ai-memory >/dev/null 2>&1 ||
-  avisa "ai-memory não está no PATH; sem ele, use envelope = \"nenhum\" em [agente] no config.toml"
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *) avisa "$BIN_DIR não está no PATH; ponha para usar o comando lukadispatch" ;;
 esac
 
-ativo=""
-if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
-  systemctl --user daemon-reload
-  if systemctl --user is-active --quiet lukadispatch; then
-    systemctl --user restart lukadispatch
-    ativo=1
-    diz "serviço reiniciado com a versão nova"
+# Com o token no .env, isto é uma atualização: basta o serviço subir com os binários novos.
+if grep -q '^LUKADISPATCH_TELEGRAM_TOKEN=..*' "$CONF_DIR/.env" 2>/dev/null; then
+  if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+    systemctl --user daemon-reload
+    if systemctl --user is-active --quiet lukadispatch; then
+      systemctl --user restart lukadispatch
+      diz "serviço reiniciado com a versão nova"
+    fi
   fi
+  exit 0
 fi
 
-[ -n "$ativo" ] && [ -z "$falta_configurar" ] && exit 0
-
-cat <<EOF
-
-Falta pouco:
-  1. Crie o bot e o grupo (o README explica em cinco passos) e ponha o token
-     em $CONF_DIR/.env
-  2. Ajuste [telegram] em $CONF_DIR/config.toml: chat_id e allowed_user_ids
-  3. lukadispatch install --global        (os hooks do Claude Code; desfaz com uninstall)
-  4. systemctl --user enable --now lukadispatch
-EOF
+# Instalação nova: o setup pergunta o que falta. Com `curl | sh` o stdin é o próprio script,
+# então a conversa vai pelo /dev/tty, quando há um terminal para conversar.
+if (exec </dev/tty) 2>/dev/null; then
+  diz "agora o setup: o bot, o grupo e as preferências"
+  exec "$BIN_DIR/lukadispatch" setup </dev/tty
+fi
+diz "falta configurar: rode lukadispatch setup"
