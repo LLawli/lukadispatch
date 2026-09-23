@@ -10,7 +10,7 @@ O daemon fala com o mundo por traits. Cada uma tem implementações prontas, esc
 | envelope do agente | `agente::Envelope` | `ai-memory`, `nenhum` | `[agente] envelope = "ai-memory"` |
 | voz para texto | `transcritor::Transcritor` | `processo` (qualquer programa local) | `[transcricao] motor = "processo"` |
 | arquivo grande | `divisor::Divisor` | `video` (ffmpeg), `7z`, `rar` | `[arquivos] divisor = "7z"`, `cortar_video = true` |
-| onde a sessão roda | `sessions::Hospedeiro` | `tmux` | fixo em `main.rs` |
+| onde a sessão roda | `sessions::Hospedeiro` | `tmux` | `hospedeiro = "tmux"` |
 
 Elas são montadas em `main.rs` e chegam ao `App` num `Portas`:
 
@@ -247,5 +247,5 @@ Duas coisas que qualquer hospedeiro tem de preservar, porque o resto do sistema 
 - **O ambiente da sessão carrega `LD_SESSION` e `LUKADISPATCH_SOCKET`.** É assim que os hooks,
   rodando dentro dela, acham o daemon.
 
-Hoje o hospedeiro é fixo em `main.rs`. Um segundo hospedeiro real ganharia uma chave no config,
-como as outras portas.
+O hospedeiro sai da chave `hospedeiro` do config, e um nome novo se registra em
+`sessions::da_config` e na lista `HOSPEDEIROS`.

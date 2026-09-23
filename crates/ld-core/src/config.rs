@@ -19,6 +19,9 @@ pub struct Config {
     /// `Frontend` do daemon; hoje existe `"telegram"`. O modo offline (`LUKADISPATCH_OFFLINE`)
     /// passa por cima disto e usa o frontend nulo.
     pub frontend: String,
+    /// Onde cada sessão roda. Cada valor corresponde a uma implementação da trait `Hospedeiro`
+    /// do daemon; hoje existe `"tmux"`.
+    pub hospedeiro: String,
     /// Qual agente de código roda nas sessões, e dentro de que envelope.
     pub agente: Agente,
     pub telegram: Telegram,
@@ -64,6 +67,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             frontend: "telegram".into(),
+            hospedeiro: "tmux".into(),
             agente: Agente::default(),
             telegram: Telegram::default(),
             scan: Scan::default(),

@@ -9,6 +9,7 @@
 use anyhow::{Context, Result, bail};
 use ld_core::config::Project;
 use ld_core::paths;
+use std::sync::Arc;
 use tokio::process::Command;
 
 use crate::agente::Partida;
@@ -213,9 +214,31 @@ impl Hospedeiro for Tmux {
     }
 }
 
+/// Os hospedeiros que existem, pelo nome que o config e o `setup --session` usam.
+pub const HOSPEDEIROS: &[&str] = &["tmux"];
+
+/// O hospedeiro que o config pede. Nome desconhecido é erro na partida do daemon.
+pub fn da_config(nome: &str) -> Result<Arc<dyn Hospedeiro>> {
+    match nome {
+        "tmux" => Ok(Arc::new(Tmux)),
+        outro => bail!(
+            "hospedeiro desconhecido: {outro:?} (disponíveis: {})",
+            HOSPEDEIROS.join(", ")
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_escolhe_o_hospedeiro_pelo_nome() {
+        assert!(da_config("tmux").is_ok());
+        let e = da_config("zellij").err().expect("hospedeiro desconhecido");
+        let msg = format!("{e:#}");
+        assert!(msg.contains("zellij") && msg.contains("tmux"), "{msg}");
+    }
 
     #[test]
     fn nome_de_tmux_e_previsivel_e_unico() {

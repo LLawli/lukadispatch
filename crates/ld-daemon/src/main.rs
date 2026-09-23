@@ -21,8 +21,7 @@ use ld_daemon::app::{App, Portas};
 use ld_daemon::divisor::Divisores;
 use ld_daemon::frontend::Frontend;
 use ld_daemon::frontend::nulo::Nulo;
-use ld_daemon::sessions::Tmux;
-use ld_daemon::{roteador, socket, transcritor};
+use ld_daemon::{roteador, sessions, socket, transcritor};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -60,11 +59,13 @@ async fn main() -> Result<()> {
     );
 
     let divisores = Divisores::da_config(&cfg.arquivos)?;
+    let hospedeiro = sessions::da_config(&cfg.hospedeiro)?;
     info!(divisores = ?divisores.nomes(), "divisores configurados");
 
     info!(
         agente = pecas.agente.nome(),
         envelope = pecas.envelope.nome(),
+        hospedeiro = %cfg.hospedeiro,
         "agente configurado"
     );
 
@@ -77,7 +78,7 @@ async fn main() -> Result<()> {
             envelope: pecas.envelope,
             transcritor,
             divisores,
-            hospedeiro: Arc::new(Tmux),
+            hospedeiro,
         },
     ));
 
