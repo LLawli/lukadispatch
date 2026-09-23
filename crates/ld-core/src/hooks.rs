@@ -409,7 +409,7 @@ mod tests {
 
         let quebrado = dir.path().join("settings.json");
         std::fs::write(&quebrado, "{\"hooks\": {},}").unwrap();
-        let e = le_settings(&quebrado).err().expect("json inválido");
+        let e = le_settings(&quebrado).expect_err("json inválido");
         assert!(format!("{e:#}").contains("settings.json"), "{e:#}");
     }
 
