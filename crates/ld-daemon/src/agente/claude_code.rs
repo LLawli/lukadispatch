@@ -340,6 +340,19 @@ impl Agente for ClaudeCode {
         }
 
         let (achado, modelos) = ld_core::models::catalog_auto(preferido);
+        // O binário lido vai para o log: quando o `/model` vier vazio, é a primeira coisa que se
+        // quer saber, e sem isto só dá para adivinhar qual `claude` foi varrido.
+        match &achado {
+            Some(bin) => tracing::info!(
+                quantos = modelos.len(),
+                binario = %bin.display(),
+                "catálogo de modelos lido"
+            ),
+            None => tracing::warn!(
+                "não achei um binário do Claude Code com modelos dentro; aponte `claude_binary` \
+                 no config.toml"
+            ),
+        }
         let data = achado
             .and_then(|b| std::fs::metadata(b).ok())
             .and_then(|m| m.modified().ok())
