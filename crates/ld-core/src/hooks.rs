@@ -32,11 +32,18 @@ pub const GATE_TOOLS: &str = "";
 /// O teto existe só para a pendência não viver para sempre.
 pub const ASK_TIMEOUT_SECS: u64 = 6 * 60 * 60;
 
+/// O agente destes ganchos, primeiro argumento de `lukadispatch hook <agente> <evento>`.
+///
+/// O CLI aceita `hook <evento>` sem agente (é o Claude Code), e é assim que os settings de
+/// versões anteriores estão escritos. Os ganchos gerados daqui em diante dizem o agente, para um
+/// segundo agente entrar sem ambiguidade.
+pub const AGENTE: &str = "claude";
+
 fn async_hook(cli: &str, sub: &str) -> Value {
     json!({
         "type": "command",
         "command": cli,
-        "args": ["hook", sub],
+        "args": ["hook", AGENTE, sub],
         "async": true
     })
 }
@@ -45,7 +52,7 @@ fn blocking_hook(cli: &str, sub: &str, timeout: u64, status: &str) -> Value {
     json!({
         "type": "command",
         "command": cli,
-        "args": ["hook", sub],
+        "args": ["hook", AGENTE, sub],
         "timeout": timeout,
         "statusMessage": status
     })
@@ -85,7 +92,7 @@ pub fn bot_settings(cli: &str) -> Value {
         "hooks": [ {
             "type": "command",
             "command": cli,
-            "args": ["hook", "stop"],
+            "args": ["hook", AGENTE, "stop"],
             "asyncRewake": true,
             "timeout": 120
         } ]
@@ -97,7 +104,7 @@ pub fn bot_settings(cli: &str) -> Value {
     // O portão de permissão mora no `PreToolUse`, e não no `PermissionRequest`, por medição:
     // a decisão do `PermissionRequest` é ignorada em todos os modos testados (o prompt do
     // terminal aparece assim mesmo e a sessão fica esperando teclado), enquanto a do `PreToolUse`
-    // é honrada até no modo mais estrito. Ver `docs/permissoes.md`.
+    // é honrada até no modo mais estrito. Ver `docs/decisoes/0006-permissoes.md`.
     //
     // O matcher é a lista do que vale perguntar. Ferramenta de leitura não entra: card a cada
     // `Read` tornaria o celular inútil, e negar leitura não protege nada.
@@ -229,8 +236,8 @@ mod tests {
         assert_eq!(h["PreToolUse"][0]["hooks"][0]["timeout"], ASK_TIMEOUT_SECS);
         // O portão de permissão é o segundo grupo, e mora no PreToolUse porque a decisão do
         // PermissionRequest é ignorada (medido em todos os modos).
-        assert_eq!(h["PreToolUse"][1]["hooks"][0]["args"][1], "permission");
-        assert_eq!(h["PreToolUse"][2]["hooks"][0]["args"][1], "tool-start");
+        assert_eq!(h["PreToolUse"][1]["hooks"][0]["args"][2], "permission");
+        assert_eq!(h["PreToolUse"][2]["hooks"][0]["args"][2], "tool-start");
     }
 
     #[test]
@@ -265,6 +272,46 @@ mod tests {
         let hook = &s["hooks"]["SessionStart"][0]["hooks"][0];
         assert_eq!(hook["command"], "/usr/bin/lukadispatch");
         assert_eq!(hook["args"][0], "hook");
+    }
+
+    #[test]
+    fn todo_gancho_diz_o_agente_antes_do_evento() {
+        // O CLI aceita `hook <evento>` sem agente, mas o que se gera daqui em diante diz qual é:
+        // é o que deixa um segundo agente entrar sem ambiguidade.
+        for settings in [
+            bot_settings("/usr/bin/lukadispatch"),
+            json!({"hooks": telemetry_hooks("/usr/bin/lukadispatch")}),
+        ] {
+            let ganchos: Vec<&Value> = settings["hooks"]
+                .as_object()
+                .unwrap()
+                .values()
+                .flat_map(|g| g.as_array().into_iter().flatten())
+                .flat_map(|g| g["hooks"].as_array().into_iter().flatten())
+                .collect();
+            assert!(ganchos.len() > 5, "{settings}");
+            for h in ganchos {
+                let args = h["args"].as_array().unwrap();
+                assert_eq!(args.len(), 3, "{h}");
+                assert_eq!(
+                    (args[0].as_str(), args[1].as_str()),
+                    (Some("hook"), Some("claude"))
+                );
+                assert!(!args[2].as_str().unwrap().is_empty(), "{h}");
+            }
+        }
+    }
+
+    #[test]
+    fn desinstalar_tira_os_ganchos_da_forma_antiga_e_da_nova() {
+        let mut s = json!({"hooks": {
+            "Stop": [{"hooks": [
+                {"type": "command", "command": "/usr/bin/lukadispatch", "args": ["hook", "stop"]},
+                {"type": "command", "command": "/usr/bin/lukadispatch", "args": ["hook", "claude", "stop"]}
+            ]}]
+        }});
+        strip(&mut s);
+        assert!(s.get("hooks").is_none(), "sobrou gancho nosso: {s}");
     }
 
     fn settings_do_usuario() -> Value {

@@ -17,8 +17,9 @@ use ld_core::proto::{Request, Response};
 const USO: &str = "\
 lukadispatch
 
-  listen --session <uuid>   fluxo de mensagens do Telegram (é o que o Monitor da sessão lê)
-  hook <evento>             ponte de hook do Claude Code (lê o evento no stdin)
+  listen --session <uuid>   fluxo de mensagens do chat (é o que o Monitor da sessão lê)
+  hook [agente] <evento>    ponte dos ganchos do agente (lê o evento no stdin); sem agente,
+                            é o Claude Code, o único por enquanto (`hook claude <evento>`)
   ls                        sessões vivas
   models                    catálogo de modelos lido do binário do Claude Code
   kill <id>                 fecha uma sessão
@@ -40,7 +41,7 @@ fn main() -> ExitCode {
 
     let codigo = match cmd {
         "listen" => listen::run(valor(&args, "--session").as_deref()),
-        "hook" => hook::run(args.get(1).map(String::as_str).unwrap_or("")),
+        "hook" => hook::run(args.get(1..).unwrap_or_default()),
         "ls" => ls(),
         "models" | "modelos" => modelos(),
         "kill" => kill(args.get(1).map(String::as_str)),

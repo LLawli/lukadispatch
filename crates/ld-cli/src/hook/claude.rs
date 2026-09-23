@@ -1,29 +1,44 @@
-//! Os hooks. Um binário só, um subcomando por evento.
+//! Os ganchos do Claude Code: `lukadispatch hook claude <evento>` (ou só `hook <evento>`).
 //!
-//! Todos seguem a mesma regra: leem o JSON do evento no stdin, falam com o daemon e **saem com
-//! 0**. A única exceção é o `stop`, que sai com 2 de propósito quando o monitor precisa voltar,
-//! porque é assim que o `asyncRewake` acorda o Claude.
+//! Traduz o JSON que o Claude Code manda em cada gancho para o protocolo neutro do socket
+//! (`ld_core::proto`). É o lado de entrada da porta do agente: o daemon não sabe o formato do
+//! payload do Claude Code, só recebe `RegisterSession`, `SessionEvent`, `StopReport`, pergunta e
+//! permissão.
+//!
+//! Todos seguem a mesma regra: falam com o daemon e **saem com 0**. A única exceção é o `stop`,
+//! que sai com 2 de propósito quando o monitor precisa voltar, porque é assim que o
+//! `asyncRewake` acorda o Claude.
 //!
 //! Nada aqui imprime no stdout: em hook de decisão, stdout é canal de protocolo, e sujeira lá
 //! vira comportamento estranho na sessão.
 
-use std::io::Read;
 use std::time::Duration;
 
 use ld_core::labels::label_for_tool;
 use ld_core::proto::{EventKind, RegisterSession, Request, Response, SessionEvent, StopReport};
 use serde_json::Value;
 
+use super::Ganchos;
 use crate::client;
 
-/// O `stop` manda a resposta final para o Telegram, então espera a ida e volta da API. Ele roda
+/// O `stop` manda a resposta final para o chat, então espera a ida e volta da API. Ele roda
 /// em `asyncRewake`, fora do caminho do turno, então essa espera não atrasa você.
 const PRAZO_STOP: Duration = Duration::from_secs(60);
 
-pub fn run(evento: &str) -> i32 {
-    let Some(ev) = ler_evento() else {
-        return 0; // stdin vazio ou JSON quebrado: não é problema do Claude.
-    };
+/// O Claude Code como fonte de ganchos.
+pub struct Claude;
+
+impl Ganchos for Claude {
+    fn nome(&self) -> &'static str {
+        "claude"
+    }
+
+    fn trata(&self, evento: &str, ev: Value) -> i32 {
+        trata(evento, ev)
+    }
+}
+
+fn trata(evento: &str, ev: Value) -> i32 {
     let Some(session_id) = texto(&ev, "session_id") else {
         return 0;
     };
@@ -169,18 +184,12 @@ fn stop(ev: &Value, session_id: String) -> i32 {
 
     // stderr, e não stdout: é o que o asyncRewake mostra ao Claude como lembrete.
     eprintln!(
-        "O canal do Telegram desta sessão está sem monitor armado, então mensagens novas não \
+        "O canal de mensagens desta sessão está sem monitor armado, então mensagens novas não \
          chegam até você. Arme-o agora: chame ToolSearch com query \"select:Monitor\" e depois \
-         Monitor com command \"{cmd}\", description \"mensagens do Telegram\" e timeout_ms \
+         Monitor com command \"{cmd}\", description \"mensagens do chat\" e timeout_ms \
          1800000. Faça isso antes de qualquer outra coisa e não responda mais nada depois."
     );
     2
-}
-
-fn ler_evento() -> Option<Value> {
-    let mut bruto = String::new();
-    std::io::stdin().read_to_string(&mut bruto).ok()?;
-    serde_json::from_str(&bruto).ok()
 }
 
 fn texto(v: &Value, chave: &str) -> Option<String> {
