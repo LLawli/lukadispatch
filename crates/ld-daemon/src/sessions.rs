@@ -46,6 +46,14 @@ pub fn tmux_name(projeto: &str, session_id: &str) -> String {
 pub async fn launch(partida: &Partida, projeto: &Project) -> Result<Launched> {
     let tmux = tmux_name(&projeto.name, &partida.session_id);
 
+    // A catraca: a sessão sobe num invólucro que espera este arquivo antes de rodar o script.
+    // Sem ela, um script que morre em milissegundos some antes de o espelho abaixo ser ligado,
+    // e o erro chega sem o motivo, que é justamente o que o espelho existe para guardar. O teto
+    // de ~10 s é para o caso de este processo morrer entre subir a sessão e liberá-la.
+    let liberado = partida.log.with_extension("liberado");
+    let _ = std::fs::remove_file(&liberado);
+    const INVOLUCRO: &str = r#"i=0; while [ ! -e "$1" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i+1)); done; exec bash "$0""#;
+
     let saida = Command::new("tmux")
         .args([
             "new-session",
@@ -61,9 +69,12 @@ pub async fn launch(partida: &Partida, projeto: &Project) -> Result<Launched> {
             // caminho vai explícito em vez de depender do que ele herdou.
             "-e",
             &format!("LUKADISPATCH_SOCKET={}", paths::socket().display()),
-            "bash",
+            "sh",
+            "-c",
+            INVOLUCRO,
         ])
         .arg(&partida.script)
+        .arg(&liberado)
         .output()
         .await
         .context("chamando tmux (ele está instalado?)")?;
@@ -89,6 +100,8 @@ pub async fn launch(partida: &Partida, projeto: &Project) -> Result<Launched> {
         .arg(format!("cat >> {}", partida.log.display()))
         .output()
         .await;
+    std::fs::write(&liberado, b"")
+        .with_context(|| format!("liberando a partida em {}", liberado.display()))?;
 
     // Morrer logo depois de subir é o caso comum de erro (workstream ocupado, diálogo de
     // confiança, projeto inexistente), e é justamente o que passaria por "deu certo".
@@ -96,6 +109,7 @@ pub async fn launch(partida: &Partida, projeto: &Project) -> Result<Launched> {
     if !has_session(&tmux).await {
         bail!("a sessão morreu ao subir: {}", primeiro_erro(&partida.log));
     }
+    let _ = std::fs::remove_file(&liberado);
 
     Ok(Launched {
         session_id: partida.session_id.clone(),
@@ -335,7 +349,13 @@ mod testes_hospedeiro {
             "e5f6a7b8-morre",
         );
         let e = Tmux.lanca(&partida, &projeto).await.unwrap_err();
-        assert!(format!("{e:#}").contains("morreu"), "{e:#}");
+        let msg = format!("{e:#}");
+        // O motivo tem de estar lá: um script que morre em milissegundos já sumiu antes de o
+        // espelho começar, se o hospedeiro não segurar a partida até ele estar ligado.
+        assert!(
+            msg.contains("morreu") && msg.contains("workstream ocupado"),
+            "{msg}"
+        );
     }
 
     #[tokio::test]
