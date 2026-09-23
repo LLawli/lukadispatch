@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Instala nesta máquina o que está no checkout, e reinicia o serviço se ele estiver rodando.
+#
+# Compila, monta o pacote com o mesmo dist/empacota da release e passa pelo mesmo install.sh
+# de quem instala pela internet: o caminho que o deploy exercita é o que o usuário usa.
+#
+# Cuidado ao rodar de dentro de uma sessão do bot: o restart no meio de um turno perde a marca de
+# pedido daquele turno, e a resposta dele não chega ao chat (docs/armadilhas.md).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+echo "==> compilando"
+cargo build --workspace --release --locked
+
+# Dentro de target/, que já mora no disco de builds: nada de pacote em /tmp.
+pacote=target/pacote
+rm -rf "$pacote"
+dist/empacota target/release "$pacote"
+
+sh install.sh --de "$pacote"
