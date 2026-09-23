@@ -142,9 +142,13 @@ saídas:
 - **Descartar**: some sem deixar rastro, e a sessão nunca soube que houve áudio.
 - **Responder ao card** com a correção: a transcrição vai junto com o que você escreveu, marcada
   como tal, e a sessão sabe que a versão escrita é a que vale. É para o caso de "está quase certo,
-  só essa palavra" — reescrever a frase inteira anularia o ganho de ter falado. Exige responder
-  (reply) ao card: texto solto continua sendo mensagem comum, então dá para falar de outro assunto
-  enquanto uma transcrição espera.
+  só essa palavra": reescrever a frase inteira anularia o ganho de ter falado. Exige responder
+  (reply) ao card.
+
+Enquanto houver um card esperando você (transcrição, pergunta ou permissão), o tópico só aceita a
+resposta a ele e comandos. Texto solto, ou resposta a outra mensagem qualquer, é apagado e volta
+como aviso com o que você tinha escrito: seria um pedido novo por cima de uma pergunta que a sessão
+ainda não pôde usar.
 
 O card responde ao áudio que o gerou, então a seta do Telegram diz de qual voz ele saiu. Resolvido,
 ele perde os botões e vira o registro do que a sessão recebeu (`Transcrição` e, quando houve,
