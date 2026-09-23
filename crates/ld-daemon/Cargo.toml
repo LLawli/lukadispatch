@@ -32,7 +32,9 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 async-trait.workspace = true
 
-teloxide = { version = "0.17", optional = true }
+# rustls no lugar do native-tls padrão: o binário da release roda em distros com libssl de
+# versões diferentes, e o OpenSSL dinâmico amarraria o tarball à da máquina que compilou.
+teloxide = { version = "0.17", optional = true, default-features = false, features = ["rustls", "ctrlc_handler"] }
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "process", "signal", "fs"] }
 
 tempfile = "3"
