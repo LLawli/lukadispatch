@@ -30,6 +30,9 @@ lukadispatch
                             não precisa do --session: ela já tem LD_SESSION no ambiente)
   model <id> <modelo>       troca o modelo reiniciando com o contexto inteiro
   effort <id> <nível>       idem para o esforço (low, medium, high, xhigh, max)
+  setup [--frontend telegram] [--agent claude-code] [--session tmux] [--envelope ai-memory]
+                            configura tudo conversando: o bot, o grupo, o config, os hooks e o
+                            serviço (os padrões são os que existem hoje; --help lista)
   install [--global]        escreve os hooks; --global acrescenta a telemetria ao settings do
                             Claude Code, para as suas sessões de terminal entrarem no painel
   uninstall                 remove os hooks do settings do Claude Code
@@ -64,6 +67,7 @@ fn main() -> ExitCode {
                 .collect();
             new(nome.join(" "), continuar)
         }
+        "setup" => setup(&args[1..]),
         "install" => install(args.iter().any(|a| a == "--global")),
         "uninstall" => uninstall(),
         "-h" | "--help" | "help" | "" => {
@@ -317,6 +321,20 @@ fn trocar(qual: &str, id: Option<&str>, valor: Option<&str>) -> i32 {
 /// A separação é o ponto: o global leva **só** telemetria. Uma sessão sua de terminal entra no
 /// painel, mas continua com o menu nativo de pergunta e o fluxo de permissão normal. Sequestrar
 /// isso numa sessão em que você já está na frente do teclado seria pior que não ter painel.
+/// O setup mora no daemon, que é quem conhece o Telegram. Aqui só se troca de processo, para o
+/// terminal (e o Ctrl+C) passar direto para ele.
+fn setup(args: &[String]) -> i32 {
+    use std::os::unix::process::CommandExt;
+
+    let daemon = paths::daemon();
+    let erro = std::process::Command::new(&daemon)
+        .arg("setup")
+        .args(args)
+        .exec();
+    eprintln!("não consegui rodar {daemon} setup: {erro}");
+    1
+}
+
 fn install(global: bool) -> i32 {
     let cli = paths::cli();
 

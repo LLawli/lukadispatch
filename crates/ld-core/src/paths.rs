@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-fn home() -> PathBuf {
+pub fn home() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").expect("HOME não definido"))
 }
 
@@ -91,6 +91,11 @@ fn vizinho(nome: &str) -> String {
         }
     }
     nome.to_string()
+}
+
+/// Caminho do daemon, ao lado dos outros binários. É por ele que o `lukadispatch setup` passa.
+pub fn daemon() -> String {
+    vizinho("lukadispatchd")
 }
 
 /// Caminho do proxy de MCP, ao lado dos outros binários.

@@ -21,10 +21,21 @@ use ld_daemon::app::{App, Portas};
 use ld_daemon::divisor::Divisores;
 use ld_daemon::frontend::Frontend;
 use ld_daemon::frontend::nulo::Nulo;
-use ld_daemon::{roteador, sessions, socket, transcritor};
+use ld_daemon::{roteador, sessions, setup, socket, transcritor};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("setup") {
+        return match setup::le_argumentos(&args[1..])? {
+            setup::Pedido::Ajuda => {
+                println!("{}", setup::AJUDA);
+                Ok(())
+            }
+            setup::Pedido::Setup(sel) => setup::roda(sel).await,
+        };
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),

@@ -242,6 +242,12 @@ pub fn workstream(session_id: &str) -> String {
     format!("lukadispatch-{}-{agora}", &session_id[..8])
 }
 
+/// Os agentes que existem, pelo nome que o config (`[agente] tipo`) e o `setup --agent` usam.
+pub const AGENTES: &[&str] = &["claude-code"];
+
+/// Os envelopes que existem, pelo nome de `[agente] envelope` e do `setup --envelope`.
+pub const ENVELOPES: &[&str] = &["ai-memory", "nenhum"];
+
 /// O agente e o envelope que o config pede. Nome desconhecido é erro na partida do daemon.
 pub fn da_config(config: &Config) -> Result<Pecas> {
     let cfg = &config.agente;
@@ -253,12 +259,18 @@ pub fn da_config(config: &Config) -> Result<Pecas> {
             )
             .com_usuario(config.usuario.clone()),
         ),
-        outro => anyhow::bail!("agente desconhecido: {outro:?} (disponíveis: claude-code)"),
+        outro => anyhow::bail!(
+            "agente desconhecido: {outro:?} (disponíveis: {})",
+            AGENTES.join(", ")
+        ),
     };
     let envelope: Arc<dyn Envelope> = match cfg.envelope.as_str() {
         "ai-memory" => Arc::new(AiMemory),
         "nenhum" => Arc::new(Direto),
-        outro => anyhow::bail!("envelope desconhecido: {outro:?} (disponíveis: ai-memory, nenhum)"),
+        outro => anyhow::bail!(
+            "envelope desconhecido: {outro:?} (disponíveis: {})",
+            ENVELOPES.join(", ")
+        ),
     };
     Ok(Pecas { agente, envelope })
 }

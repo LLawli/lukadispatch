@@ -15,6 +15,7 @@ pub mod hub;
 pub mod panel;
 pub mod roteador;
 pub mod sessions;
+pub mod setup;
 pub mod socket;
 pub mod status;
 pub mod transcritor;

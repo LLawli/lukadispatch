@@ -44,20 +44,26 @@ pub struct Telegram {
 impl Telegram {
     /// `permitidos` é a allowlist: só estes ids viram [`Evento`]. Vazia nega todo mundo.
     pub fn new(token: String, chat_id: i64, permitidos: Vec<i64>) -> Self {
-        // O cliente padrão do teloxide tem timeout de 17s, e o `getUpdates` deste projeto pede
-        // ao Telegram para segurar a conexão por PRAZO_POLL. Com o padrão, toda janela ociosa
-        // morria em erro de rede e reabria: o update não se perdia (o Telegram reenvia), mas o
-        // log virava um aviso a cada 20s e cada mensagem podia atrasar alguns segundos.
-        let cliente = teloxide::net::default_reqwest_settings()
-            .timeout(Duration::from_secs(PRAZO_POLL as u64 + 30))
-            .build()
-            .expect("cliente http do teloxide");
         Self {
-            bot: Bot::with_client(token, cliente),
+            bot: bot(token),
             chat: ChatId(chat_id),
             permitidos,
         }
     }
+}
+
+/// O `Bot` com um cliente HTTP que aguenta o long polling. O setup usa o mesmo.
+///
+/// O cliente padrão do teloxide tem timeout de 17s, e o `getUpdates` deste projeto pede ao
+/// Telegram para segurar a conexão por PRAZO_POLL. Com o padrão, toda janela ociosa morria em
+/// erro de rede e reabria: o update não se perdia (o Telegram reenvia), mas o log virava um
+/// aviso a cada 20s e cada mensagem podia atrasar alguns segundos.
+pub fn bot(token: String) -> Bot {
+    let cliente = teloxide::net::default_reqwest_settings()
+        .timeout(Duration::from_secs(PRAZO_POLL as u64 + 30))
+        .build()
+        .expect("cliente http do teloxide");
+    Bot::with_client(token, cliente)
 }
 
 /// Traduz um update do Telegram num [`Evento`], ou descarta.
