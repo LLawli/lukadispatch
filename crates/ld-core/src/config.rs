@@ -15,10 +15,18 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// Qual frontend de chat o daemon usa. Cada valor corresponde a uma implementação da trait
+    /// `Frontend` do daemon; hoje existe `"telegram"`. O modo offline (`LUKADISPATCH_OFFLINE`)
+    /// passa por cima disto e usa o frontend nulo.
+    pub frontend: String,
+    /// Qual agente de código roda nas sessões, e dentro de que envelope.
+    pub agente: Agente,
     pub telegram: Telegram,
     pub scan: Scan,
     /// Como o áudio que chega vira texto. O motor é trocável sem recompilar.
     pub transcricao: Transcricao,
+    /// Como arquivo grande demais para o frontend é partido antes de sair.
+    pub arquivos: Arquivos,
     /// Projetos fixados: aparecem primeiro no seletor e podem trazer regra própria.
     pub projects: Vec<Project>,
     /// Modo de permissão usado quando o projeto não declara o dele.
@@ -51,9 +59,12 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            frontend: "telegram".into(),
+            agente: Agente::default(),
             telegram: Telegram::default(),
             scan: Scan::default(),
             transcricao: Transcricao::default(),
+            arquivos: Arquivos::default(),
             projects: Vec::new(),
             default_permission_mode: "auto".into(),
             trust_projects: true,
@@ -111,6 +122,10 @@ pub struct Telegram {
 pub struct Transcricao {
     /// Desligada, áudio continua chegando como arquivo, só não vira texto.
     pub ativa: bool,
+    /// Qual implementação da trait `Transcritor` do daemon roda. Hoje existe `"processo"`, que
+    /// chama o comando abaixo como processo filho; um motor novo (API remota, biblioteca
+    /// embutida) entra como outro valor aqui, sem mexer em quem pede a transcrição.
+    pub motor: String,
     /// O comando, já dividido em argumentos (nada de shell no meio).
     ///
     /// Marcadores: `{audio}` é o WAV mono 16 kHz que o daemon prepara, `{modelo}` é o campo
@@ -135,6 +150,7 @@ impl Default for Transcricao {
     fn default() -> Self {
         Self {
             ativa: true,
+            motor: "processo".into(),
             comando: [
                 "~/.local/share/lukadispatch/asr/whisper-cli-vulkan",
                 "-m",
@@ -157,6 +173,52 @@ impl Default for Transcricao {
             saida: "arquivo".into(),
             timeout_s: 900,
             guardar_audio_dias: 7,
+        }
+    }
+}
+
+/// O agente de código das sessões.
+///
+/// São duas escolhas independentes. `tipo` é o agente em si (hoje `"claude-code"`): quem sabe
+/// montar a linha de comando, o prompt de partida, os hooks e onde fica a conversa gravada.
+/// `envelope` é o que embrulha essa linha de comando antes de rodar: `"ai-memory"` sobe o agente
+/// como `ai-memory run --new <workstream> <agente...>`, para a sessão entrar na memória de longo
+/// prazo; `"nenhum"` roda o agente direto.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Agente {
+    pub tipo: String,
+    pub envelope: String,
+}
+
+impl Default for Agente {
+    fn default() -> Self {
+        Self {
+            tipo: "claude-code".into(),
+            envelope: "ai-memory".into(),
+        }
+    }
+}
+
+/// Como um arquivo que não cabe numa mensagem é partido.
+///
+/// São duas peças, e a ordem entre elas é fixa: vídeo tenta primeiro o corte por tempo (cada
+/// trecho toca sozinho no celular), e o que sobrar, ou falhar, cai no divisor genérico.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Arquivos {
+    /// Divisor genérico, por volumes: `"7z"` ou `"rar"`. Cada valor corresponde a uma
+    /// implementação da trait `Divisor` do daemon.
+    pub divisor: String,
+    /// Vídeo grande é cortado em trechos pelo ffmpeg antes de cair nos volumes.
+    pub cortar_video: bool,
+}
+
+impl Default for Arquivos {
+    fn default() -> Self {
+        Self {
+            divisor: "7z".into(),
+            cortar_video: true,
         }
     }
 }
@@ -346,6 +408,49 @@ mod tests {
             !c.pergunta_por("TodoWrite"),
             "TodoWrite não escreve no disco"
         );
+    }
+
+    #[test]
+    fn seletores_das_pecas_tem_padrao_e_aceitam_troca_pelo_toml() {
+        // Config antigo, sem as chaves novas, tem de continuar subindo com o que já rodava.
+        let c = Config::default();
+        assert_eq!(c.frontend, "telegram");
+        assert_eq!(c.agente.tipo, "claude-code");
+        assert_eq!(c.agente.envelope, "ai-memory");
+        assert_eq!(c.transcricao.motor, "processo");
+        assert_eq!(c.arquivos.divisor, "7z");
+        assert!(c.arquivos.cortar_video);
+
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("config.toml");
+        std::fs::write(
+            &p,
+            r#"
+frontend = "whatsapp"
+
+[agente]
+envelope = "nenhum"
+
+[transcricao]
+motor = "api"
+
+[arquivos]
+divisor = "rar"
+cortar_video = false
+"#,
+        )
+        .unwrap();
+        let c = Config::load(&p).unwrap();
+        assert_eq!(c.frontend, "whatsapp");
+        assert_eq!(c.agente.envelope, "nenhum");
+        assert_eq!(
+            c.agente.tipo, "claude-code",
+            "a chave que faltou mantém o padrão"
+        );
+        assert_eq!(c.transcricao.motor, "api");
+        assert!(c.transcricao.ativa, "a chave que faltou mantém o padrão");
+        assert_eq!(c.arquivos.divisor, "rar");
+        assert!(!c.arquivos.cortar_video);
     }
 
     #[test]
