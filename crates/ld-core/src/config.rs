@@ -12,6 +12,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// A variável do `.env` com o token do bot. O daemon a lê e o setup a grava: um nome só.
+pub const TOKEN_TELEGRAM: &str = "LUKADISPATCH_TELEGRAM_TOKEN";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -283,10 +286,12 @@ impl Config {
 
     /// Token do bot. Só do ambiente, nunca do arquivo.
     pub fn telegram_token() -> Result<String> {
-        let t = std::env::var("LUKADISPATCH_TELEGRAM_TOKEN")
+        let t = std::env::var(TOKEN_TELEGRAM)
             .ok()
             .filter(|s| !s.trim().is_empty())
-            .context("LUKADISPATCH_TELEGRAM_TOKEN não está no ambiente (veja o .env.example)")?;
+            .with_context(|| {
+                format!("{TOKEN_TELEGRAM} não está no ambiente (rode lukadispatch setup)")
+            })?;
         Ok(t.trim().to_string())
     }
 

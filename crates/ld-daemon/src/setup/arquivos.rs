@@ -15,7 +15,7 @@ const CONFIG_EXEMPLO: &str = include_str!("../../../../dist/config.example.toml"
 /// Base de um `.env` novo.
 const ENV_EXEMPLO: &str = include_str!("../../../../.env.example");
 
-pub const CHAVE_TOKEN: &str = "LUKADISPATCH_TELEGRAM_TOKEN";
+pub const CHAVE_TOKEN: &str = ld_core::config::TOKEN_TELEGRAM;
 
 pub struct Rascunho {
     config: DocumentMut,
