@@ -137,11 +137,11 @@ pub fn trechos(rico: &str) -> Vec<Trecho> {
 
 /// Igual a `empurra_texto`, mas para um `Trecho` qualquer: só junta se os dois forem `Texto`.
 fn empurra_texto_ou_trecho(alvo: &mut Vec<Trecho>, trecho: Trecho) {
-    if let Trecho::Texto(s) = &trecho {
-        if let Some(Trecho::Texto(ultimo)) = alvo.last_mut() {
-            ultimo.push_str(s);
-            return;
-        }
+    if let Trecho::Texto(s) = &trecho
+        && let Some(Trecho::Texto(ultimo)) = alvo.last_mut()
+    {
+        ultimo.push_str(s);
+        return;
     }
     alvo.push(trecho);
 }

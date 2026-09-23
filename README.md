@@ -63,7 +63,7 @@ correspondente; o passo a passo está em [`docs/portas.md`](docs/portas.md).
 - Claude Code 2.1.274 ou mais novo (é a versão que traz `PermissionRequest`, `async` e
   `asyncRewake` nos hooks).
 - tmux e `ai-memory` no PATH.
-- Rust 1.85+ para compilar; gtk4 e libadwaita para a janela de pergunta.
+- Rust 1.92+ para compilar; gtk4 e libadwaita para a janela de pergunta.
 
 ## Configurar o Telegram
 
