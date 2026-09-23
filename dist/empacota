@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Monta o conteúdo do pacote a partir de um diretório de binários já compilados.
+#
+#   dist/empacota <dir-dos-binarios> <destino>
+#
+# É o único lugar que diz o que vai no tarball. A release chama isto antes do `tar`, e o
+# bin/deploy chama antes do install.sh: os dois instalam exatamente a mesma coisa.
+set -euo pipefail
+
+[[ $# -eq 2 ]] || { echo "uso: $0 <dir-dos-binarios> <destino>" >&2; exit 2; }
+origem="$1"
+destino="$2"
+raiz="$(cd "$(dirname "$0")/.." && pwd)"
+
+BINARIOS=(lukadispatchd lukadispatch lukadispatch-ask lukadispatch-mcp)
+
+mkdir -p "$destino"
+for b in "${BINARIOS[@]}"; do
+  # Confere o artefato, não o código de saída de quem compilou: binário ausente ou vazio aqui
+  # viraria um pacote que instala e não roda.
+  if [[ ! -s "$origem/$b" ]]; then
+    echo "empacota: falta $origem/$b (ou está vazio)" >&2
+    exit 1
+  fi
+  install -m755 "$origem/$b" "$destino/$b"
+done
+
+install -m644 "$raiz/dist/lukadispatch.service" "$destino/lukadispatch.service"
+install -m644 "$raiz/dist/config.example.toml" "$destino/config.example.toml"
+install -m644 "$raiz/.env.example" "$destino/env.example"
+install -m644 "$raiz/LICENSE" "$destino/LICENSE"
+install -m644 "$raiz/README.md" "$destino/README.md"
+install -m755 "$raiz/install.sh" "$destino/install.sh"
+
+esperado=$((${#BINARIOS[@]} + 6))
+achado=$(find "$destino" -maxdepth 1 -type f | wc -l)
+if (( achado < esperado )); then
+  echo "empacota: $achado arquivos em $destino, esperava $esperado" >&2
+  exit 1
+fi
+echo "empacota: $achado arquivos em $destino"

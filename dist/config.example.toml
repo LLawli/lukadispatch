@@ -1,0 +1,44 @@
+# Copie para ~/.config/lukadispatch/config.toml e ajuste. Só [telegram] é obrigatório.
+# O token do bot NÃO mora aqui: ele vai no .env, ao lado deste arquivo.
+
+# Como a sessão chama você. Sem isto, ela diz "o seu usuário".
+# usuario = "Maria"
+
+# Modo de permissão das sessões que o projeto não sobrescreve: auto, acceptEdits,
+# perguntar (card no celular), plan, bypassPermissions.
+default_permission_mode = "auto"
+
+# Marca a pasta como confiada antes de abrir a sessão, senão ela para no diálogo de
+# confiança do Claude Code, que só dá para responder no teclado do PC.
+trust_projects = true
+
+[telegram]
+chat_id = -1001234567890          # o supergrupo com tópicos, começa com -100
+allowed_user_ids = [123456789]    # quem o bot obedece; vazio nega todo mundo, de propósito
+
+# Projetos que aparecem no /new: tudo com .git abaixo destas raízes.
+[scan]
+enabled = true
+roots = ["~/Projetos"]
+depth = 1
+
+# Projetos fixados aparecem primeiro e podem ter regra própria.
+# [[projects]]
+# name = "meu-projeto"
+# path = "~/Projetos/meu-projeto"
+# permission_mode = "acceptEdits"
+
+# Peças trocáveis. Os valores abaixo são os padrões; docs/portas.md explica cada uma.
+# frontend = "telegram"
+#
+# [agente]
+# tipo = "claude-code"
+# envelope = "ai-memory"          # "nenhum" roda o claude direto, sem o ai-memory
+#
+# [transcricao]
+# ativa = true                    # false desliga a transcrição de voz
+# motor = "processo"              # qualquer programa local de voz para texto
+#
+# [arquivos]
+# divisor = "7z"                  # ou "rar"
+# cortar_video = true

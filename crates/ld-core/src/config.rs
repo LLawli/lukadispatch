@@ -395,6 +395,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn o_exemplo_distribuido_carrega() {
+        // O config.example.toml vai no pacote da release e o install.sh o copia para quem
+        // instala: se ele parar de carregar, o primeiro contato de alguém é um erro de parse.
+        let cfg: Config = toml::from_str(include_str!("../../../dist/config.example.toml"))
+            .expect("dist/config.example.toml precisa carregar");
+        assert!(cfg.trust_projects);
+        assert_eq!(cfg.telegram.chat_id, -1001234567890);
+        assert_eq!(cfg.usuario, None, "o nome fica comentado no exemplo");
+    }
+
+    #[test]
     fn config_ausente_vira_padrao() {
         let c = Config::load(Path::new("/nao/existe/config.toml")).unwrap();
         assert_eq!(c.default_permission_mode, "auto");
