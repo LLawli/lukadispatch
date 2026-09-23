@@ -5,13 +5,16 @@
 //! é a pior falha possível: a sessão sobe, não responde nada, e do celular não há como ver o
 //! motivo nem como apertar a tecla.
 //!
-//! A confiança vale para a árvore: com `/home/luka` confiado, tudo abaixo dele já entra. Por
-//! isso, na prática, isto só age em projeto fora do seu diretório pessoal.
+//! A confiança é herdada de um diretório acima, **mas só até a raiz do repositório git**. Medido
+//! no binário do Claude Code 2.1.280: a subida começa na pasta aberta e para no primeiro
+//! diretório com `.git` (diretório ou arquivo, nunca symlink); sem `.git`, vai até a raiz do
+//! disco. Então uma home confiada cobre pasta solta, mas não cobre projeto nenhum com `.git`, e
+//! todo projeto da varredura tem um. Tratar a home como suficiente já travou sessão no diálogo.
 //!
 //! **Só é chamado para projeto que o próprio config oferece** (fixado no `config.toml` ou achado
 //! nas raízes de varredura). O daemon nunca confia num caminho arbitrário vindo de mensagem.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
@@ -22,11 +25,13 @@ use serde_json::{Value, json};
 /// é atômica (arquivo temporário e rename) e só acontece quando há mudança de verdade, que é uma
 /// vez por projeto novo.
 pub fn ensure_trusted(claude_json: &Path, projeto: &Path) -> Result<bool> {
+    // A chave do Claude Code é o cwd do processo, que já vem com os symlinks resolvidos.
+    let projeto = std::fs::canonicalize(projeto).unwrap_or_else(|_| projeto.to_path_buf());
     let chave = projeto.to_string_lossy().into_owned();
     let bruto = std::fs::read_to_string(claude_json).unwrap_or_else(|_| "{}".into());
     let mut doc: Value = serde_json::from_str(&bruto).unwrap_or_else(|_| json!({}));
 
-    if ja_confiado(&doc, &chave) {
+    if ja_confiado(&doc, &projeto, raiz_git(&projeto).as_deref()) {
         return Ok(false);
     }
 
@@ -52,15 +57,40 @@ pub fn ensure_trusted(claude_json: &Path, projeto: &Path) -> Result<bool> {
     Ok(true)
 }
 
-/// Confiado diretamente ou por herança de um diretório acima.
-fn ja_confiado(doc: &Value, caminho: &str) -> bool {
+/// Confiado diretamente ou por herança de um diretório acima, sem passar da raiz git.
+fn ja_confiado(doc: &Value, caminho: &Path, raiz: Option<&Path>) -> bool {
     let Some(projetos) = doc.get("projects").and_then(Value::as_object) else {
         return false;
     };
-    projetos.iter().any(|(k, v)| {
-        v.get("hasTrustDialogAccepted") == Some(&json!(true))
-            && (k == caminho || caminho.starts_with(&format!("{k}/")))
-    })
+    let confiado = |p: &Path| {
+        projetos
+            .get(p.to_string_lossy().as_ref())
+            .and_then(|v| v.get("hasTrustDialogAccepted"))
+            == Some(&json!(true))
+    };
+    for p in caminho.ancestors() {
+        if confiado(p) {
+            return true;
+        }
+        if Some(p) == raiz {
+            return false;
+        }
+    }
+    false
+}
+
+/// O primeiro diretório, subindo a partir de `caminho`, que tem um `.git` diretório ou arquivo.
+///
+/// Arquivo cobre worktree e submódulo. Symlink não conta, porque o Claude Code também não conta.
+fn raiz_git(caminho: &Path) -> Option<PathBuf> {
+    caminho
+        .ancestors()
+        .find(|p| {
+            std::fs::symlink_metadata(p.join(".git"))
+                .map(|m| m.is_dir() || m.is_file())
+                .unwrap_or(false)
+        })
+        .map(Path::to_path_buf)
 }
 
 fn escreve_atomico(destino: &Path, doc: &Value) -> Result<()> {
@@ -77,6 +107,7 @@ fn escreve_atomico(destino: &Path, doc: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn arquivo(conteudo: &str) -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
@@ -105,10 +136,64 @@ mod tests {
     }
 
     #[test]
-    fn confianca_do_pai_vale_para_o_filho() {
-        // É como o Claude Code se comporta: com a home confiada, todo projeto dentro dela entra.
+    fn confianca_do_pai_vale_para_o_filho_fora_de_repositorio() {
+        // Pasta solta, sem `.git` acima: o Claude Code sobe até a raiz do disco procurando.
         let (_d, p) = arquivo(r#"{"projects":{"/home/luka":{"hasTrustDialogAccepted":true}}}"#);
         assert!(!ensure_trusted(&p, Path::new("/home/luka/Personal/proj")).unwrap());
+    }
+
+    /// `home/` confiada no claude.json, e `home/<nome>` com um `.git` do tipo pedido.
+    fn home_confiada_com_repo(git: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap().join("home");
+        let repo = home.join("proj");
+        std::fs::create_dir_all(&repo).unwrap();
+        match git {
+            "dir" => std::fs::create_dir(repo.join(".git")).unwrap(),
+            "arquivo" => std::fs::write(repo.join(".git"), "gitdir: /outro/lugar\n").unwrap(),
+            "link" => std::os::unix::fs::symlink(dir.path(), repo.join(".git")).unwrap(),
+            _ => unreachable!(),
+        }
+        let claude = dir.path().join("claude.json");
+        let doc = json!({"projects": {home.to_str().unwrap(): {"hasTrustDialogAccepted": true}}});
+        std::fs::write(&claude, doc.to_string()).unwrap();
+        (dir, claude, repo)
+    }
+
+    #[test]
+    fn confianca_acima_do_repositorio_nao_vale() {
+        // O caso que travou uma sessão: home confiada, projeto com `.git`. O Claude Code 2.1.280
+        // para de subir na raiz do repositório, então a home não conta e o diálogo aparece.
+        let (_d, claude, repo) = home_confiada_com_repo("dir");
+        assert!(ensure_trusted(&claude, &repo).unwrap());
+        let doc: Value = serde_json::from_str(&std::fs::read_to_string(&claude).unwrap()).unwrap();
+        assert_eq!(
+            doc["projects"][repo.to_str().unwrap()]["hasTrustDialogAccepted"],
+            true
+        );
+    }
+
+    #[test]
+    fn git_em_arquivo_tambem_e_raiz() {
+        // Worktree e submódulo têm `.git` como arquivo apontando para outro lugar.
+        let (_d, claude, repo) = home_confiada_com_repo("arquivo");
+        assert!(ensure_trusted(&claude, &repo).unwrap());
+    }
+
+    #[test]
+    fn git_que_e_symlink_nao_e_raiz() {
+        // O Claude Code ignora `.git` que é link, e continua subindo; aqui também.
+        let (_d, claude, repo) = home_confiada_com_repo("link");
+        assert!(!ensure_trusted(&claude, &repo).unwrap());
+    }
+
+    #[test]
+    fn dentro_do_repositorio_a_raiz_confiada_vale() {
+        let (_d, claude, repo) = home_confiada_com_repo("dir");
+        ensure_trusted(&claude, &repo).unwrap();
+        let sub = repo.join("crates").join("x");
+        std::fs::create_dir_all(&sub).unwrap();
+        assert!(!ensure_trusted(&claude, &sub).unwrap());
     }
 
     #[test]

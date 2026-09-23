@@ -267,10 +267,9 @@ tmux attach -t ld-<projeto>-<id>     # a sessão é um tmux de verdade
 - **`--fresh` não combina com `--session-id`.** O ai-memory recusa com "cannot be combined with a
   native session".
 - **Diálogo de confiança de pasta.** Abrir uma pasta que o Claude Code ainda não confia mostra um
-  diálogo esperando tecla, e pelo celular isso aparece como uma sessão muda. A confiança vale para
-  a árvore, então com a sua home confiada quase nada cai nesse caso; para o resto, `trust_projects`
-  marca a pasta antes de abrir (só para projetos que o próprio config oferece, nunca um caminho
-  qualquer).
+  diálogo esperando tecla, e pelo celular isso aparece como uma sessão muda. Confiar na home não
+  basta: a herança para na raiz do repositório git. `trust_projects` marca a pasta antes de abrir
+  (só para projetos que o próprio config oferece, nunca um caminho qualquer).
 - **O `Monitor` expira em 30 minutos.** O hook `Stop` percebe que o canal caiu e, via
   `asyncRewake`, acorda a sessão para re-armar. Depois de três lembretes sem sucesso o daemon
   desiste e avisa no tópico em vez de insistir para sempre.

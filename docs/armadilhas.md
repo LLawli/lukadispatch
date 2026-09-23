@@ -20,8 +20,10 @@ Quando um comportamento parecer estranho, procure aqui antes de "consertar".
   sessão.
 - **A ferramenta `Monitor` é diferida** (o agente precisa carregá-la com `ToolSearch` antes) e
   **expira em 30 minutos**.
-- **Diálogo de confiança de pasta** trava a partida esperando tecla. A confiança vale para a
-  árvore; o daemon marca a pasta do projeto antes de abrir a sessão.
+- **Diálogo de confiança de pasta** trava a partida esperando tecla. A confiança é herdada de um
+  diretório acima **só até a raiz do repositório git** (medido no Claude Code 2.1.280): uma home
+  confiada cobre pasta solta, mas não um projeto com `.git`. O daemon marca a pasta do projeto
+  antes de abrir a sessão, com a mesma regra de subida que o Claude Code usa (`ld-core::trust`).
 - **O binário do Claude Code carrega o catálogo de modelos inteiro**, mais do que o menu `/model`
   mostra. É de lá que o `/model` do chat tira as opções.
 

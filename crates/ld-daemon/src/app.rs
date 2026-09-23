@@ -233,10 +233,14 @@ impl App {
 
         // Antes de subir: a pasta precisa estar confiada, senão o agente para num diálogo que só
         // dá para responder no teclado do PC, e do celular a sessão parece muda.
-        if self.cfg.trust_projects
-            && let Ok(true) = self.agente.confia(Path::new(&projeto.path))
-        {
-            info!(projeto = %projeto.path, "pasta marcada como confiada");
+        if self.cfg.trust_projects {
+            match self.agente.confia(Path::new(&projeto.path)) {
+                Ok(true) => info!(projeto = %projeto.path, "pasta marcada como confiada"),
+                Ok(false) => {}
+                // Sem a marca, a sessão sobe e para no diálogo: o log é a única pista disso.
+                Err(e) => warn!(projeto = %projeto.path, erro = %format!("{e:#}"),
+                    "não consegui marcar a pasta como confiada; a sessão pode parar no diálogo"),
+            }
         }
 
         let modo = self.cfg.permission_mode_for(&projeto.path);
