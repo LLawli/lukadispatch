@@ -10,11 +10,33 @@ use std::time::Duration;
 use ld_core::config::Config;
 use ld_core::proto::{Request, Response, line};
 use ld_core::state::{Session, Store};
-use ld_daemon::app::App;
+use ld_daemon::agente::Direto;
+use ld_daemon::agente::claude_code::{ClaudeCode, Locais};
+use ld_daemon::app::{App, Portas};
+use ld_daemon::divisor::Divisores;
+use ld_daemon::frontend::Frontend;
 use ld_daemon::hub::Incoming;
-use ld_daemon::telegram::Tg;
+use ld_daemon::sessions::Tmux;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+
+/// O frontend de verdade quando a feature `telegram` está ligada, e o nulo quando não está: este
+/// teste não chama a API de nenhum dos dois (token e chat falsos, ou nenhum token nenhum), então
+/// qual dos dois a feature deixa disponível não muda nada aqui. É o mesmo binário que o ci.sh
+/// cobre com o passo "sem telegram".
+#[cfg(feature = "telegram")]
+fn frontend_de_teste() -> Arc<dyn Frontend> {
+    Arc::new(ld_daemon::frontend::telegram::Telegram::new(
+        "0:falso".into(),
+        -100,
+        vec![],
+    ))
+}
+
+#[cfg(not(feature = "telegram"))]
+fn frontend_de_teste() -> Arc<dyn Frontend> {
+    Arc::new(ld_daemon::frontend::nulo::Nulo::default())
+}
 
 fn sessao_de_teste() -> Session {
     Session {
@@ -23,9 +45,9 @@ fn sessao_de_teste() -> Session {
         cwd: "/tmp/proj".into(),
         transcript_path: None,
         tmux: Some("ld-proj-aaaa".into()),
-        topic_id: Some(7),
+        canal_id: Some("7".into()),
         status: "ocioso".into(),
-        status_message_id: None,
+        status_msg_id: None,
         model: Some("opus".into()),
         effort: None,
         permission_mode: Some("auto".into()),
@@ -39,11 +61,29 @@ async fn sobe_daemon(dir: &std::path::Path) -> Arc<App> {
 
     let store = Store::open_memory().unwrap();
     store.upsert(&sessao_de_teste()).unwrap();
-    // Token e chat falsos: nada neste caminho chama a API do Telegram.
+    let raiz_agente = dir.join("agente");
+    let agente = ClaudeCode::new(
+        Locais {
+            cli: "/opt/ld/lukadispatch".into(),
+            mcp_proxy: "/opt/ld/lukadispatch-mcp".into(),
+            settings: raiz_agente.join("bot-settings.json"),
+            claude_json: raiz_agente.join("claude.json"),
+            claude_dir: raiz_agente.join("claude"),
+            uso_db: raiz_agente.join("uso.db"),
+        },
+        None,
+    );
     let app = Arc::new(App::new(
         Config::default(),
         store,
-        Tg::new("0:falso".into(), -100),
+        Portas {
+            frontend: frontend_de_teste(),
+            agente: Arc::new(agente),
+            envelope: Arc::new(Direto),
+            transcritor: None,
+            divisores: Divisores::new(vec![]),
+            hospedeiro: Arc::new(Tmux),
+        },
     ));
 
     let servidor = app.clone();

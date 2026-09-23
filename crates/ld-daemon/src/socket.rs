@@ -197,12 +197,7 @@ async fn responde(app: &Arc<App>, req: Request) -> Response {
                     // A última conversa daquele diretório, quando houver e quando não estiver
                     // aberta em outro lugar.
                     let retomar = resume_last
-                        .then(|| {
-                            ld_core::transcript::ultima_sessao(
-                                &ld_core::paths::claude_dir(),
-                                &p.path,
-                            )
-                        })
+                        .then(|| app.agente.ultima_sessao(&p.path))
                         .flatten()
                         .filter(|a| {
                             app.store
@@ -232,7 +227,7 @@ async fn responde(app: &Arc<App>, req: Request) -> Response {
         }
 
         // A janela do PC respondeu primeiro: resolve a pendência, e quem está esperando lá em
-        // `pergunta()` apaga o card do Telegram.
+        // `pergunta()` apaga o card do chat.
         Request::LocalAnswer { ask_id, answer } => {
             app.hub.answer(&ask_id, answer);
             Response::Ok
@@ -376,7 +371,7 @@ async fn permissao(
 
 /// A resposta de um card de permissão, venha ela de onde vier.
 ///
-/// O botão do Telegram manda `allow`/`deny`; a janela do PC manda um `Answer` em JSON, porque ela
+/// O botão do chat manda `allow`/`deny`; a janela do PC manda um `Answer` em JSON, porque ela
 /// é a mesma janela das perguntas comuns. Comparar com a string `"allow"` fazia toda resposta da
 /// janela virar negação, inclusive quando você tinha clicado em "Permitir".
 fn e_permitir(bruta: &str) -> bool {

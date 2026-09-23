@@ -1,187 +1,79 @@
-//! Anexo que chega pelo Telegram: o que dá para baixar, com que nome e onde ele fica.
+//! O lado do domínio no envio e recebimento de arquivo: o marcador `@arquivo:` que o agente
+//! escreve na resposta, o que dá para mandar (com que mídia, se precisa dividir) e a limpeza dos
+//! anexos de uma sessão.
 //!
-//! O caminho do arquivo é o produto deste módulo: quem lê o arquivo é a sessão, com a ferramenta
-//! Read, e ela só recebe um caminho absoluto na linha NDJSON. Por isso duas coisas importam mais
-//! do que parecem:
-//!
-//! - **O nome é hostil até prova em contrário.** `file_name` vem do celular de quem mandou e o
-//!   Telegram não promete nada sobre ele: `../../.ssh/authorized_keys` é um nome de arquivo
-//!   válido do ponto de vista da API. Aqui ele é reduzido a um nome simples antes de virar
-//!   caminho.
-//! - **Nome que já existe não sobrescreve.** Duas fotos no mesmo segundo têm o mesmo nome
-//!   derivado, e a segunda não pode apagar a primeira.
+//! O que é específico de plataforma (baixar do Telegram, dividir em volumes de 7z, cortar vídeo)
+//! mora nas portas: `frontend::telegram` e `divisor`. Este módulo só conhece a trait `Frontend`
+//! e a trait `Divisor`, nunca uma API de chat.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use ld_core::paths;
-use teloxide::net::Download;
-use teloxide::prelude::*;
-use teloxide::types::{FileId, Message};
-use tracing::warn;
 
-/// Teto do Bot API para baixar: acima disso o `getFile` recusa, então nem tentamos.
-pub const LIMITE: u32 = 20 * 1024 * 1024;
+use crate::app::App;
+use crate::divisor::{Divisores, MAX_PARTES, volume_para};
+use crate::frontend::{Anexo, Limites};
 
-/// Quanto do nome original sobrevive. O resto é cortado, mas a extensão fica: é ela que faz o
-/// Read (e você, no celular) reconhecer o que é o arquivo.
-const MAX_NOME: usize = 80;
-
-/// Um anexo, já reduzido ao que interessa para baixar.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Anexo {
-    pub file_id: FileId,
-    pub tamanho: u32,
-    /// O nome que o Telegram mandou, quando mandou. Foto, sticker e nota de vídeo não têm.
-    pub nome: Option<String>,
-    /// Como a mensagem chamaria isto em português ("foto", "documento"). Vai para o texto que a
-    /// sessão recebe quando não há legenda.
-    pub tipo: &'static str,
+/// Baixa um anexo recebido para dentro da pasta da sessão.
+///
+/// Recusa acima do teto de download do frontend antes de tentar (não adianta gastar banda para
+/// depois jogar fora), e confere depois que o caminho devolvido pelo adaptador está mesmo dentro
+/// da pasta da sessão e não veio vazio: um adaptador com bug não pode entregar um caminho que
+/// escape da sandbox de arquivos, nem um download pela metade que a sessão leria como se fosse o
+/// arquivo inteiro.
+/// `caminho` é um arquivo diretamente dentro de `dir`?
+///
+/// A conferência é por componente, e não por prefixo: `Path::starts_with` é lexical, e
+/// `<dir>/../../.ssh/authorized_keys` começa com os componentes de `dir`. `caminho_livre` sempre
+/// devolve `dir` mais um nome simples, então qualquer outra forma é de um adaptador errado.
+fn direto_em(caminho: &Path, dir: &Path) -> bool {
+    use std::path::Component;
+    caminho.parent() == Some(dir)
+        && matches!(caminho.components().next_back(), Some(Component::Normal(_)))
+        && !caminho
+            .components()
+            .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
 }
 
-/// O que veio junto da mensagem.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Achado {
-    Nada,
-    Arquivos(Vec<Anexo>),
-}
-
-/// O que dá para baixar nesta mensagem.
-pub fn anexos(msg: &Message) -> Achado {
-    // Voz antes de áudio: quem grava segurando o microfone manda `voice`, e é esse o caso comum.
-    // O `.oga` cai em disco como qualquer anexo; transcrever é outro passo, do lado de quem lê.
-    if let Some(v) = msg.voice() {
-        return um(&v.file, None, "mensagem de voz");
-    }
-    if let Some(a) = msg.audio() {
-        return um(&a.file, a.file_name.clone(), "áudio");
-    }
-
-    if let Some(d) = msg.document() {
-        return um(&d.file, d.file_name.clone(), "documento");
-    }
-    if let Some(tamanhos) = msg.photo() {
-        // `photo` é a mesma imagem em várias resoluções; a maior é a que presta. A ordem não é
-        // garantida pela API, então escolhemos pelo tamanho em bytes em vez de pegar a última.
-        let Some(maior) = tamanhos.iter().max_by_key(|p| p.file.size) else {
-            return Achado::Nada;
-        };
-        return um(&maior.file, None, "foto");
-    }
-    if let Some(v) = msg.video() {
-        return um(&v.file, v.file_name.clone(), "vídeo");
-    }
-    if let Some(a) = msg.animation() {
-        return um(&a.file, a.file_name.clone(), "animação");
-    }
-    if let Some(v) = msg.video_note() {
-        return um(&v.file, None, "nota de vídeo");
-    }
-    if let Some(s) = msg.sticker() {
-        return um(&s.file, None, "figurinha");
-    }
-    Achado::Nada
-}
-
-fn um(meta: &teloxide::types::FileMeta, nome: Option<String>, tipo: &'static str) -> Achado {
-    Achado::Arquivos(vec![Anexo {
-        file_id: meta.id.clone(),
-        tamanho: meta.size,
-        nome,
-        tipo,
-    }])
-}
-
-/// Baixa o anexo para o diretório da sessão e devolve o caminho absoluto.
-pub async fn baixa(bot: &Bot, session_id: &str, anexo: &Anexo) -> Result<PathBuf> {
-    if anexo.tamanho > LIMITE {
+pub async fn recebe(app: &App, session_id: &str, anexo: &Anexo) -> Result<PathBuf> {
+    let limites = app.frontend.limites();
+    if anexo.tamanho > limites.baixar {
         bail!(
-            "{} tem {}, e o Bot API só entrega até 20 MB",
-            anexo.tipo,
-            humano(anexo.tamanho)
+            "{} tem {}, e o frontend só entrega até {}",
+            anexo.tipo.nome(),
+            humano_u64(anexo.tamanho),
+            humano_u64(limites.baixar)
         );
     }
 
-    let arquivo = com_retentativa("pedindo o arquivo ao Telegram", || {
-        let bot = bot.clone();
-        let id = anexo.file_id.clone();
-        async move { bot.get_file(id).await }
-    })
-    .await?;
-
-    // Sem `file_name` (foto, figurinha), o caminho do lado do Telegram é a única fonte de
-    // extensão: ele vem como "photos/file_42.jpg".
-    let bruto = anexo.nome.clone().unwrap_or_else(|| arquivo.path.clone());
-    let dir = paths::arquivos_dir(session_id);
+    let dir = app.raiz_arquivos.join(session_id);
     tokio::fs::create_dir_all(&dir)
         .await
         .with_context(|| format!("criando {}", dir.display()))?;
-    let destino = livre(&dir, &sanitiza(&bruto));
 
-    let mut dst = tokio::fs::File::create(&destino)
-        .await
-        .with_context(|| format!("criando {}", destino.display()))?;
-    if let Err(e) = bot.download_file(&arquivo.path, &mut dst).await {
-        // Arquivo pela metade é pior que arquivo nenhum: a sessão abriria um PDF truncado sem
-        // saber disso.
-        let _ = tokio::fs::remove_file(&destino).await;
-        return Err(e).context("baixando o arquivo");
+    let caminho = app.frontend.baixa(anexo, &dir).await?;
+
+    if !direto_em(&caminho, &dir) {
+        // Não apaga: o caminho está fora da pasta da sessão, e apagar ali seria o daemon mexer
+        // num arquivo que não é dele por causa de um adaptador com bug.
+        bail!("o adaptador devolveu um caminho fora da pasta da sessão: {caminho:?}");
     }
-
-    // Código de saída zero não é prova de artefato: confere que chegou byte de verdade.
-    let gravado = tokio::fs::metadata(&destino)
+    let tamanho = tokio::fs::metadata(&caminho)
         .await
-        .with_context(|| format!("conferindo {}", destino.display()))?
+        .with_context(|| format!("conferindo {}", caminho.display()))?
         .len();
-    if gravado == 0 {
-        let _ = tokio::fs::remove_file(&destino).await;
+    if tamanho == 0 {
+        let _ = tokio::fs::remove_file(&caminho).await;
         bail!("o download veio vazio");
     }
 
-    Ok(destino)
-}
-
-/// Repete o pedido quando a rede falha, e só quando a rede falha.
-///
-/// Um timeout ao pedir o arquivo perdia a mensagem inteira: o áudio ficava no Telegram, o erro
-/// aparecia no tópico e não havia segunda chance. Só que repetir tudo também é errado: um
-/// "arquivo grande demais" ou um file_id vencido são respostas definitivas da API, e insistir
-/// neles só atrasa o aviso de que não vai dar.
-async fn com_retentativa<T, F, Fut>(o_que: &str, mut tentar: F) -> Result<T>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = std::result::Result<T, teloxide::RequestError>>,
-{
-    const ESPERAS: [u64; 3] = [1, 3, 8];
-    for (n, espera) in ESPERAS.iter().enumerate() {
-        match tentar().await {
-            Ok(v) => return Ok(v),
-            Err(e) if transitorio(&e) => {
-                warn!(tentativa = n + 1, erro = %e, "{o_que}: a rede falhou, tento de novo em {espera}s");
-                tokio::time::sleep(std::time::Duration::from_secs(*espera)).await;
-            }
-            Err(e) => return Err(e).context(o_que.to_string()),
-        }
-    }
-    tentar()
-        .await
-        .with_context(|| format!("{o_que} (mesmo depois de {} tentativas)", ESPERAS.len() + 1))
-}
-
-/// Vale a pena tentar de novo? Rede e I/O sim; resposta da API não.
-fn transitorio(e: &teloxide::RequestError) -> bool {
-    matches!(
-        e,
-        teloxide::RequestError::Network(_)
-            | teloxide::RequestError::Io(_)
-            | teloxide::RequestError::RetryAfter(_)
-    )
+    Ok(caminho)
 }
 
 /// Apaga os arquivos de uma sessão que acabou. Best-effort: diretório que não existe (sessão que
 /// nunca recebeu anexo) é o caso comum, e não é erro.
-pub async fn limpa(session_id: &str) {
-    let dir = paths::arquivos_dir(session_id);
+pub async fn limpa(raiz: &Path, session_id: &str) {
+    let dir = raiz.join(session_id);
     if dir.is_dir() {
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
@@ -192,14 +84,8 @@ pub async fn limpa(session_id: &str) {
 /// O fim normal de uma sessão já leva os arquivos dela junto. Isto é para os outros fins: o
 /// `/clear`, que troca o id da sessão sem passar pelo encerramento, o daemon morto no meio do
 /// fechamento, e o reboot. Sem a varredura, esse resto fica em disco para sempre, e o dono dele
-/// já não pode nem ler o tópico onde ele foi pedido.
-pub async fn varre_orfaos(vivas: &std::collections::HashSet<String>) -> usize {
-    varre_em(&paths::arquivos_base(), vivas).await
-}
-
-/// O corpo da varredura, com a raiz explícita: é assim que o teste roda num tempdir em vez de
-/// mexer no `XDG_DATA_HOME` do processo inteiro.
-async fn varre_em(raiz: &Path, vivas: &std::collections::HashSet<String>) -> usize {
+/// já não pode nem ler o canal onde ele foi pedido.
+pub async fn varre_orfaos(raiz: &Path, vivas: &std::collections::HashSet<String>) -> usize {
     let Ok(mut entradas) = tokio::fs::read_dir(raiz).await else {
         return 0;
     };
@@ -219,20 +105,16 @@ async fn varre_em(raiz: &Path, vivas: &std::collections::HashSet<String>) -> usi
 
 /// Apaga áudio transcrito que já passou da validade, sessão viva ou não.
 ///
-/// O `.oga` fica porque quando a transcrição sai estranha ele é a única forma de saber se o erro
-/// foi do modelo ou da gravação. Mas fica por um prazo: voz acumula rápido e ninguém audita uma
-/// transcrição de semanas atrás.
+/// O áudio original fica porque quando a transcrição sai estranha ele é a única forma de saber
+/// se o erro foi do modelo ou da gravação. Mas fica por um prazo: voz acumula rápido e ninguém
+/// audita uma transcrição de semanas atrás.
 ///
 /// Só mexe em áudio. Os outros anexos seguem a vida da sessão, e apagá-los por idade tiraria da
 /// sessão um arquivo que ela ainda pode estar usando.
-pub async fn varre_audio_velho(dias: u64) -> usize {
+pub async fn varre_audio_velho(raiz: &Path, dias: u64) -> usize {
     if dias == 0 {
         return 0;
     }
-    varre_audio_velho_em(&paths::arquivos_base(), dias).await
-}
-
-async fn varre_audio_velho_em(raiz: &Path, dias: u64) -> usize {
     let limite = std::time::Duration::from_secs(dias * 24 * 60 * 60);
     let agora = std::time::SystemTime::now();
     let Ok(mut sessoes) = tokio::fs::read_dir(raiz).await else {
@@ -265,7 +147,7 @@ async fn varre_audio_velho_em(raiz: &Path, dias: u64) -> usize {
     apagados
 }
 
-/// Extensões que o Telegram usa para voz e áudio.
+/// Extensões que áudio de voz costuma usar.
 fn ehaudio(caminho: &Path) -> bool {
     caminho
         .extension()
@@ -274,14 +156,23 @@ fn ehaudio(caminho: &Path) -> bool {
         .is_some_and(|e| matches!(e.as_str(), "oga" | "ogg" | "opus" | "m4a" | "mp3" | "wav"))
 }
 
-/// Teto do Bot API para o bot mandar arquivo. É maior que o de baixar, e não é engano: a
-/// assimetria está na documentação do Telegram.
-pub const LIMITE_ENVIO: u64 = 50 * 1024 * 1024;
+/// Onde os volumes de uma sessão são montados: um subdiretório por envio, para dois arquivos
+/// grandes ao mesmo tempo não se misturarem.
+pub fn dir_partes(raiz: &Path, session_id: &str) -> PathBuf {
+    raiz.join("partes")
+        .join(session_id)
+        .join(agora().to_string())
+}
 
-/// Teto de uma imagem enviada como foto. Acima disso, mesmo sendo imagem, vai como documento.
-pub const LIMITE_FOTO: u64 = 10 * 1024 * 1024;
+fn agora() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
 
-/// Um arquivo do disco pronto para sair pelo Telegram.
+/// Um arquivo do disco pronto para sair pelo frontend.
+#[derive(Debug)]
 pub struct ParaEnviar {
     pub caminho: PathBuf,
     pub tamanho: u64,
@@ -291,25 +182,22 @@ pub struct ParaEnviar {
     pub precisa_dividir: bool,
 }
 
-/// Tamanho de cada volume quando o arquivo não cabe numa mensagem. Fica abaixo do teto de 50 MB
-/// por margem: o 7z conta o volume, o Telegram conta o arquivo, e empatar com o limite é pedir
-/// para um envio falhar no fim de um upload longo.
-pub const VOLUME_MB: u64 = 45;
-
-/// Teto de partes. Acima disso o tópico vira uma fila de upload e a coisa deixa de ser prática;
-/// melhor dizer isso na cara do que passar meia hora mandando.
-pub const MAX_PARTES: usize = 20;
-
 /// Confere o que o agente pediu para mandar, antes de qualquer chamada de rede.
 ///
 /// Falha cedo e com o motivo escrito: quem lê o erro é o agente, dentro da sessão, e ele precisa
-/// saber se o caminho está errado, se o arquivo está vazio ou se é grande demais.
-pub fn para_enviar(caminho: &Path, como_arquivo: bool) -> Result<ParaEnviar> {
+/// saber se o caminho está errado, se o arquivo está vazio, grande demais ou sem divisor que dê
+/// conta dele.
+pub fn para_enviar(
+    caminho: &Path,
+    como_arquivo: bool,
+    limites: &Limites,
+    divisores: &Divisores,
+) -> Result<ParaEnviar> {
     let meta =
         std::fs::metadata(caminho).with_context(|| format!("não achei {}", caminho.display()))?;
     if meta.is_dir() {
         bail!(
-            "{} é um diretório; o Telegram só recebe arquivo (compacte antes)",
+            "{} é um diretório; o frontend só recebe arquivo (compacte antes)",
             caminho.display()
         );
     }
@@ -319,19 +207,19 @@ pub fn para_enviar(caminho: &Path, como_arquivo: bool) -> Result<ParaEnviar> {
     if meta.len() == 0 {
         bail!("{} está vazio", caminho.display());
     }
-    let precisa_dividir = meta.len() > LIMITE_ENVIO;
+    let precisa_dividir = meta.len() > limites.enviar;
     if precisa_dividir {
-        let previstas = meta.len().div_ceil(VOLUME_MB * 1024 * 1024) as usize;
+        let previstas = meta.len().div_ceil(volume_para(limites.enviar)) as usize;
         if previstas > MAX_PARTES {
             bail!(
-                "{} tem {}, o que daria {previstas} partes de {VOLUME_MB} MB; o teto aqui é {MAX_PARTES}",
+                "{} tem {}, o que daria {previstas} partes; o teto aqui é {MAX_PARTES}",
                 caminho.display(),
                 humano_u64(meta.len())
             );
         }
-        if !tem_7z() {
+        if divisores.candidatos(caminho).is_empty() {
             bail!(
-                "{} tem {} e o Telegram só aceita 50 MB, mas não achei o 7z para dividir",
+                "{} tem {} e passa do teto do frontend, mas nenhum divisor está disponível para ele",
                 caminho.display(),
                 humano_u64(meta.len())
             );
@@ -340,13 +228,13 @@ pub fn para_enviar(caminho: &Path, como_arquivo: bool) -> Result<ParaEnviar> {
     Ok(ParaEnviar {
         caminho: caminho.to_path_buf(),
         tamanho: meta.len(),
-        como_foto: !como_arquivo && meta.len() <= LIMITE_FOTO && e_imagem(caminho),
+        como_foto: !como_arquivo && meta.len() <= limites.foto && e_imagem(caminho),
         precisa_dividir,
     })
 }
 
-/// Formato que o Telegram mostra inline como foto. GIF e SVG ficam de fora: o primeiro vira
-/// animação (e perde a animação em `sendPhoto`), o segundo o Telegram nem renderiza.
+/// Formato que costuma ser mostrado inline como foto. GIF e SVG ficam de fora: o primeiro vira
+/// animação (e perde a animação como foto), o segundo a maioria dos chats nem renderiza.
 fn e_imagem(caminho: &Path) -> bool {
     caminho
         .extension()
@@ -486,359 +374,7 @@ fn expande_til(caminho: &str) -> String {
     }
 }
 
-fn tem_7z() -> bool {
-    caminho_7z().is_some()
-}
-
-/// O 7z pode se chamar `7z` (p7zip completo) ou `7za` (só o núcleo). Os dois servem aqui.
-fn caminho_7z() -> Option<&'static str> {
-    ["7z", "7za", "7zz"].into_iter().find(|nome| {
-        std::process::Command::new(nome)
-            .arg("--help")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
-    })
-}
-
-/// Onde os volumes de uma sessão são montados: disco de verdade, e um subdiretório por envio
-/// para dois arquivos grandes ao mesmo tempo não se misturarem.
-pub fn dir_partes(session_id: &str) -> PathBuf {
-    paths::arquivos_base()
-        .join("partes")
-        .join(session_id)
-        .join(agora().to_string())
-}
-
-/// Como o arquivo foi partido, que é o que muda a instrução de juntar no fim.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Corte {
-    /// Volumes de 7z: nenhum abre sozinho, o conjunto se abre pelo `.001`.
-    Volumes,
-    /// Trechos de vídeo: cada um toca por si, e juntar é opcional.
-    Trechos,
-}
-
-/// Um arquivo grande partido, pronto para sair uma parte de cada vez.
-pub struct Partes {
-    /// Diretório só das partes; some inteiro depois do envio.
-    dir: PathBuf,
-    pub arquivos: Vec<PathBuf>,
-    /// Nome da primeira parte, que é por onde se abre o conjunto.
-    pub primeiro: String,
-    pub corte: Corte,
-}
-
-impl Partes {
-    pub async fn limpa(self) {
-        let _ = tokio::fs::remove_dir_all(&self.dir).await;
-    }
-}
-
-/// Divide um arquivo em volumes de 7z que o Telegram aceite.
-///
-/// 7z, e não `split`, porque o critério é juntar de volta no celular: parte crua de `split` só
-/// se remonta com `cat`, e os aplicativos de arquivo do Android (ZArchiver, RAR) abrem um
-/// conjunto `.7z.001` direto, com todas as partes na mesma pasta. A compressão fica no mínimo
-/// (`-mx1`): o que se quer aqui é o corte, não o ganho de tamanho.
-pub async fn divide(caminho: &Path, dir: PathBuf) -> Result<Partes> {
-    let bin = caminho_7z().context("não achei o 7z para dividir o arquivo")?;
-    let nome = sanitiza(
-        &caminho
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "arquivo".into()),
-    );
-
-    tokio::fs::create_dir_all(&dir)
-        .await
-        .with_context(|| format!("criando {}", dir.display()))?;
-
-    let alvo = dir.join(format!("{nome}.7z"));
-    let saida = tokio::process::Command::new(bin)
-        .arg("a")
-        .arg(format!("-v{VOLUME_MB}m"))
-        .arg("-mx1")
-        .arg("-y")
-        .arg(&alvo)
-        .arg(caminho)
-        .output()
-        .await
-        .context("rodando o 7z")?;
-
-    // Código de saída não é prova de artefato: o que vale é a lista de volumes em disco.
-    let mut arquivos: Vec<PathBuf> = Vec::new();
-    let mut entradas = tokio::fs::read_dir(&dir).await?;
-    while let Some(e) = entradas.next_entry().await? {
-        if e.path().is_file() {
-            arquivos.push(e.path());
-        }
-    }
-    arquivos.sort();
-
-    if arquivos.is_empty()
-        || arquivos
-            .iter()
-            .any(|p| p.metadata().is_ok_and(|m| m.len() == 0))
-    {
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        bail!(
-            "o 7z não produziu volume utilizável ({}) {}",
-            saida.status,
-            String::from_utf8_lossy(&saida.stderr).trim()
-        );
-    }
-    if arquivos.len() > MAX_PARTES {
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        bail!("deu {} partes, e o teto é {MAX_PARTES}", arquivos.len());
-    }
-
-    let primeiro = arquivos[0]
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    Ok(Partes {
-        dir,
-        arquivos,
-        primeiro,
-        corte: Corte::Volumes,
-    })
-}
-
-/// Container de vídeo que vale cortar por tempo em vez de quebrar em volumes.
-pub fn e_video(caminho: &Path) -> bool {
-    caminho
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| {
-            matches!(
-                e.to_ascii_lowercase().as_str(),
-                "mp4" | "mkv" | "mov" | "webm" | "m4v" | "avi" | "ts" | "mpg" | "mpeg"
-            )
-        })
-}
-
-/// Alvo de cada trecho de vídeo. Bem abaixo do teto porque o corte acontece no keyframe mais
-/// próximo, e não no ponto exato: o trecho real pode passar do alvo, e passar do teto seria um
-/// upload perdido.
-const ALVO_TRECHO: u64 = 40 * 1024 * 1024;
-
-/// Corta um vídeo em trechos que caibam numa mensagem, sem recodificar.
-///
-/// `-c copy` copia os fluxos como estão: é rápido (segundos para centenas de MB), não perde
-/// qualidade e mantém cada trecho sendo um vídeo de verdade, que toca sozinho no celular. É essa
-/// a diferença para os volumes de 7z, onde nenhuma parte serve para nada até estarem todas
-/// juntas.
-pub async fn corta_video(caminho: &Path, dir: PathBuf, alvo: u64) -> Result<Partes> {
-    let tamanho = std::fs::metadata(caminho)?.len();
-    let duracao = duracao_de(caminho).await?;
-    if duracao <= 0.0 {
-        bail!("não consegui ler a duração do vídeo");
-    }
-
-    tokio::fs::create_dir_all(&dir)
-        .await
-        .with_context(|| format!("criando {}", dir.display()))?;
-
-    let ext = caminho
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("mp4")
-        .to_ascii_lowercase();
-    let base = sanitiza(
-        caminho
-            .file_stem()
-            .and_then(|n| n.to_str())
-            .unwrap_or("video"),
-    );
-
-    // Primeira tentativa pelo bitrate médio; se um trecho passar do teto (GOP longo, cena
-    // pesada), corta na metade do tempo e tenta de novo. Duas tentativas bastam na prática, e
-    // insistir mais sairia mais caro que cair nos volumes.
-    let mut segundos = (duracao * alvo as f64 / tamanho as f64).max(5.0);
-    for tentativa in 0..2 {
-        let arquivos = segmenta(caminho, &dir, &base, &ext, segundos).await?;
-        let maior = arquivos
-            .iter()
-            .filter_map(|p| p.metadata().ok().map(|m| m.len()))
-            .max()
-            .unwrap_or(0);
-        if !arquivos.is_empty() && maior <= LIMITE_ENVIO && arquivos.len() <= MAX_PARTES {
-            let primeiro = arquivos[0]
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            return Ok(Partes {
-                dir,
-                arquivos,
-                primeiro,
-                corte: Corte::Trechos,
-            });
-        }
-        if tentativa == 0 {
-            segundos /= 2.0;
-        }
-    }
-
-    let _ = tokio::fs::remove_dir_all(&dir).await;
-    bail!("os trechos continuaram passando do teto do Telegram")
-}
-
-/// Uma passada do `ffmpeg` cortando por tempo. Devolve os trechos em ordem.
-async fn segmenta(
-    caminho: &Path,
-    dir: &Path,
-    base: &str,
-    ext: &str,
-    segundos: f64,
-) -> Result<Vec<PathBuf>> {
-    // Rodar de novo por cima do que já existe misturaria as duas tentativas.
-    let _ = tokio::fs::remove_dir_all(dir).await;
-    tokio::fs::create_dir_all(dir).await?;
-
-    let molde = dir.join(format!("{base}-parte-%03d.{ext}"));
-    let saida = tokio::process::Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
-        .arg(caminho)
-        .args(["-map", "0", "-c", "copy", "-f", "segment"])
-        .arg("-segment_time")
-        .arg(format!("{segundos:.3}"))
-        .args(["-reset_timestamps", "1"])
-        .arg(&molde)
-        .output()
-        .await
-        .context("rodando o ffmpeg")?;
-
-    let mut arquivos = Vec::new();
-    let mut entradas = tokio::fs::read_dir(dir).await?;
-    while let Some(e) = entradas.next_entry().await? {
-        if e.path().is_file() {
-            arquivos.push(e.path());
-        }
-    }
-    arquivos.sort();
-    // Saída zero não prova nada: o que vale é ter trecho em disco, e nenhum deles vazio.
-    if arquivos.is_empty()
-        || arquivos
-            .iter()
-            .any(|p| p.metadata().is_ok_and(|m| m.len() == 0))
-    {
-        bail!(
-            "o ffmpeg não produziu trecho utilizável: {}",
-            String::from_utf8_lossy(&saida.stderr).trim()
-        );
-    }
-    Ok(arquivos)
-}
-
-async fn duracao_de(caminho: &Path) -> Result<f64> {
-    let saida = tokio::process::Command::new("ffprobe")
-        .args([
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=nw=1:nk=1",
-        ])
-        .arg(caminho)
-        .output()
-        .await
-        .context("rodando o ffprobe")?;
-    String::from_utf8_lossy(&saida.stdout)
-        .trim()
-        .parse::<f64>()
-        .context("duração ilegível")
-}
-
-/// O ffmpeg está por aqui? Sem ele, vídeo grande cai nos volumes como qualquer outro arquivo.
-pub fn tem_ffmpeg() -> bool {
-    std::process::Command::new("ffmpeg")
-        .arg("-version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
-}
-
-/// Alvo padrão de cada trecho.
-pub fn alvo_trecho() -> u64 {
-    ALVO_TRECHO
-}
-
-fn agora() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-/// Reduz o que veio da API a um nome de arquivo simples: sem diretório, sem surpresa.
-fn sanitiza(bruto: &str) -> String {
-    // `file_name` do Telegram é texto livre. Ficar só com o último componente derruba de uma vez
-    // `../`, caminho absoluto e barra invertida do Windows.
-    let base = bruto
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_string();
-
-    let limpo: String = base
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    // Ponto na borda faz "." e "..", e faz arquivo oculto sem ninguém pedir.
-    let limpo = limpo.trim_matches('.');
-    if limpo.is_empty() {
-        return "arquivo".into();
-    }
-
-    // Nome longo demais estoura o limite do sistema de arquivos; cortar o miolo preserva a
-    // extensão, que é o que faz o arquivo ser reconhecido depois.
-    match limpo.rsplit_once('.') {
-        Some((corpo, ext)) if !ext.is_empty() && ext.len() <= 16 => {
-            let corpo: String = corpo.chars().take(MAX_NOME).collect();
-            let corpo = if corpo.is_empty() { "arquivo" } else { &corpo };
-            format!("{corpo}.{ext}")
-        }
-        _ => limpo.chars().take(MAX_NOME).collect(),
-    }
-}
-
-/// Um caminho que ainda não existe: `nota.pdf`, depois `nota-2.pdf`, e assim por diante.
-fn livre(dir: &Path, nome: &str) -> PathBuf {
-    let candidato = dir.join(nome);
-    if !candidato.exists() {
-        return candidato;
-    }
-    let (corpo, ext) = match nome.rsplit_once('.') {
-        Some((c, e)) if !c.is_empty() => (c.to_string(), format!(".{e}")),
-        _ => (nome.to_string(), String::new()),
-    };
-    for n in 2..10_000 {
-        let candidato = dir.join(format!("{corpo}-{n}{ext}"));
-        if !candidato.exists() {
-            return candidato;
-        }
-    }
-    // Dez mil homônimos na mesma sessão é cenário de erro, não de uso: sobrescrever aqui é
-    // melhor que devolver caminho impossível.
-    dir.join(nome)
-}
-
 /// Tamanho para ler no celular.
-pub fn humano(bytes: u32) -> String {
-    humano_u64(bytes as u64)
-}
-
 pub fn humano_u64(bytes: u64) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = KB * KB;
@@ -856,83 +392,22 @@ pub fn humano_u64(bytes: u64) -> String {
 mod tests {
     use super::*;
 
-    /// Uma `Message` como o Telegram manda, com só o que o `anexos` precisa ler.
-    fn msg(anexo: serde_json::Value) -> Message {
-        let mut v = serde_json::json!({
-            "message_id": 1,
-            "date": 0,
-            "chat": {"id": 1, "type": "private", "first_name": "Luka"}
-        });
-        let obj = v.as_object_mut().unwrap();
-        for (k, val) in anexo.as_object().unwrap() {
-            obj.insert(k.clone(), val.clone());
-        }
-        serde_json::from_value(v).expect("Message válida")
-    }
-
-    fn tipos(achado: &Achado) -> Vec<&'static str> {
-        match achado {
-            Achado::Arquivos(l) => l.iter().map(|a| a.tipo).collect(),
-            Achado::Nada => vec![],
+    #[test]
+    fn so_arquivo_direto_na_pasta_da_sessao_conta_como_dentro() {
+        let dir = Path::new("/home/luka/.local/share/lukadispatch/arquivos/s1");
+        assert!(direto_em(&dir.join("nota.pdf"), dir));
+        for fora in [
+            dir.join("../../.ssh/authorized_keys"),
+            dir.join(".."),
+            dir.join("sub/nota.pdf"),
+            Path::new("/etc/passwd").to_path_buf(),
+            dir.to_path_buf(),
+        ] {
+            assert!(!direto_em(&fora, dir), "{fora:?} passou por dentro");
         }
     }
-
-    /// `voice` como o Telegram manda. Os `Option` do teloxide não têm `default` e o `mime_type`
-    /// usa desserializador próprio, então campo que falta derruba a mensagem inteira para
-    /// `MediaKind::Empty` em vez de dar erro: o fixture precisa ser completo para valer de teste.
-    fn voz(mime: &str) -> serde_json::Value {
-        serde_json::json!({"voice": {
-            "file_id": "v1", "file_unique_id": "u1", "file_size": 12345,
-            "duration": 7, "mime_type": mime
-        }, "caption": null})
-    }
-
-    fn audio(nome: Option<&str>) -> serde_json::Value {
-        serde_json::json!({"audio": {
-            "file_id": "a1", "file_unique_id": "u2", "file_size": 999,
-            "duration": 90, "performer": null, "title": null,
-            "file_name": nome, "mime_type": "audio/mpeg", "thumbnail": null
-        }, "caption": null, "media_group_id": null})
-    }
-
-    #[test]
-    fn mensagem_de_voz_e_baixavel_como_qualquer_anexo() {
-        let a = anexos(&msg(voz("audio/ogg")));
-        assert_eq!(
-            tipos(&a),
-            ["mensagem de voz"],
-            "voz não pode mais ser recusada"
-        );
-    }
-
-    #[test]
-    fn audio_enviado_como_musica_mantem_o_nome() {
-        match anexos(&msg(audio(Some("recado.m4a")))) {
-            Achado::Arquivos(l) => {
-                assert_eq!(l[0].tipo, "áudio");
-                assert_eq!(l[0].nome.as_deref(), Some("recado.m4a"));
-            }
-            Achado::Nada => panic!("áudio deveria ser baixável"),
-        }
-    }
-
-    #[test]
-    fn voz_sem_nome_cai_no_caminho_do_telegram_para_achar_a_extensao() {
-        match anexos(&msg(voz("audio/ogg"))) {
-            Achado::Arquivos(l) => assert!(l[0].nome.is_none(), "voz não tem file_name"),
-            Achado::Nada => panic!("voz deveria ser baixável"),
-        }
-        // É o `sanitiza` do path do Telegram que salva a extensão nesse caso.
-        assert_eq!(sanitiza("voice/file_5.oga"), "file_5.oga");
-    }
-
-    #[test]
-    fn mensagem_so_de_texto_nao_tem_anexo() {
-        assert_eq!(
-            anexos(&msg(serde_json::json!({"text": "oi"}))),
-            Achado::Nada
-        );
-    }
+    use crate::divisor::Divisor;
+    use async_trait::async_trait;
 
     #[tokio::test]
     async fn audio_velho_sai_e_o_resto_fica() {
@@ -954,7 +429,7 @@ mod tests {
             }
         }
 
-        let apagados = varre_audio_velho_em(dir.path(), 7).await;
+        let apagados = varre_audio_velho(dir.path(), 7).await;
 
         // A contagem sozinha passaria com 0 == 0: o que prende o teste é QUAL arquivo sobrou.
         assert_eq!(apagados, 1, "só o áudio velho devia sair");
@@ -979,7 +454,7 @@ mod tests {
         let antigo = std::time::SystemTime::now() - std::time::Duration::from_secs(400 * 24 * 3600);
         filetime::set_file_mtime(&f, filetime::FileTime::from_system_time(antigo)).unwrap();
 
-        assert_eq!(varre_audio_velho(0).await, 0);
+        assert_eq!(varre_audio_velho(dir.path(), 0).await, 0);
         assert!(f.exists(), "prazo zero não pode apagar nada");
     }
 
@@ -993,50 +468,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn caminho_no_nome_vira_nome_simples() {
-        assert_eq!(sanitiza("../../.ssh/authorized_keys"), "authorized_keys");
-        assert_eq!(sanitiza("/etc/passwd"), "passwd");
-        assert_eq!(sanitiza(r"C:\Users\x\nota.pdf"), "nota.pdf");
-        assert_eq!(sanitiza("photos/file_42.jpg"), "file_42.jpg");
-    }
-
-    #[test]
-    fn nome_perigoso_nao_sobra() {
-        for bruto in ["..", ".", "...", "/", ""] {
-            let n = sanitiza(bruto);
-            assert!(
-                !n.is_empty() && n != "." && n != ".." && !n.contains('/'),
-                "{bruto:?} virou {n:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn espaco_e_acento_viram_sublinhado() {
-        assert_eq!(sanitiza("relatório final.pdf"), "relat_rio_final.pdf");
-    }
-
-    #[test]
-    fn nome_gigante_e_cortado_mas_mantem_a_extensao() {
-        let n = sanitiza(&format!("{}.pdf", "a".repeat(300)));
-        assert!(n.ends_with(".pdf"), "{n}");
-        assert!(n.len() <= MAX_NOME + 4, "{} caracteres", n.len());
-    }
-
-    #[test]
-    fn segundo_arquivo_de_mesmo_nome_nao_sobrescreve() {
-        let dir = tempfile::tempdir().unwrap();
-        let primeiro = livre(dir.path(), "nota.pdf");
-        assert_eq!(primeiro, dir.path().join("nota.pdf"));
-        std::fs::write(&primeiro, b"x").unwrap();
-        assert_eq!(
-            livre(dir.path(), "nota.pdf"),
-            dir.path().join("nota-2.pdf"),
-            "o primeiro tem que continuar lá"
-        );
-    }
-
     #[tokio::test]
     async fn a_varredura_poupa_a_sessao_viva() {
         let raiz = tempfile::tempdir().unwrap();
@@ -1047,7 +478,7 @@ mod tests {
         std::fs::write(morta.join("nota.pdf"), b"x").unwrap();
 
         let vivas = std::collections::HashSet::from(["viva".to_string()]);
-        assert_eq!(varre_em(raiz.path(), &vivas).await, 1);
+        assert_eq!(varre_orfaos(raiz.path(), &vivas).await, 1);
         assert!(viva.is_dir(), "a sessão viva não pode perder o que recebeu");
         assert!(!morta.exists());
         assert!(
@@ -1056,17 +487,55 @@ mod tests {
         );
     }
 
+    struct DivisorFalso(bool);
+    #[async_trait]
+    impl Divisor for DivisorFalso {
+        fn nome(&self) -> &str {
+            "falso"
+        }
+        fn disponivel(&self) -> bool {
+            self.0
+        }
+        fn aceita(&self, _c: &Path) -> bool {
+            true
+        }
+        fn anuncio(&self, _teto: u64) -> String {
+            String::new()
+        }
+        async fn divide(
+            &self,
+            _c: &Path,
+            dir: PathBuf,
+            _teto: u64,
+        ) -> Result<crate::divisor::Partes> {
+            Ok(crate::divisor::Partes::new(
+                dir,
+                vec![],
+                crate::frontend::Midia::Documento,
+                String::new(),
+            ))
+        }
+    }
+
     #[test]
     fn diretorio_e_vazio_nao_saem_daqui() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(para_enviar(dir.path(), false).is_err(), "diretório não vai");
+        let limites = Limites::default();
+        let divisores = Divisores::new(vec![]);
+        assert!(
+            para_enviar(dir.path(), false, &limites, &divisores).is_err(),
+            "diretório não vai"
+        );
 
         let vazio = dir.path().join("nada.txt");
         std::fs::write(&vazio, b"").unwrap();
-        assert!(para_enviar(&vazio, false).is_err(), "arquivo vazio não vai");
+        assert!(
+            para_enviar(&vazio, false, &limites, &divisores).is_err(),
+            "arquivo vazio não vai"
+        );
 
         assert!(
-            para_enviar(&dir.path().join("nao-existe"), false).is_err(),
+            para_enviar(&dir.path().join("nao-existe"), false, &limites, &divisores).is_err(),
             "caminho inexistente não vai"
         );
     }
@@ -1074,20 +543,66 @@ mod tests {
     #[test]
     fn imagem_vai_como_foto_a_nao_ser_que_voce_peca_o_arquivo() {
         let dir = tempfile::tempdir().unwrap();
+        let limites = Limites::default();
+        let divisores = Divisores::new(vec![]);
         let png = dir.path().join("grafico.PNG");
         std::fs::write(&png, b"x").unwrap();
         assert!(
-            para_enviar(&png, false).unwrap().como_foto,
+            para_enviar(&png, false, &limites, &divisores)
+                .unwrap()
+                .como_foto,
             "extensão não diferencia maiúscula"
         );
         assert!(
-            !para_enviar(&png, true).unwrap().como_foto,
+            !para_enviar(&png, true, &limites, &divisores)
+                .unwrap()
+                .como_foto,
             "pedir o arquivo exato tem que valer mais que a conveniência"
         );
 
         let log = dir.path().join("saida.log");
         std::fs::write(&log, b"x").unwrap();
-        assert!(!para_enviar(&log, false).unwrap().como_foto);
+        assert!(
+            !para_enviar(&log, false, &limites, &divisores)
+                .unwrap()
+                .como_foto
+        );
+    }
+
+    #[test]
+    fn precisa_dividir_sem_candidato_e_erro() {
+        let dir = tempfile::tempdir().unwrap();
+        let grande = dir.path().join("grande.bin");
+        std::fs::write(&grande, vec![7u8; 200]).unwrap();
+        let limites = Limites {
+            enviar: 100,
+            ..Limites::default()
+        };
+        // Sem divisor disponível na cadeia.
+        let sem_candidato = Divisores::new(vec![std::sync::Arc::new(DivisorFalso(false))]);
+        let e = para_enviar(&grande, false, &limites, &sem_candidato).unwrap_err();
+        assert!(format!("{e:#}").contains("nenhum divisor"), "{e:#}");
+
+        let com_candidato = Divisores::new(vec![std::sync::Arc::new(DivisorFalso(true))]);
+        assert!(
+            para_enviar(&grande, false, &limites, &com_candidato)
+                .unwrap()
+                .precisa_dividir
+        );
+    }
+
+    #[test]
+    fn previsao_de_partes_acima_do_teto_e_erro() {
+        let dir = tempfile::tempdir().unwrap();
+        let grande = dir.path().join("grande.bin");
+        std::fs::write(&grande, vec![7u8; 3000]).unwrap();
+        let limites = Limites {
+            enviar: 10,
+            ..Limites::default()
+        };
+        let divisores = Divisores::new(vec![std::sync::Arc::new(DivisorFalso(true))]);
+        let e = para_enviar(&grande, false, &limites, &divisores).unwrap_err();
+        assert!(format!("{e:#}").contains("partes"), "{e:#}");
     }
 
     /// Achata os pedaços de volta em (texto, envios). Os testes que não são sobre ORDEM
@@ -1218,98 +733,10 @@ mod tests {
         );
     }
 
-    /// Divide de verdade, com o 7z da máquina. Some quando ele não existe, porque aí o daemon
-    /// também recusa antes de tentar.
-    #[tokio::test]
-    async fn arquivo_grande_vira_volumes_que_somam_o_original() {
-        if !tem_7z() {
-            return;
-        }
-        let raiz = tempfile::tempdir().unwrap();
-        let grande = raiz.path().join("grande.bin");
-        // Incompressível de propósito: com texto repetido o 7z geraria um volume só e o teste
-        // não provaria nada.
-        let mut dados = Vec::with_capacity(3 * 1024 * 1024);
-        let mut x: u32 = 12345;
-        while dados.len() < 3 * 1024 * 1024 {
-            x = x.wrapping_mul(1664525).wrapping_add(1013904223);
-            dados.extend_from_slice(&x.to_le_bytes());
-        }
-        std::fs::write(&grande, &dados).unwrap();
-
-        let partes = divide(&grande, raiz.path().join("partes")).await.unwrap();
-        assert!(!partes.arquivos.is_empty());
-        assert!(partes.primeiro.ends_with(".001"), "{}", partes.primeiro);
-        let soma: u64 = partes
-            .arquivos
-            .iter()
-            .map(|p| p.metadata().unwrap().len())
-            .sum();
-        assert!(soma > 0, "volume vazio não é divisão");
-        let dir = partes.dir.clone();
-        partes.limpa().await;
-        assert!(!dir.exists(), "as partes têm que sumir depois do envio");
-    }
-
-    /// Corta um vídeo de verdade, gerado na hora, com alvo pequeno para caber no teste.
-    #[tokio::test]
-    async fn video_vira_trechos_que_tocam_sozinhos() {
-        if !tem_ffmpeg() {
-            return;
-        }
-        let raiz = tempfile::tempdir().unwrap();
-        let video = raiz.path().join("fonte.mp4");
-        let feito = tokio::process::Command::new("ffmpeg")
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
-                "-f",
-                "lavfi",
-                "-i",
-                "testsrc=size=320x240:rate=15:duration=12",
-                "-c:v",
-                "libx264",
-                "-g",
-                "15",
-                "-pix_fmt",
-                "yuv420p",
-            ])
-            .arg(&video)
-            .status()
-            .await;
-        if !feito.is_ok_and(|s| s.success()) {
-            return; // sem codificador de vídeo nesta máquina
-        }
-
-        let tamanho = std::fs::metadata(&video).unwrap().len();
-        // Alvo de um terço do arquivo: tem que sair mais de um trecho.
-        let partes = corta_video(&video, raiz.path().join("trechos"), tamanho / 3)
-            .await
-            .unwrap();
-        assert!(partes.arquivos.len() > 1, "era para cortar em mais de um");
-        assert_eq!(partes.corte, Corte::Trechos);
-        assert!(partes.primeiro.ends_with(".mp4"), "{}", partes.primeiro);
-        for p in &partes.arquivos {
-            let m = p.metadata().unwrap();
-            assert!(m.len() > 0, "trecho vazio em {}", p.display());
-        }
-        // Cada trecho tem que ser um vídeo legível por si: é essa a razão de cortar por tempo.
-        for p in &partes.arquivos {
-            assert!(
-                duracao_de(p).await.unwrap_or(0.0) > 0.0,
-                "{} não é vídeo",
-                p.display()
-            );
-        }
-        partes.limpa().await;
-    }
-
     #[test]
     fn tamanho_legivel() {
-        assert_eq!(humano(512), "512 B");
-        assert_eq!(humano(2048), "2 KB");
-        assert_eq!(humano(3 * 1024 * 1024), "3.0 MB");
+        assert_eq!(humano_u64(512), "512 B");
+        assert_eq!(humano_u64(2048), "2 KB");
+        assert_eq!(humano_u64(3 * 1024 * 1024), "3.0 MB");
     }
 }

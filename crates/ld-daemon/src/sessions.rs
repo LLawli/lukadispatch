@@ -1,39 +1,22 @@
-//! Nascimento e morte de uma sessão: o tmux, o script de partida e o prompt de bootstrap.
+//! Onde as sessões rodam: o hospedeiro, que sobe o script de partida que o agente montou e mata
+//! quando pedido.
 //!
-//! A sessão sobe como `ai-memory run claude` dentro de um tmux próprio, então continua entrando
-//! na memória de longo prazo e dá para anexar no PC com `tmux attach`. O prompt inicial é
-//! argumento do `claude`, não tecla injetada: é a única "injeção" do projeto e ela acontece
-//! antes de a sessão existir.
-
-use std::path::PathBuf;
+//! O que compõe a partida (linha de comando, prompt, envelope) não é deste módulo: mora em
+//! [`crate::agente`], que devolve uma [`crate::agente::Partida`] já pronta para rodar. Aqui fica
+//! só o mecanismo que a mantém de pé, hoje o tmux ([`Tmux`]), escolhido porque deixa a sessão
+//! anexável no PC com `tmux attach` e sobrevive a restart do daemon.
 
 use anyhow::{Context, Result, bail};
 use ld_core::config::Project;
 use ld_core::paths;
 use tokio::process::Command;
 
+use crate::agente::Partida;
+
+#[derive(Debug)]
 pub struct Launched {
     pub session_id: String,
     pub tmux: String,
-}
-
-/// Como subir uma sessão.
-///
-/// `resume` é o que permite trocar o modelo de uma sessão viva sem perder a conversa: mata-se o
-/// processo e sobe-se de novo com `--resume <id>`, que continua o mesmo transcript. É a única
-/// forma de atender `/model` e `/effort` pelo Telegram, porque esses comandos são do frontend do
-/// Claude Code e nenhum evento consegue dispará-los.
-pub struct Spec<'a> {
-    pub projeto: &'a Project,
-    pub permission_mode: &'a str,
-    pub model: Option<&'a str>,
-    pub effort: Option<&'a str>,
-    pub resume: Option<&'a str>,
-    /// `true` quando o `resume` é "continuar de onde parou" (e não uma troca de modelo). Muda só
-    /// a primeira frase do prompt, para a sessão saber por que voltou.
-    pub retomada: bool,
-    /// Passar os servidores MCP pelo proxy.
-    pub wrap_mcp: bool,
 }
 
 /// Nome de sessão tmux: previsível para você achar no `tmux ls`, e único para dois projetos com
@@ -58,209 +41,9 @@ pub fn tmux_name(projeto: &str, session_id: &str) -> String {
     format!("ld-{slug}-{}", &session_id[..4])
 }
 
-/// O que a sessão lê antes de qualquer outra coisa.
-///
-/// Ele precisa ser explícito em quatro pontos, e cada um deles já foi motivo de bug em ponte de
-/// agente: (1) o Monitor é ferramenta diferida, então sem `ToolSearch` antes o agente não
-/// consegue chamá-lo; (2) a resposta vai sozinha pelo hook, senão o agente tenta "mandar" a
-/// mensagem por conta própria e inventa um curl; (3) o monitor expira e precisa voltar; (4)
-/// arquivo se manda escrevendo um marcador na resposta, não chamando ferramenta.
-pub fn bootstrap_prompt(session_id: &str, projeto: &str) -> String {
-    let cli = paths::cli();
-    // A marca é a primeira linha de todo prompt injetado: é por ela que o replay sabe que este
-    // texto é do sistema, e não uma fala sua.
-    let marca = ld_core::transcript::MARCA_SISTEMA;
-    format!(
-        r#"{marca}
-Você está rodando dentro do lukadispatch. O seu usuário (Luka) fala com você pelo tópico "{projeto}" de um grupo do Telegram, e NÃO por este terminal. Ninguém está lendo esta tela.
-
-Faça agora, nesta ordem, e nada além disso:
-
-1. Chame ToolSearch com query "select:Monitor" para carregar o schema da ferramenta Monitor.
-2. Chame Monitor com exatamente estes argumentos:
-   command: {cli} listen --session {session_id}
-   description: mensagens do Telegram
-   timeout_ms: 1800000
-3. Pare. Não escreva relatório, não explore o projeto, não chame mais nenhuma ferramenta. Fique em silêncio até chegar o primeiro evento do monitor.
-
-Como funciona daqui em diante:
-
-- Cada linha que o monitor emitir é uma mensagem do Luka, em JSON: {{"kind":"message","text":"...","from":"...","at":0}}. Trate o campo "text" exatamente como se ele tivesse acabado de digitar aquilo para você, e trabalhe normalmente. O campo "from" diz de ONDE a mensagem saiu (o nome de quem escreveu, quando veio do Telegram, ou "pc" quando foi injetada aqui da máquina), e não muda em nada o que você deve fazer.
-- Quando ele manda um arquivo (foto, PDF, vídeo), a linha vem com um campo a mais: "files":["/caminho/absoluto"]. O arquivo JÁ ESTÁ em disco nesse caminho, e o mesmo caminho aparece no "text" como "[arquivo recebido: ...]". Abra com Read (ou a ferramenta que couber) antes de responder: ele mandou o arquivo porque quer que você olhe. Não tente baixar nada do Telegram por conta própria.
-- Para DEVOLVER um arquivo (um gráfico que você gerou, um log, um screenshot, um build), não rode comando nenhum: escreva na sua resposta final uma linha SOZINHA, contendo só isto, com caminho absoluto: "@arquivo: /caminho/do/arquivo.png". Pode ter legenda depois de " | ". O hook tira essa linha da mensagem e manda o arquivo NA POSIÇÃO EXATA em que ela apareceu, então você intercala texto e arquivo à vontade: parágrafo, imagem, parágrafo, log, parágrafo. Ponha cada marcador logo depois do trecho que fala dele. Use "@documento:" no lugar de "@arquivo:" quando os bytes EXATOS importarem (um .csv, um build, um PDF); "@arquivo:" manda imagem como foto, que aparece na conversa e é o que você quer em quase todo caso visual. A linha precisa ser a linha inteira: marcador no meio de uma frase, dentro de crase ou depois de hífen de lista é ignorado de propósito, para você poder FALAR do formato sem disparar envio. Tamanho não é problema seu: até 50 MB vai direto, e acima disso o daemon divide em volumes .7z e manda um por um, com a instrução de juntar. Nunca mande um arquivo que o Luka não pediu.
-- O Telegram NÃO renderiza Markdown: tabela vira um amontoado de pipes, e cabeçalho de markdown aparece com os próprios sinais de cerquilha na tela. Então TABELA, GRÁFICO, DIAGRAMA, comparação lado a lado e qualquer coisa que dependa de alinhamento você GERA COMO IMAGEM e manda com "@arquivo:" (como foto, nunca "@documento:", senão ele não aparece na conversa e vira um anexo para baixar). Para texto corrido, negrito e itálico funcionam; lista simples com "-" também. Prosa continua sendo prosa: não transforme duas frases num PNG.
-- Chave, credencial, token e .env são caso à parte: NUNCA saem em claro por este canal. Eles só podem ser enviados criptografados, e só depois que o Luka tiver fornecido a chave pública dele nesta conversa: importe a chave e cifre para ela A ferramenta se escolhe pelo FORMATO da chave que ele mandou, e não por preferência sua: se ela começa com "ssh-ed25519" ou "ssh-rsa", grave a linha inteira num arquivo e use "age -R chave.pub -o arquivo.age arquivo"; se começa com "age1", use "age -r age1... -o arquivo.age arquivo"; se vier um bloco "-----BEGIN PGP PUBLIC KEY BLOCK-----", use "gpg --import chave.asc" e depois "gpg --encrypt --recipient <id> --output arquivo.gpg arquivo". Nunca converta a chave de um formato para outro, e se não reconhecer o formato, pergunte em vez de tentar.. Mande só o arquivo cifrado e nunca o original; apague o original em claro assim que cifrar, e o cifrado só NO TURNO SEGUINTE, porque o envio acontece depois da sua resposta (apagar antes faria o arquivo sumir antes de subir). Sem chave pública fornecida por ele, não mande: diga o que você tem e espere a chave.
-- VOCÊ NÃO PRECISA ENVIAR NADA DE VOLTA em texto. Um hook pega a sua resposta final e entrega no Telegram sozinho. Nunca chame curl, nunca use a API do Telegram, nunca tente "mandar mensagem": isso duplicaria tudo.
-- Perguntas e pedidos de permissão também saem sozinhos: use AskUserQuestion normalmente, que ela aparece no celular e numa janela no PC ao mesmo tempo.
-- O monitor expira a cada 30 minutos. Quando isso acontecer, arme-o de novo com a mesma chamada do passo 2, SEM ESCREVER NADA sobre isso: não diga "monitor rearmado", não avise, não comente. O re-arme é encanamento, e qualquer frase sua depois de uma resposta vira a mensagem que chega no celular no lugar da resposta. Se você terminar um turno sem monitor armado, um lembrete vai chegar: cumpra-o na hora, senão a sessão fica surda.
-"#
-    )
-}
-
-/// O que a sessão lê quando volta por `--resume` (troca de modelo ou de esforço).
-///
-/// Curto de propósito: o contexto todo já está de volta com ela, e a única coisa que se perdeu
-/// no caminho foi o Monitor, que morre junto com o processo anterior.
-pub fn rearm_prompt(session_id: &str, retomada: bool) -> String {
-    let cli = paths::cli();
-    let marca = ld_core::transcript::MARCA_SISTEMA;
-    let abertura = if retomada {
-        "Esta conversa foi retomada pelo lukadispatch e agora está ligada a um tópico do Telegram. Tudo o que vocês já conversaram continua aqui; o Luka acabou de receber as últimas falas no celular."
-    } else {
-        "A sua sessão foi reiniciada pelo lukadispatch (troca de modelo ou de esforço). O contexto continua o mesmo; o que se perdeu foi o canal do Telegram."
-    };
-    format!(
-        r#"{marca}
-{abertura}
-
-Faça só isto, agora:
-
-1. Chame ToolSearch com query "select:Monitor".
-2. Chame Monitor com command "{cli} listen --session {session_id}", description "mensagens do Telegram" e timeout_ms 1800000.
-3. Pare e fique em silêncio até chegar o próximo evento do monitor: nem "pronto", nem "monitor rearmado", nada. Não retome o que estava fazendo por conta própria, não resuma nada e não pergunte se pode continuar: se o Luka quiser seguir, ele manda.
-"#
-    )
-}
-
-/// A linha do `--permission-mode` para o modo pedido.
-///
-/// O modo `perguntar` é nosso, não do Claude Code, e ele vira `dontAsk` aqui. A escolha vem de
-/// medição: `dontAsk` é o único modo em que o terminal **nunca** abre prompt (o que travaria a
-/// sessão para quem está longe), e a decisão do nosso portão, que vive no `PreToolUse`, é
-/// honrada mesmo dentro dele. O que o portão não cobrir é negado em vez de ficar esperando
-/// teclado, e o agente relata a negativa em vez de emudecer.
-fn modo_flag(modo: &str) -> String {
-    let efetivo = match modo {
-        "perguntar" => "dontAsk",
-        "" | "padrao" => return String::new(),
-        outro => outro,
-    };
-    format!("  --permission-mode {efetivo} \\\n")
-}
-
-/// Nome do workstream gerenciado do ai-memory.
-///
-/// Precisa ser único por sessão: o `ai-memory run` recusa com 409 quando o workstream do projeto
-/// já está ativo (é o que acontece se você já tem uma sessão gerenciada ali), e recusa de novo se
-/// o nome pedido em `--new` já existir. Com o id da sessão no nome, nenhum dos dois acontece.
-pub fn workstream_name(session_id: &str) -> String {
-    format!("lukadispatch-{}", &session_id[..8])
-}
-
-/// Igual ao de cima, mais um carimbo de tempo.
-///
-/// Uma sessão pode subir mais de uma vez (troca de modelo por `--resume`), e `--new` recusa nome
-/// repetido. Sem o carimbo, a segunda partida da mesma sessão morreria com 409.
-fn workstream_name_unico(session_id: &str) -> String {
-    let agora = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format!("{}-{agora}", workstream_name(session_id))
-}
-
-/// Escreve o script de partida da sessão e devolve o caminho.
-///
-/// O script existe para dar para ler depois, exatamente, o que foi lançado quando algo der
-/// errado, e para o `tmux new-session` receber um comando simples em vez de uma linha montada
-/// com aspas dentro de aspas.
-///
-/// **O prompt continua aparecendo no `ps`**: ele entra como `"$(cat prompt.txt)"`, e o shell
-/// expande isso antes de o `claude` nascer, então o texto vira argv. Medido do jeito pior: um
-/// `pkill -f 'lukadispatch listen'` meu, feito para matar um processo de teste, casou com a
-/// linha do prompt (que cita esse comando) e matou a sessão inteira. Não há como evitar sem
-/// abrir mão do prompt inicial, que é argumento posicional do `claude` por definição; o que dá
-/// para fazer é saber disto antes de mirar um `pkill` por padrão nesta máquina.
-fn write_launch_script(session_id: &str, spec: &Spec<'_>) -> Result<PathBuf> {
-    let dir = paths::state_dir().join("sessions").join(session_id);
-    std::fs::create_dir_all(&dir).with_context(|| format!("criando {}", dir.display()))?;
-
-    let prompt = dir.join("prompt.txt");
-    let texto = match spec.resume {
-        Some(_) => rearm_prompt(session_id, spec.retomada),
-        None => bootstrap_prompt(session_id, &spec.projeto.name),
-    };
-    std::fs::write(&prompt, texto)?;
-
-    // Configuração de MCP própria, com cada servidor de stdio passando pelo proxy. Ela precisa
-    // vir com `--strict-mcp-config`, senão o original subiria junto com o embrulhado, e o
-    // servidor apareceria duas vezes na sessão.
-    let mcp = if spec.wrap_mcp {
-        let servidores =
-            ld_core::mcp::servidores_do_projeto(&paths::claude_json(), &spec.projeto.path);
-        if servidores.is_empty() {
-            String::new()
-        } else {
-            let arquivo = dir.join("mcp.json");
-            let conteudo =
-                ld_core::mcp::config_embrulhada(&servidores, session_id, &paths::mcp_proxy());
-            std::fs::write(&arquivo, serde_json::to_string_pretty(&conteudo)?)?;
-            tracing::info!(
-                servidores = ?ld_core::mcp::embrulhados(&servidores),
-                "servidores MCP passando pelo proxy"
-            );
-            format!(
-                "  --mcp-config {} \\\n  --strict-mcp-config \\\n",
-                arquivo.display()
-            )
-        }
-    } else {
-        String::new()
-    };
-
-    let script = dir.join("launch.sh");
-    let settings = paths::bot_settings_file();
-
-    // `--session-id` cria; `--resume` continua. Os dois juntos o Claude Code recusa.
-    let selecao = match spec.resume {
-        Some(id) => format!("--resume {id}"),
-        None => format!("--session-id {session_id}"),
-    };
-    let mut extras = String::new();
-    if let Some(m) = spec.model {
-        extras.push_str(&format!("  --model {m} \\\n"));
-    }
-    if let Some(e) = spec.effort {
-        extras.push_str(&format!("  --effort {e} \\\n"));
-    }
-
-    std::fs::write(
-        &script,
-        format!(
-            r#"#!/usr/bin/env bash
-# Gerado pelo lukadispatch para a sessão {session_id}. Editar aqui não muda nada:
-# o arquivo é reescrito a cada partida da sessão.
-set -u
-exec ai-memory run --new {workstream} claude \
-  {selecao} \
-  --settings {settings} \
-{modo}{extras}{mcp}  -n {nome} \
-  "$(cat {prompt})"
-"#,
-            settings = settings.display(),
-            prompt = prompt.display(),
-            modo = modo_flag(spec.permission_mode),
-            workstream = workstream_name_unico(session_id),
-            nome = shell_quote(&spec.projeto.name),
-            mcp = mcp,
-        ),
-    )?;
-    Ok(script)
-}
-
-/// Aspas simples para um argumento de shell, com o truque padrão para a própria aspa.
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
 /// Sobe a sessão. Devolve erro sem deixar lixo se o tmux não vingar.
-pub async fn launch(spec: &Spec<'_>) -> Result<Launched> {
-    let session_id = match spec.resume {
-        Some(id) => id.to_string(),
-        None => uuid::Uuid::new_v4().to_string(),
-    };
-    let tmux = tmux_name(&spec.projeto.name, &session_id);
-    let script = write_launch_script(&session_id, spec)?;
+pub async fn launch(partida: &Partida, projeto: &Project) -> Result<Launched> {
+    let tmux = tmux_name(&projeto.name, &partida.session_id);
 
     let saida = Command::new("tmux")
         .args([
@@ -269,9 +52,9 @@ pub async fn launch(spec: &Spec<'_>) -> Result<Launched> {
             "-s",
             &tmux,
             "-c",
-            &spec.projeto.path,
+            &projeto.path,
             "-e",
-            &format!("LD_SESSION={session_id}"),
+            &format!("LD_SESSION={}", partida.session_id),
             // O hook roda dentro desta sessão e precisa achar o socket. O servidor tmux pode
             // ter sido iniciado com outro ambiente (sem XDG_RUNTIME_DIR, por exemplo), então o
             // caminho vai explícito em vez de depender do que ele herdou.
@@ -279,7 +62,7 @@ pub async fn launch(spec: &Spec<'_>) -> Result<Launched> {
             &format!("LUKADISPATCH_SOCKET={}", paths::socket().display()),
             "bash",
         ])
-        .arg(&script)
+        .arg(&partida.script)
         .output()
         .await
         .context("chamando tmux (ele está instalado?)")?;
@@ -296,13 +79,13 @@ pub async fn launch(spec: &Spec<'_>) -> Result<Launched> {
         bail!("tmux saiu 0 mas a sessão {tmux} não existe");
     }
 
-    // Espelha o painel num arquivo. É por `pipe-pane`, e não redirecionando o comando, porque o
-    // Claude Code precisa de um terminal de verdade no stdout: com um pipe ali ele entra em modo
-    // não interativo. Sem esse espelho, uma sessão que morre ao subir não deixa pista nenhuma.
-    let log = script.with_file_name("pane.log");
+    // Espelha o painel no arquivo que a partida escolheu. É por `pipe-pane`, e não redirecionando
+    // o comando, porque o Claude Code precisa de um terminal de verdade no stdout: com um pipe
+    // ali ele entra em modo não interativo. Sem esse espelho, uma sessão que morre ao subir não
+    // deixa pista nenhuma.
     let _ = Command::new("tmux")
         .args(["pipe-pane", "-o", "-t", &tmux])
-        .arg(format!("cat >> {}", log.display()))
+        .arg(format!("cat >> {}", partida.log.display()))
         .output()
         .await;
 
@@ -310,10 +93,13 @@ pub async fn launch(spec: &Spec<'_>) -> Result<Launched> {
     // confiança, projeto inexistente), e é justamente o que passaria por "deu certo".
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     if !has_session(&tmux).await {
-        bail!("a sessão morreu ao subir: {}", primeiro_erro(&log));
+        bail!("a sessão morreu ao subir: {}", primeiro_erro(&partida.log));
     }
 
-    Ok(Launched { session_id, tmux })
+    Ok(Launched {
+        session_id: partida.session_id.clone(),
+        tmux,
+    })
 }
 
 /// A linha de erro mais útil do espelho do painel.
@@ -377,6 +163,56 @@ pub async fn kill(tmux: &str) -> Result<()> {
     Ok(())
 }
 
+/// Onde as sessões rodam: sobe, confere se está viva, mata e lista.
+///
+/// É a porta que separa o ciclo de vida da sessão (que o `App` conduz) do mecanismo que a
+/// mantém de pé. Hoje o mecanismo é o tmux ([`Tmux`]), escolhido porque deixa a sessão anexável
+/// no PC com `tmux attach` e sobrevive a restart do daemon. Outro multiplexador (zellij, screen)
+/// ou um contêiner por sessão entraria como outra implementação, e os testes de fluxo usam uma
+/// de mentira para não depender de tmux nenhum.
+///
+/// Os nomes que ela devolve em [`Launched::tmux`] e aceita nos outros métodos são opacos para
+/// quem chama: é só o que identifica a sessão para o próprio hospedeiro.
+#[async_trait::async_trait]
+pub trait Hospedeiro: Send + Sync + 'static {
+    /// Sobe a sessão a partir da [`Partida`] que o agente montou, e só volta quando ela está de
+    /// pé de verdade (ou com o motivo de não estar). Não deixa lixo em caso de erro.
+    async fn lanca(&self, partida: &Partida, projeto: &Project) -> Result<Launched>;
+
+    /// A sessão com este nome existe?
+    async fn vive(&self, nome: &str) -> bool;
+
+    /// Encerra. Sessão que já não existe não é erro: o objetivo era ela não existir.
+    async fn mata(&self, nome: &str) -> Result<()>;
+
+    /// As sessões que este projeto criou e ainda estão de pé, inclusive as que o banco já
+    /// esqueceu (é assim que a reconciliação acha órfãs).
+    async fn nossas(&self) -> Vec<String>;
+}
+
+/// O tmux como [`Hospedeiro`]. As funções livres deste módulo são a implementação.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Tmux;
+
+#[async_trait::async_trait]
+impl Hospedeiro for Tmux {
+    async fn lanca(&self, partida: &Partida, projeto: &Project) -> Result<Launched> {
+        launch(partida, projeto).await
+    }
+
+    async fn vive(&self, nome: &str) -> bool {
+        has_session(nome).await
+    }
+
+    async fn mata(&self, nome: &str) -> Result<()> {
+        kill(nome).await
+    }
+
+    async fn nossas(&self) -> Vec<String> {
+        nossas_sessoes().await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,24 +228,6 @@ mod tests {
     fn nome_vazio_nao_gera_sessao_sem_nome() {
         let id = "abcd1234-0000-0000-0000-000000000000";
         assert_eq!(tmux_name("!!!", id), "ld-projeto-abcd");
-    }
-
-    #[test]
-    fn perguntar_vira_dontask() {
-        // `dontAsk` é o que garante que o terminal nunca abre prompt; quem decide é o portão.
-        assert!(modo_flag("perguntar").contains("--permission-mode dontAsk"));
-        assert!(modo_flag("auto").contains("--permission-mode auto"));
-        assert_eq!(modo_flag("padrao"), "");
-    }
-
-    #[test]
-    fn workstream_e_unico_por_sessao() {
-        // O ai-memory recusa com 409 se o workstream do projeto já estiver ativo, então dois
-        // lançamentos não podem pedir o mesmo nome.
-        let a = workstream_name("abcd1234-0000-0000-0000-000000000000");
-        let b = workstream_name("ffff9999-0000-0000-0000-000000000000");
-        assert_ne!(a, b);
-        assert_eq!(a, "lukadispatch-abcd1234");
     }
 
     #[test]
@@ -431,57 +249,81 @@ mod tests {
             "sem saída registrada"
         );
     }
+}
 
-    #[test]
-    fn todo_prompt_injetado_leva_a_marca() {
-        // Sem ela, o replay mostraria estes textos como se você os tivesse escrito.
-        assert!(bootstrap_prompt("sid", "proj").starts_with(ld_core::transcript::MARCA_SISTEMA));
-        assert!(rearm_prompt("sid", true).starts_with(ld_core::transcript::MARCA_SISTEMA));
-        assert!(rearm_prompt("sid", false).starts_with(ld_core::transcript::MARCA_SISTEMA));
+#[cfg(test)]
+mod testes_hospedeiro {
+    use super::*;
+
+    fn tem_tmux() -> bool {
+        std::process::Command::new("tmux")
+            .arg("-V")
+            .output()
+            .is_ok_and(|s| s.status.success())
     }
 
-    #[test]
-    fn prompt_carrega_o_monitor_antes_de_usar() {
-        let p = bootstrap_prompt("sid-123", "proj");
-        let pos_toolsearch = p
-            .find("ToolSearch")
-            .expect("precisa mandar carregar o schema");
-        let pos_monitor = p
-            .find("Chame Monitor")
-            .expect("precisa mandar armar o monitor");
-        assert!(
-            pos_toolsearch < pos_monitor,
-            "Monitor é ferramenta diferida: o ToolSearch tem que vir antes"
+    fn partida_com(corpo: &str, dir: &std::path::Path, id: &str) -> (Partida, Project) {
+        let script = dir.join("launch.sh");
+        std::fs::write(&script, format!("#!/usr/bin/env bash\n{corpo}\n")).unwrap();
+        let partida = Partida {
+            session_id: id.into(),
+            script,
+            log: dir.join("pane.log"),
+        };
+        let projeto = Project {
+            name: "teste-hospedeiro".into(),
+            path: dir.to_string_lossy().into_owned(),
+            permission_mode: None,
+            model: None,
+            effort: None,
+        };
+        (partida, projeto)
+    }
+
+    #[tokio::test]
+    async fn tmux_roda_o_script_da_partida_e_mata_depois() {
+        if !tem_tmux() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (partida, projeto) =
+            partida_com("echo subiu; exec sleep 60", dir.path(), "a1b2c3d4-vive");
+        let h = Tmux;
+        let l = h.lanca(&partida, &projeto).await.unwrap();
+        assert_eq!(l.session_id, "a1b2c3d4-vive");
+        assert!(l.tmux.starts_with("ld-teste-hospedeiro-"), "{}", l.tmux);
+        assert!(h.vive(&l.tmux).await);
+        assert!(h.nossas().await.contains(&l.tmux));
+        h.mata(&l.tmux).await.unwrap();
+        assert!(!h.vive(&l.tmux).await, "a sessão sobreviveu ao mata");
+    }
+
+    #[tokio::test]
+    async fn sessao_que_morre_ao_subir_e_erro_com_o_motivo() {
+        // É o caso comum de falha (workstream ocupado, projeto inexistente), e é justamente o
+        // que passaria por "deu certo" se o hospedeiro só olhasse o código de saída do tmux.
+        if !tem_tmux() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (partida, projeto) = partida_com(
+            "echo 'Error: workstream ocupado'; exit 3",
+            dir.path(),
+            "e5f6a7b8-morre",
         );
-        assert!(p.contains("listen --session sid-123"));
-        assert!(p.contains("1800000"));
+        let e = Tmux.lanca(&partida, &projeto).await.unwrap_err();
+        assert!(format!("{e:#}").contains("morreu"), "{e:#}");
     }
 
-    #[test]
-    fn prompt_de_rearme_nao_manda_continuar_sozinho() {
-        // Voltar de um --resume com a sessão retomando tarefa sozinha seria surpresa ruim: quem
-        // decide continuar é quem está do outro lado.
-        let p = rearm_prompt("sid", false);
-        assert!(p.contains("Monitor"));
-        assert!(p.contains("não retome") || p.contains("Não retome"));
-    }
-
-    #[test]
-    fn workstream_de_relancamento_nao_repete() {
-        let a = workstream_name_unico("abcd1234-0000-0000-0000-000000000000");
-        assert!(a.starts_with("lukadispatch-abcd1234-"));
-        assert_ne!(a, workstream_name("abcd1234-0000-0000-0000-000000000000"));
-    }
-
-    #[test]
-    fn nome_com_aspa_nao_quebra_o_script() {
-        assert_eq!(shell_quote("meu'projeto"), "'meu'\\''projeto'");
-    }
-
-    #[test]
-    fn prompt_proibe_o_agente_de_enviar_sozinho() {
-        let p = bootstrap_prompt("sid", "proj");
-        assert!(p.contains("NÃO PRECISA ENVIAR NADA DE VOLTA"));
-        assert!(p.contains("curl"));
+    #[tokio::test]
+    async fn tmux_diz_que_sessao_inexistente_nao_vive_e_matar_nao_e_erro() {
+        let h: std::sync::Arc<dyn Hospedeiro> = std::sync::Arc::new(Tmux);
+        let nome = "ld-teste-que-nao-existe-9f3a";
+        assert!(!h.vive(nome).await);
+        assert!(
+            h.mata(nome).await.is_ok(),
+            "matar o que não existe não é erro"
+        );
+        assert!(!h.nossas().await.iter().any(|n| n == nome));
     }
 }

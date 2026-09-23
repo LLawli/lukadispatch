@@ -1,21 +1,28 @@
 //! `lukadispatchd`: o daemon.
 //!
-//! Sobe três coisas e nada mais: o socket de controle (por onde os hooks falam), o laço de
-//! polling do Telegram e o arquivo de settings que as sessões do bot carregam. A partida falha
-//! cedo e alto se o token ou o grupo estiverem errados, porque descobrir isso na primeira
-//! mensagem, horas depois, é pior.
+//! Sobe três coisas e nada mais: o socket de controle (por onde os hooks falam), o roteador de
+//! eventos do frontend e o arquivo de settings que as sessões do bot carregam. A partida falha
+//! cedo e alto se a configuração estiver errada, porque descobrir isso na primeira mensagem,
+//! horas depois, é pior.
+//!
+//! Qual frontend, transcritor, divisor e hospedeiro sobem é decidido só aqui: o resto do daemon
+//! fala com as traits, nunca com o nome escolhido no config.
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use ld_core::config::Config;
-use ld_core::{hooks, paths};
+use ld_core::paths;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-use ld_daemon::app::App;
-use ld_daemon::telegram::Tg;
-use ld_daemon::{poll, socket};
+use ld_daemon::agente;
+use ld_daemon::app::{App, Portas};
+use ld_daemon::divisor::Divisores;
+use ld_daemon::frontend::Frontend;
+use ld_daemon::frontend::nulo::Nulo;
+use ld_daemon::sessions::Tmux;
+use ld_daemon::{roteador, socket, transcritor};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -27,39 +34,52 @@ async fn main() -> Result<()> {
         .init();
 
     let cfg = Config::load(&paths::config_file())?;
-    // Modo offline: sobe só o socket e as sessões. Serve para testar o canal de entrada numa
-    // máquina que ainda não tem bot, sem abrir mão de nada do resto (tmux, hooks, Monitor).
-    let offline = std::env::var_os("LUKADISPATCH_OFFLINE").is_some();
-    let token = if offline {
-        String::new()
-    } else {
-        Config::telegram_token()?
-    };
-    if !offline && cfg.telegram.chat_id == 0 {
-        anyhow::bail!(
-            "falta o chat_id: ponha em {} ou em LUKADISPATCH_CHAT_ID",
-            paths::config_file().display()
-        );
-    }
-    if !offline && cfg.telegram.allowed_user_ids.is_empty() {
-        anyhow::bail!(
-            "allowed_user_ids está vazio em {}: sem isso o bot não obedeceria ninguém",
-            paths::config_file().display()
-        );
-    }
 
-    escreve_settings_das_sessoes()?;
+    let pecas = agente::da_config(&cfg.agente, cfg.claude_binary.clone())?;
+    pecas.agente.prepara()?;
 
     let store = ld_core::state::Store::open(&paths::state_db())?;
-    let tg = Tg::new(token, cfg.telegram.chat_id);
-    if offline {
-        info!("modo offline: sem Telegram, só socket e sessões");
+
+    let frontend = monta_frontend(&cfg)?;
+    // O nulo é barato de sobra (não fala com rede nenhuma); os outros custam uma chamada de
+    // verdade, e o erro na partida é o que evita descobrir token errado na primeira mensagem.
+    if frontend.nome() != "nulo" {
+        let eu = frontend.confere().await?;
+        info!(frontend = frontend.nome(), quem = %eu, "frontend conectado");
     } else {
-        let eu = tg.preflight().await?;
-        info!(bot = %eu, chat = cfg.telegram.chat_id, "conectado ao Telegram");
+        info!("modo offline: frontend nulo, só socket e sessões");
     }
 
-    let app = Arc::new(App::new(cfg, store, tg));
+    let transcritor = transcritor::da_config(&cfg.transcricao)?;
+    info!(
+        transcritor = transcritor
+            .as_ref()
+            .map(|t| t.nome())
+            .unwrap_or("desligado"),
+        "transcrição configurada"
+    );
+
+    let divisores = Divisores::da_config(&cfg.arquivos)?;
+    info!(divisores = ?divisores.nomes(), "divisores configurados");
+
+    info!(
+        agente = pecas.agente.nome(),
+        envelope = pecas.envelope.nome(),
+        "agente configurado"
+    );
+
+    let app = Arc::new(App::new(
+        cfg,
+        store,
+        Portas {
+            frontend,
+            agente: pecas.agente,
+            envelope: pecas.envelope,
+            transcritor,
+            divisores,
+            hospedeiro: Arc::new(Tmux),
+        },
+    ));
 
     // Lê o catálogo já na partida: assim um binário do Claude Code que não dá para varrer
     // aparece no log do serviço, e não seis horas depois, quando você mandar /model e o teclado
@@ -79,14 +99,8 @@ async fn main() -> Result<()> {
     let socket_app = app.clone();
     let caminho_socket = paths::socket();
     let socket = tokio::spawn(async move { socket::serve(socket_app, caminho_socket).await });
-    let poll_app = app.clone();
-    let poll = tokio::spawn(async move {
-        if offline {
-            // Nada de long polling sem token: ficaria batendo em 401 para sempre.
-            std::future::pending::<()>().await;
-        }
-        poll::run(poll_app).await
-    });
+    let roteador_app = app.clone();
+    let roteador = tokio::spawn(async move { roteador::run(roteador_app).await });
 
     // Relógio do painel: a contagem para o reset das janelas envelhece sozinha, então ele
     // precisa se redesenhar mesmo quando nada acontece.
@@ -108,7 +122,7 @@ async fn main() -> Result<()> {
     // ter que decidir se ele é lixo ou um daemon vivo.
     tokio::select! {
         r = socket => { r??; }
-        _ = poll => {}
+        _ = roteador => {}
         _ = tokio::signal::ctrl_c() => { info!("sinal recebido, saindo"); }
     }
 
@@ -116,18 +130,49 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Grava o `bot-settings.json` que as sessões carregam com `claude --settings`.
-///
-/// É reescrito a cada partida de propósito: assim, atualizar o lukadispatch atualiza os hooks
-/// das próximas sessões sem você ter que lembrar de nada.
-fn escreve_settings_das_sessoes() -> Result<()> {
-    let destino = paths::bot_settings_file();
-    if let Some(pai) = destino.parent() {
-        std::fs::create_dir_all(pai)?;
+/// Escolhe o frontend pelo config (`[daemon] frontend` / `frontend.rs`), com o modo offline
+/// passando por cima de tudo.
+fn monta_frontend(cfg: &Config) -> Result<Arc<dyn Frontend>> {
+    if std::env::var_os("LUKADISPATCH_OFFLINE").is_some() {
+        return Ok(Arc::new(Nulo::default()));
     }
-    let cli = paths::cli();
-    let json = serde_json::to_string_pretty(&hooks::bot_settings(&cli))?;
-    std::fs::write(&destino, json).with_context(|| format!("escrevendo {}", destino.display()))?;
-    info!(settings = %destino.display(), cli = %cli, "settings das sessões atualizado");
-    Ok(())
+    match cfg.frontend.as_str() {
+        "telegram" => monta_telegram(cfg),
+        outro => anyhow::bail!(
+            "frontend desconhecido no config: {outro:?} (disponível: \"telegram\", ou \
+             LUKADISPATCH_OFFLINE=1 para o frontend nulo)"
+        ),
+    }
+}
+
+#[cfg(feature = "telegram")]
+fn monta_telegram(cfg: &Config) -> Result<Arc<dyn Frontend>> {
+    use ld_daemon::frontend::telegram::Telegram;
+
+    let token = Config::telegram_token()?;
+    if cfg.telegram.chat_id == 0 {
+        anyhow::bail!(
+            "falta o chat_id: ponha em {} ou em LUKADISPATCH_CHAT_ID",
+            paths::config_file().display()
+        );
+    }
+    if cfg.telegram.allowed_user_ids.is_empty() {
+        anyhow::bail!(
+            "allowed_user_ids está vazio em {}: sem isso o bot não obedeceria ninguém",
+            paths::config_file().display()
+        );
+    }
+    Ok(Arc::new(Telegram::new(
+        token,
+        cfg.telegram.chat_id,
+        cfg.telegram.allowed_user_ids.clone(),
+    )))
+}
+
+#[cfg(not(feature = "telegram"))]
+fn monta_telegram(_cfg: &Config) -> Result<Arc<dyn Frontend>> {
+    anyhow::bail!(
+        "frontend \"telegram\" pedido no config, mas este binário foi compilado sem a feature \
+         \"telegram\""
+    )
 }

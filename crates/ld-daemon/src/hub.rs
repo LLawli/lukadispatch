@@ -19,7 +19,7 @@ pub enum Aviso {
     Substituido,
 }
 
-/// Uma mensagem do Telegram a caminho da sessão.
+/// Uma mensagem do chat a caminho da sessão.
 #[derive(Debug, Clone)]
 pub struct Incoming {
     pub text: String,
@@ -169,7 +169,7 @@ impl Hub {
     }
 
     /// Responde uma pendência. `false` quando ela já tinha sido respondida ou expirado, que é o
-    /// caso normal da corrida entre Telegram e janela nativa: o segundo a chegar perde.
+    /// caso normal da corrida entre o card do chat e a janela nativa: o segundo a chegar perde.
     pub fn answer(&self, ask_id: &str, texto: String) -> bool {
         let pendente = self
             .pending

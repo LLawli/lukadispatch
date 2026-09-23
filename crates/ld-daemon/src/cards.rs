@@ -1,4 +1,4 @@
-//! Os cards do Telegram: pergunta do Claude e pedido de permissão.
+//! Os cards do chat: pergunta do Claude e pedido de permissão.
 //!
 //! Uma pergunta pode ter várias sub-perguntas. O card é um só e vai avançando: responde a
 //! primeira, ele vira a segunda, e só quando a última é respondida a pendência inteira resolve.
@@ -11,9 +11,9 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use ld_core::ask::{Answer, AnswerItem, Ask};
-use teloxide::types::{InlineKeyboardMarkup, MessageId};
 
-use crate::telegram::{coluna, escape_html};
+use crate::frontend::formato::escapa;
+use crate::frontend::{Botao, Canal, MsgId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -24,8 +24,8 @@ pub enum Kind {
 pub struct Card {
     pub ask_id: String,
     pub session_id: String,
-    pub topic: i32,
-    pub msg: MessageId,
+    pub canal: Canal,
+    pub msg: MsgId,
     pub kind: Kind,
     ask: Ask,
     escolhas: Vec<Vec<String>>,
@@ -40,7 +40,7 @@ pub struct Cards {
 /// O que fazer depois de um toque no botão.
 pub enum Efeito {
     /// Redesenhar o card com este conteúdo.
-    Redesenhar(String, InlineKeyboardMarkup),
+    Redesenhar(String, Vec<Botao>),
     /// Acabou: esta é a resposta final.
     Pronto(Answer),
     /// Botão de um card que não existe mais (respondido pelo PC, sessão morta).
@@ -76,16 +76,14 @@ impl Cards {
             .collect()
     }
 
-    pub fn msg(&self, ask_id: &str) -> Option<MessageId> {
+    pub fn msg(&self, ask_id: &str) -> Option<MsgId> {
         self.abertos
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(ask_id)
-            .map(|c| c.msg)
+            .map(|c| c.msg.clone())
     }
 
-    /// Aplica um toque de botão. `Ignorar` quando o card já morreu, que é o caso normal de quem
-    /// tocou no celular depois de responder pelo PC.
     /// O card aberto de uma sessão, se houver.
     pub fn aberto_da_sessao(&self, session_id: &str) -> Option<(String, Kind)> {
         self.abertos
@@ -96,6 +94,8 @@ impl Cards {
             .map(|(id, c)| (id.clone(), c.kind))
     }
 
+    /// Aplica um toque de botão. `Ignorar` quando o card já morreu, que é o caso normal de quem
+    /// tocou no celular depois de responder pelo PC.
     pub fn tocar(&self, ask_id: &str, acao: Acao) -> Efeito {
         let mut abertos = self.abertos.lock().unwrap_or_else(|e| e.into_inner());
         let Some(card) = abertos.get_mut(ask_id) else {
@@ -107,9 +107,9 @@ impl Cards {
 
 /// Teto de um preview dentro do card.
 ///
-/// Uma mensagem do Telegram cabe em 4096 caracteres, e um card pode ter quatro opções com
-/// preview. Cortar cada um é o que impede a pergunta inteira de ser recusada pela API por
-/// tamanho, que seria pior: nenhum card, nenhuma pergunta.
+/// Uma mensagem de texto cabe em poucos milhares de caracteres, e um card pode ter quatro opções
+/// com preview. Cortar cada um é o que impede a pergunta inteira de ser recusada pela plataforma
+/// por tamanho, que seria pior: nenhum card, nenhuma pergunta.
 const TETO_PREVIEW: usize = 600;
 
 fn corta_preview(p: &str) -> String {
@@ -132,9 +132,9 @@ pub enum Acao {
     Confirmar,
     /// Escreveu a própria resposta, em vez de escolher.
     ///
-    /// É o que acontece quando você responde ao card digitando, que é o gesto natural no
-    /// Telegram. Sem isto a mensagem ia para a sessão, que está bloqueada justamente esperando a
-    /// resposta do card: ela não chegava a lugar nenhum.
+    /// É o que acontece quando você responde ao card digitando, que é o gesto natural no chat.
+    /// Sem isto a mensagem ia para a sessão, que está bloqueada justamente esperando a resposta
+    /// do card: ela não chegava a lugar nenhum.
     Texto(String),
 }
 
@@ -142,15 +142,15 @@ impl Card {
     pub fn nova_pergunta(
         ask_id: String,
         session_id: String,
-        topic: i32,
-        msg: MessageId,
+        canal: Canal,
+        msg: MsgId,
         ask: Ask,
     ) -> Self {
         let n = ask.questions.len();
         Self {
             ask_id,
             session_id,
-            topic,
+            canal,
             msg,
             kind: Kind::Pergunta,
             ask,
@@ -161,11 +161,11 @@ impl Card {
 
     /// Card de permissão: guardado só para poder ser apagado quando a sessão morre ou quando a
     /// janela do PC responde primeiro. O toque nele é resolvido direto, sem máquina de estados.
-    pub fn nova_permissao(ask_id: String, session_id: String, topic: i32, msg: MessageId) -> Self {
+    pub fn nova_permissao(ask_id: String, session_id: String, canal: Canal, msg: MsgId) -> Self {
         Self {
             ask_id,
             session_id,
-            topic,
+            canal,
             msg,
             kind: Kind::Permissao,
             ask: Ask::default(),
@@ -251,10 +251,10 @@ impl Card {
         if total > 1 {
             texto.push_str(&format!("<i>{} de {}</i>\n", self.atual + 1, total));
         }
-        texto.push_str(&format!("❓ <b>{}</b>", escape_html(&q.question)));
+        texto.push_str(&format!("❓ <b>{}</b>", escapa(&q.question)));
 
         let escolhidas = &self.escolhas[self.atual];
-        let mut botoes: Vec<(String, String)> = q
+        let mut botoes: Vec<Botao> = q
             .options
             .iter()
             .enumerate()
@@ -266,14 +266,14 @@ impl Card {
                 } else {
                     ""
                 };
-                (
+                Botao::new(
                     format!("{marca}{}", o.label),
                     format!("a:{}:{i}", self.ask_id),
                 )
             })
             .collect();
         if q.multi_select {
-            botoes.push(("✅ Confirmar".into(), format!("a:{}:c", self.ask_id)));
+            botoes.push(Botao::new("✅ Confirmar", format!("a:{}:c", self.ask_id)));
         }
 
         // A descrição e o preview de cada opção vão no corpo: no botão não caberiam.
@@ -281,24 +281,21 @@ impl Card {
             if o.description.is_empty() && o.preview.is_none() {
                 continue;
             }
-            texto.push_str(&format!("\n\n<b>{}</b>", escape_html(&o.label)));
+            texto.push_str(&format!("\n\n<b>{}</b>", escapa(&o.label)));
             if !o.description.is_empty() {
-                texto.push_str(&format!("\n{}", escape_html(&o.description)));
+                texto.push_str(&format!("\n{}", escapa(&o.description)));
             }
             if let Some(preview) = &o.preview {
                 // `<pre>` é o que preserva o alinhamento por espaços; sem ele uma maquete em
-                // ASCII vira sopa de letras na fonte proporcional do Telegram.
-                texto.push_str(&format!(
-                    "\n<pre>{}</pre>",
-                    escape_html(&corta_preview(preview))
-                ));
+                // ASCII vira sopa de letras na fonte proporcional do chat.
+                texto.push_str(&format!("\n<pre>{}</pre>", escapa(&corta_preview(preview))));
             }
         }
         // O mesmo convite que a janela do PC faz. Sem ele, escrever parece não ser opção, e
-        // responder digitando é o gesto natural de quem está no Telegram.
+        // responder digitando é o gesto natural de quem está no chat.
         texto.push_str("\n\n<i>ou escreva a sua resposta</i>");
 
-        Efeito::Redesenhar(texto, coluna(botoes))
+        Efeito::Redesenhar(texto, botoes)
     }
 }
 
@@ -306,6 +303,10 @@ impl Card {
 mod tests {
     use super::*;
     use ld_core::ask::{Opt, Question};
+
+    fn canal() -> Canal {
+        Canal::new("c7")
+    }
 
     fn com_preview() -> Ask {
         Ask {
@@ -324,7 +325,13 @@ mod tests {
 
     #[test]
     fn preview_vai_em_bloco_monoespacado() {
-        let c = Card::nova_pergunta("a1".into(), "s1".into(), 7, MessageId(1), com_preview());
+        let c = Card::nova_pergunta(
+            "a1".into(),
+            "s1".into(),
+            canal(),
+            MsgId::new("1"),
+            com_preview(),
+        );
         match c.desenhar() {
             Efeito::Redesenhar(texto, _) => {
                 assert!(texto.contains("<pre>"), "sem bloco o alinhamento se perde");
@@ -338,10 +345,13 @@ mod tests {
     fn preview_gigante_e_cortado() {
         let mut a = com_preview();
         a.questions[0].options[0].preview = Some("x".repeat(5000));
-        let c = Card::nova_pergunta("a1".into(), "s1".into(), 7, MessageId(1), a);
+        let c = Card::nova_pergunta("a1".into(), "s1".into(), canal(), MsgId::new("1"), a);
         match c.desenhar() {
             Efeito::Redesenhar(texto, _) => {
-                assert!(texto.chars().count() < 4096, "a API recusaria a mensagem");
+                assert!(
+                    texto.chars().count() < 4096,
+                    "a plataforma recusaria a mensagem"
+                );
                 assert!(texto.contains("[…]"));
             }
             _ => panic!(),
@@ -383,7 +393,13 @@ mod tests {
     }
 
     fn card(multi: bool) -> Card {
-        Card::nova_pergunta("a1".into(), "s1".into(), 7, MessageId(1), ask(multi))
+        Card::nova_pergunta(
+            "a1".into(),
+            "s1".into(),
+            canal(),
+            MsgId::new("1"),
+            ask(multi),
+        )
     }
 
     #[test]

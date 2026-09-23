@@ -16,10 +16,12 @@ passo() {
   fi
 }
 
-passo "fmt"    cargo fmt --all --check
-passo "clippy" cargo clippy --all-targets --all-features -- -D warnings
-passo "test"   cargo test --workspace
-passo "build"  cargo build --workspace --release
+passo "fmt"          cargo fmt --all --check
+passo "clippy"        cargo clippy --all-targets --all-features -- -D warnings
+# Prova de que o domínio não sabe que o Telegram existe: sem a feature, teloxide nem compila.
+passo "sem telegram"  cargo clippy -p ld-daemon --no-default-features --all-targets -- -D warnings
+passo "test"          cargo test --workspace
+passo "build"         cargo build --workspace --release
 
 echo
 if ((${#falhas[@]})); then

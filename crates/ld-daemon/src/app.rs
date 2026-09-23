@@ -1,35 +1,42 @@
-//! O miolo: tudo que o Telegram e o socket mandam fazer passa por aqui.
+//! O miolo: tudo que o frontend e o socket mandam fazer passa por aqui.
 //!
-//! Regra de convivência entre os dois lados: o Telegram nunca fala com o tmux direto e o hook
-//! nunca fala com o Telegram direto. Os dois chamam método deste tipo, que é quem conhece o
+//! Regra de convivência entre os dois lados: o frontend nunca fala com o hospedeiro direto e o
+//! hook nunca fala com o frontend direto. Os dois chamam método deste tipo, que é quem conhece o
 //! estado. Assim existe um só lugar onde "sessão morreu" quer dizer as quatro coisas que ela
-//! precisa querer dizer (matar o tmux, apagar o tópico, fechar as perguntas, marcar no banco).
+//! precisa querer dizer (matar a sessão, apagar o canal, fechar as perguntas, marcar no banco).
+//!
+//! O `App` não sabe o que é Telegram, WhatsApp ou tmux: ele fala com as portas
+//! ([`Frontend`], [`Transcritor`], [`Divisores`], [`Hospedeiro`]), reunidas em [`Portas`]. Ver
+//! `docs/decisoes/0002-portas-e-adaptadores.md`.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
 use ld_core::ask::{Answer, Ask};
 use ld_core::config::{Config, Project};
-use ld_core::context;
 use ld_core::paths;
 use ld_core::proto::{
     EventKind, RegisterSession, Response, SessionEvent, SessionSummary, StopReport,
 };
 use ld_core::state::{Session, Store};
-use std::path::Path;
 use tracing::{info, warn};
 
+use crate::agente::{Agente, DescricaoDoChat, Envelope, PedidoDePartida};
 use crate::cards::{Acao, Card, Cards, Efeito};
+use crate::divisor::Divisores;
+use crate::frontend::formato::escapa;
+use crate::frontend::{Botao, Canal, Frontend, Midia, MsgId};
 use crate::hub::{Hub, Incoming};
 use crate::panel::Panel;
-use crate::sessions;
+use crate::sessions::{self, Hospedeiro};
 use crate::status::{Ctx, StatusBoard};
-use crate::telegram::{Tg, escape_html};
+use crate::transcritor::Transcritor;
 
 /// Por que o portão não abriu card.
 ///
-/// Vira erro de propósito: o caminho de "não abri card" já existia (sessão sem tópico, sessão
+/// Vira erro de propósito: o caminho de "não abri card" já existia (sessão sem canal, sessão
 /// desconhecida), e o socket sabe traduzir. O que muda é a resposta ao Claude Code: liberar é uma
 /// decisão, e no modo remoto ela precisa ser dita, porque o `dontAsk` por baixo nega o silêncio.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,13 +67,48 @@ enum Fim {
 /// avisa. Insistir para sempre prenderia a sessão num laço de acordar-e-não-resolver.
 const TETO_REARME: u32 = 3;
 
+/// As quatro portas que o `App` precisa para trabalhar. Reunidas num tipo só porque nascem juntas
+/// (a partida monta as quatro antes de subir o `App`) e porque um teste de fluxo troca as quatro
+/// de uma vez pelos dublês.
+pub struct Portas {
+    pub frontend: Arc<dyn Frontend>,
+    pub agente: Arc<dyn Agente>,
+    pub envelope: Arc<dyn Envelope>,
+    /// `None` desliga a transcrição: áudio ainda chega como arquivo, só não vira card.
+    pub transcritor: Option<Arc<dyn Transcritor>>,
+    pub divisores: Divisores,
+    pub hospedeiro: Arc<dyn Hospedeiro>,
+}
+
+/// O que [`App::monta_e_lanca`] precisa para montar uma partida, seja de sessão nova ou de
+/// relançamento. Reunido num tipo só porque a função já tinha oito parâmetros, um por campo do
+/// [`PedidoDePartida`] do agente mais o id da sessão.
+struct PedidoDeLancamento<'a> {
+    projeto: &'a Project,
+    permission_mode: &'a str,
+    model: Option<&'a str>,
+    effort: Option<&'a str>,
+    resume: Option<&'a str>,
+    retomada: bool,
+    session_id: &'a str,
+}
+
 pub struct App {
     pub cfg: Config,
-    /// Sem Telegram: nenhum tópico é criado e nada é enviado. Serve para desenvolver e testar o
-    /// canal de entrada numa máquina sem bot; a sessão continua real, no tmux, com os hooks.
-    pub offline: bool,
     pub store: Arc<Store>,
-    pub tg: Tg,
+    pub frontend: Arc<dyn Frontend>,
+    pub agente: Arc<dyn Agente>,
+    pub envelope: Arc<dyn Envelope>,
+    pub transcritor: Option<Arc<dyn Transcritor>>,
+    pub divisores: Divisores,
+    pub hospedeiro: Arc<dyn Hospedeiro>,
+    /// Raiz de todas as pastas de sessão, onde anexo recebido e parte de arquivo grande moram.
+    /// Padrão [`paths::arquivos_base`]; um teste troca por um tempdir com [`App::com_raiz_arquivos`].
+    pub raiz_arquivos: PathBuf,
+    /// Raiz de todas as pastas de sessão do agente (script de partida, prompt, log do painel).
+    /// Padrão `paths::state_dir().join("sessions")`; um teste troca por um tempdir com
+    /// [`App::com_raiz_sessoes`]. Cada sessão vive em `raiz_sessoes/<id>/`.
+    pub raiz_sessoes: PathBuf,
     pub hub: Hub,
     pub status: StatusBoard,
     pub cards: Cards,
@@ -76,76 +118,110 @@ pub struct App {
     /// Último aviso de ociosidade ("Claude is waiting for your input") por sessão.
     ///
     /// Ele é útil quando chega, e vira lixo assim que você responde: some na próxima mensagem
-    /// entregue à sessão, para o tópico não acumular uma fila deles.
-    avisos: Arc<Mutex<HashMap<String, teloxide::types::MessageId>>>,
-    /// Catálogo de modelos lido do binário do Claude Code, com a data dele.
-    ///
-    /// A leitura varre 200 MB e leva uns 300 ms: rápida para fazer uma vez, cara para repetir a
-    /// cada toque de botão. A data de modificação do binário é a chave: atualizar o Claude Code
-    /// derruba o cache sozinho, e modelos novos aparecem sem reiniciar o daemon.
-    catalogo: Mutex<Option<(std::time::SystemTime, Vec<ld_core::models::Modelo>)>>,
-    /// Sessões com um turno pedido por gente esperando resposta.
-    ///
-    /// O hook `Stop` dispara no fim de QUALQUER turno, e a sessão tem turnos que ninguém pediu:
-    /// o bootstrap, o re-arme depois de uma troca de modelo, e a re-armação depois que o Monitor
-    /// expira sozinho a cada 30 minutos. Todos terminam com o agente dizendo algo como "Monitor
-    /// rearmado", que ia para o tópico como se fosse resposta a você.
-    ///
-    /// A regra que substitui isso é simples: só vai para o tópico a resposta de um turno que
-    /// alguém pediu, seja pelo Telegram ou pelo teclado do PC. A marca é consumida no `Stop`, e
-    /// mora no banco: quando ela vivia em memória, um restart do daemon no meio de um turno
-    /// engolia a resposta inteira sem deixar rastro.
-
+    /// entregue à sessão, para o canal não acumular uma fila deles.
+    avisos: Arc<Mutex<HashMap<String, MsgId>>>,
     /// Sessões que estão trocando de modelo agora, com a hora em que a troca começou.
     ///
     /// Relançar exige matar o processo, e matar dispara o hook `SessionEnd`. Sem esta marca o
-    /// daemon trataria a troca como fim de sessão: apagaria o tópico e encerraria tudo no meio
+    /// daemon trataria a troca como fim de sessão: apagaria o canal e encerraria tudo no meio
     /// do caminho. A janela é por tempo, e não por evento, porque o hook é `async` e pode chegar
     /// depois de a sessão nova já estar de pé.
     relancando: Mutex<HashMap<String, std::time::Instant>>,
-    /// Última mensagem entregue a cada sessão pelo Telegram, com a hora.
+    /// Última mensagem entregue a cada sessão pelo frontend, com a hora.
     ///
     /// O hook `UserPromptSubmit` não distingue o que você digitou no PC do que chegou pelo
-    /// celular, e republicar o segundo no tópico seria eco. A comparação é por texto e por
+    /// celular, e republicar o segundo no canal seria eco. A comparação é por texto e por
     /// tempo: só o que acabou de sair daqui é descartado.
     entregues: Mutex<HashMap<String, (String, std::time::Instant)>>,
 }
 
 impl App {
     /// Precisa rodar dentro de um runtime tokio: o painel sobe a tarefa dele aqui.
-    pub fn new(cfg: Config, store: Store, tg: Tg) -> Self {
+    pub fn new(cfg: Config, store: Store, portas: Portas) -> Self {
         let store = Arc::new(store);
-        let panel = Panel::start(tg.clone(), store.clone());
+        let panel = Panel::start(
+            portas.frontend.clone(),
+            store.clone(),
+            portas.agente.clone(),
+        );
         Self {
             cfg,
-            offline: std::env::var_os("LUKADISPATCH_OFFLINE").is_some(),
             store,
-            tg,
+            frontend: portas.frontend,
+            agente: portas.agente,
+            envelope: portas.envelope,
+            transcritor: portas.transcritor,
+            divisores: portas.divisores,
+            hospedeiro: portas.hospedeiro,
+            raiz_arquivos: paths::arquivos_base(),
+            raiz_sessoes: paths::state_dir().join("sessions"),
             hub: Hub::new(),
             status: StatusBoard::new(),
             cards: Cards::new(),
             confirmacoes: Default::default(),
             panel,
             avisos: Arc::new(Mutex::new(HashMap::new())),
-            catalogo: Mutex::new(None),
             relancando: Mutex::new(HashMap::new()),
             entregues: Mutex::new(HashMap::new()),
         }
     }
 
+    /// Troca a raiz de arquivos padrão por outra (um tempdir de teste, tipicamente).
+    pub fn com_raiz_arquivos(mut self, raiz: PathBuf) -> Self {
+        self.raiz_arquivos = raiz;
+        self
+    }
+
+    /// Troca a raiz de sessões padrão por outra (um tempdir de teste, tipicamente). Cada sessão
+    /// mora em `raiz/<id>/`.
+    pub fn com_raiz_sessoes(mut self, raiz: PathBuf) -> Self {
+        self.raiz_sessoes = raiz;
+        self
+    }
+
     fn ctx(&self) -> Ctx {
         Ctx {
-            tg: self.tg.clone(),
+            frontend: self.frontend.clone(),
             store: self.store.clone(),
         }
     }
 
+    /// Monta a partida (pede ao agente a invocação, embrulha no envelope, escreve o script) e
+    /// pede ao hospedeiro para subir. Usado tanto para abrir sessão nova quanto para relançar
+    /// uma existente com `--resume`.
+    async fn monta_e_lanca(&self, p: PedidoDeLancamento<'_>) -> Result<sessions::Launched> {
+        let dir = self.raiz_sessoes.join(p.session_id);
+        std::fs::create_dir_all(&dir).with_context(|| format!("criando {}", dir.display()))?;
+
+        let chat = DescricaoDoChat {
+            plataforma: self.frontend.plataforma().into(),
+            onde: self.frontend.onde(&p.projeto.name),
+            teto_envio: self.frontend.limites().enviar,
+            renderiza_markdown: self.frontend.renderiza_markdown(),
+        };
+        let pedido = PedidoDePartida {
+            projeto: p.projeto,
+            permission_mode: p.permission_mode,
+            model: p.model,
+            effort: p.effort,
+            resume: p.resume,
+            retomada: p.retomada,
+            wrap_mcp: self.cfg.wrap_mcp,
+            chat: &chat,
+        };
+        let invocacao = self.agente.invocacao(&pedido, p.session_id, &dir)?;
+        let partida =
+            crate::agente::escreve_partida(&dir, p.session_id, self.envelope.as_ref(), invocacao)?;
+        self.hospedeiro.lanca(&partida, p.projeto).await
+    }
+
     // ---------------------------------------------------------------- ciclo de vida
 
-    /// Cria o tópico, sobe a sessão e devolve o id dela.
+    /// Cria o canal, sobe a sessão e devolve o id dela.
     ///
-    /// Ordem importa: o tópico vem antes do tmux para a sessão já nascer com para onde falar. Se
-    /// o tmux falhar, o tópico recém-criado é apagado, senão sobra tópico órfão a cada tentativa.
+    /// Ordem importa: o canal vem antes do hospedeiro para a sessão já nascer com para onde
+    /// falar. Se a sessão falhar ao subir, o canal recém-criado é apagado, senão sobra canal
+    /// órfão a cada tentativa.
     pub async fn create_session(
         &self,
         projeto: &Project,
@@ -153,36 +229,36 @@ impl App {
         effort: Option<&str>,
         retomar: Option<&str>,
     ) -> Result<String> {
-        let topic = match self.offline {
-            true => None,
-            false => Some(self.tg.create_topic(&projeto.name).await?),
-        };
+        let canal = self.frontend.cria_canal(&projeto.name).await?;
 
-        // Antes de subir: a pasta precisa estar confiada, senão o Claude Code para num diálogo
-        // que só dá para responder no teclado do PC, e do celular a sessão parece muda.
+        // Antes de subir: a pasta precisa estar confiada, senão o agente para num diálogo que só
+        // dá para responder no teclado do PC, e do celular a sessão parece muda.
         if self.cfg.trust_projects
-            && let Ok(true) =
-                ld_core::trust::ensure_trusted(&paths::claude_json(), Path::new(&projeto.path))
+            && let Ok(true) = self.agente.confia(Path::new(&projeto.path))
         {
             info!(projeto = %projeto.path, "pasta marcada como confiada");
         }
 
         let modo = self.cfg.permission_mode_for(&projeto.path);
-        let spec = sessions::Spec {
-            projeto,
-            permission_mode: &modo,
-            model,
-            effort,
-            resume: retomar,
-            retomada: true,
-            wrap_mcp: self.cfg.wrap_mcp,
+        let id = match retomar {
+            Some(r) => r.to_string(),
+            None => self.agente.novo_id(),
         };
-        let lancada = match sessions::launch(&spec).await {
+        let lancada = match self
+            .monta_e_lanca(PedidoDeLancamento {
+                projeto,
+                permission_mode: &modo,
+                model,
+                effort,
+                resume: retomar,
+                retomada: true,
+                session_id: &id,
+            })
+            .await
+        {
             Ok(l) => l,
             Err(e) => {
-                if let Some(t) = topic {
-                    let _ = self.tg.delete_topic(t).await;
-                }
+                let _ = self.frontend.apaga_canal(&canal).await;
                 return Err(e);
             }
         };
@@ -193,9 +269,9 @@ impl App {
             cwd: projeto.path.clone(),
             transcript_path: None,
             tmux: Some(lancada.tmux.clone()),
-            topic_id: topic,
+            canal_id: Some(canal.as_str().to_string()),
             status: "iniciando".into(),
-            status_message_id: None,
+            status_msg_id: None,
             model: model.map(str::to_string),
             effort: effort.map(str::to_string),
             permission_mode: Some(modo.clone()),
@@ -203,43 +279,36 @@ impl App {
             ended_at: None,
         })?;
 
-        if let Some(topic) = topic {
-            let _ = self
-            .tg
-            .send_html(
-                Some(topic),
+        let _ = self
+            .frontend
+            .envia(
+                Some(&canal),
                 &format!(
                     "🟢 <b>{}</b>\n<code>{}</code>\n{}\n\nPode falar. Para fechar, mande /kill.",
-                    escape_html(&projeto.name),
-                    escape_html(&projeto.path),
-                    escape_html(&ficha(model, effort, &modo, &lancada.tmux)),
+                    escapa(&projeto.name),
+                    escapa(&projeto.path),
+                    escapa(&ficha(model, effort, &modo, &lancada.tmux)),
                 ),
+                &[],
+                None,
             )
             .await;
-        }
 
         self.panel.refresh();
-        // Retomando: o tópico nasce com o que já foi conversado, senão você continua às cegas.
-        if let (Some(topic), Some(_)) = (topic, retomar) {
-            self.publica_historico(topic, &lancada.session_id).await;
+        // Retomando: o canal nasce com o que já foi conversado, senão você continua às cegas.
+        if retomar.is_some() {
+            self.publica_historico(&canal, &lancada.session_id).await;
         }
 
-        info!(sessao = %lancada.session_id, topico = ?topic, projeto = %projeto.name, retomada = retomar.is_some(), "sessão criada");
+        info!(sessao = %lancada.session_id, canal = %canal, projeto = %projeto.name, retomada = retomar.is_some(), "sessão criada");
         Ok(lancada.session_id)
     }
 
-    /// Encerra a sessão: mata o tmux, fecha as perguntas abertas, apaga o tópico e marca no
-    /// banco. Idempotente de propósito, porque dois caminhos chegam aqui (o /kill do Telegram e
-    /// o hook SessionEnd de quando você fecha o Claude no PC).
-    /// Quem pediu o fim da sessão.
-    ///
-    /// A diferença importa por causa da janela de relançamento: matar o tmux para trocar de
-    /// modelo dispara um `SessionEnd` que NÃO é fim de sessão, e essa marca existe para ignorá-lo.
-    /// Só que ela engolia também um `/kill` seu dado logo depois da troca, e a sessão ficava viva
-    /// com você achando que tinha fechado.
-    pub async fn end_session(&self, session_id: &str, apagar_topico: bool) -> Result<()> {
-        self.encerra(session_id, apagar_topico, Fim::Explicito)
-            .await
+    /// Encerra a sessão: mata a sessão no hospedeiro, fecha as perguntas abertas, apaga o canal e
+    /// marca no banco. Idempotente de propósito, porque dois caminhos chegam aqui (o /kill do
+    /// chat e o hook SessionEnd de quando você fecha o Claude no PC).
+    pub async fn end_session(&self, session_id: &str, apagar_canal: bool) -> Result<()> {
+        self.encerra(session_id, apagar_canal, Fim::Explicito).await
     }
 
     /// Fim vindo do hook `SessionEnd`, que respeita a janela de relançamento.
@@ -247,7 +316,7 @@ impl App {
         self.encerra(session_id, true, Fim::Hook).await
     }
 
-    async fn encerra(&self, session_id: &str, apagar_topico: bool, quem: Fim) -> Result<()> {
+    async fn encerra(&self, session_id: &str, apagar_canal: bool, quem: Fim) -> Result<()> {
         let Some(s) = self.store.get(session_id)? else {
             return Ok(());
         };
@@ -278,30 +347,33 @@ impl App {
         self.status.forget(session_id);
 
         if let Some(tmux) = &s.tmux
-            && sessions::has_session(tmux).await
-            && let Err(e) = sessions::kill(tmux).await
+            && self.hospedeiro.vive(tmux).await
+            && let Err(e) = self.hospedeiro.mata(tmux).await
         {
-            warn!(sessao = %session_id, erro = %e, "não consegui matar o tmux");
+            warn!(sessao = %session_id, erro = %e, "não consegui encerrar a sessão no hospedeiro");
         }
 
-        if apagar_topico && let Some(topic) = s.topic_id {
-            match self.tg.delete_topic(topic).await {
-                // Só esquece o tópico depois de apagá-lo: enquanto ele estiver no banco, a
-                // varredura de tópico vazado sabe que ainda há o que limpar.
-                Ok(()) => self.store.clear_topic(session_id)?,
-                Err(e) => warn!(topico = topic, erro = %e, "não consegui apagar o tópico"),
+        if apagar_canal && let Some(canal) = canal_da_sessao(&s) {
+            match self.frontend.apaga_canal(&canal).await {
+                // Só esquece o canal depois de apagá-lo: enquanto ele estiver no banco, a
+                // varredura de canal vazado sabe que ainda há o que limpar.
+                crate::frontend::Resolvido::Apagado => self.store.clear_canal(session_id)?,
+                crate::frontend::Resolvido::JaNaoExiste => self.store.clear_canal(session_id)?,
+                crate::frontend::Resolvido::TenteDepois => {
+                    warn!(sessao = %session_id, canal = %canal, "não consegui apagar o canal");
+                }
             }
         }
 
-        // Os anexos morrem com a sessão, como o tópico: foi a escolha de guardar o mínimo, e
+        // Os anexos morrem com a sessão, como o canal: foi a escolha de guardar o mínimo, e
         // vale para o caso comum. Se um arquivo precisa sobreviver, ele sai daqui pela sessão,
         // que grava onde você mandar.
-        crate::arquivos::limpa(session_id).await;
-        // Card de transcrição de uma sessão que acabou não pode sobreviver a ela: o tópico vai
+        crate::arquivos::limpa(&self.raiz_arquivos, session_id).await;
+        // Card de transcrição de uma sessão que acabou não pode sobreviver a ela: o canal vai
         // embora junto, mas um card órfão ainda responderia a toques até o daemon reiniciar.
         for p in self.confirmacoes.limpa_sessao(session_id) {
-            if let Some(m) = p.msg {
-                self.tg.delete(m).await;
+            if let Some(m) = &p.msg {
+                self.frontend.apaga(m).await;
             }
         }
 
@@ -340,40 +412,10 @@ impl App {
         mapa.contains_key(session_id)
     }
 
-    /// Catálogo de modelos, relido só quando o binário do Claude Code muda.
+    /// Catálogo de modelos que o agente oferece. Pode ser caro (o do Claude Code varre o
+    /// binário); a implementação guarda em cache, não o `App`.
     pub fn modelos(&self) -> Vec<ld_core::models::Modelo> {
-        let preferido = self.cfg.claude_binary.as_deref().map(std::path::Path::new);
-        // A data do binário é a chave do cache, então atualizar o Claude Code derruba o cache
-        // sozinho. Sem binário conhecido ainda, tenta de novo a cada chamada.
-        let data_atual = preferido
-            .and_then(|p| std::fs::metadata(p).ok())
-            .and_then(|m| m.modified().ok());
-
-        {
-            let cache = self.catalogo.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((quando, modelos)) = cache.as_ref()
-                && !modelos.is_empty()
-                && data_atual.is_none_or(|d| d == *quando)
-            {
-                return modelos.clone();
-            }
-        }
-
-        let (achado, modelos) = ld_core::models::catalog_auto(preferido);
-        match &achado {
-            Some(bin) => {
-                info!(quantos = modelos.len(), binario = %bin.display(), "catálogo de modelos lido")
-            }
-            None => warn!(
-                "não achei um binário do Claude Code com modelos dentro;                  aponte `claude_binary` no config.toml"
-            ),
-        }
-        let data = achado
-            .and_then(|b| std::fs::metadata(b).ok())
-            .and_then(|m| m.modified().ok())
-            .unwrap_or(std::time::UNIX_EPOCH);
-        *self.catalogo.lock().unwrap_or_else(|e| e.into_inner()) = Some((data, modelos.clone()));
-        modelos
+        self.agente.modelos()
     }
 
     /// Troca modelo ou esforço de uma sessão viva, sem perder a conversa.
@@ -383,28 +425,10 @@ impl App {
     /// fazer sem trapaça é reiniciar o processo com `--resume <id>`, que volta com o mesmo
     /// transcript e o mesmo id, só que com a flag nova. A conversa continua; o que se perde é o
     /// Monitor, e o prompt de re-arme cuida disso.
-    /// Troca só o modo de permissão, pela mesma mecânica do modelo.
+    /// Troca só o modo de permissão, pela mesma mecânica do modelo. Quem sabe quais modos
+    /// existem e quais fazem sentido é o agente; aqui só se aplica a decisão dele.
     pub async fn relaunch_modo(&self, session_id: &str, modo: &str) -> Result<()> {
-        const VALIDOS: [&str; 8] = [
-            "perguntar",
-            "padrao",
-            "auto",
-            "manual",
-            "plan",
-            "acceptEdits",
-            "bypassPermissions",
-            "dontAsk",
-        ];
-        if !VALIDOS.contains(&modo) {
-            bail!("modo desconhecido: {modo} (use {})", VALIDOS.join(", "));
-        }
-        if modo == "manual" {
-            bail!(
-                "o modo manual ignora a decisão do hook: o card aparece aqui, você responde, e o \
-                 prompt continua esperando teclado no PC. Para perguntar pelo celular, use \
-                 perguntar"
-            );
-        }
+        self.agente.valida_modo(modo)?;
         self.store.set_permission_mode(session_id, modo)?;
         self.relaunch(session_id, None, None).await
     }
@@ -444,41 +468,44 @@ impl App {
 
         self.marca_relancamento(session_id);
         if let Some(tmux) = &s.tmux {
-            sessions::kill(tmux).await?;
+            self.hospedeiro.mata(tmux).await?;
             // Sem esta pausa o `--resume` pode esbarrar no processo anterior ainda saindo.
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
         self.hub.unlisten_qualquer(session_id);
         self.status.forget(session_id);
 
-        let spec = sessions::Spec {
-            projeto: &projeto,
-            permission_mode: &modo,
-            model: model_final.as_deref(),
-            effort: effort_final.as_deref(),
-            resume: Some(session_id),
-            retomada: false,
-            wrap_mcp: self.cfg.wrap_mcp,
-        };
-        let lancada = sessions::launch(&spec).await?;
+        let lancada = self
+            .monta_e_lanca(PedidoDeLancamento {
+                projeto: &projeto,
+                permission_mode: &modo,
+                model: model_final.as_deref(),
+                effort: effort_final.as_deref(),
+                resume: Some(session_id),
+                retomada: false,
+                session_id,
+            })
+            .await?;
 
         self.store
             .set_model(session_id, model_final.as_deref(), effort_final.as_deref())?;
         self.store.set_status(session_id, "iniciando")?;
-        if let Some(topic) = s.topic_id {
+        if let Some(canal) = canal_da_sessao(&s) {
             let _ = self
-                .tg
-                .send_html(
-                    Some(topic),
+                .frontend
+                .envia(
+                    Some(&canal),
                     &format!(
                         "♻️ Sessão reiniciada com o contexto inteiro.\n{}",
-                        escape_html(&ficha(
+                        escapa(&ficha(
                             model_final.as_deref(),
                             effort_final.as_deref(),
                             &modo,
                             &lancada.tmux
                         ))
                     ),
+                    &[],
+                    None,
                 )
                 .await;
         }
@@ -487,39 +514,36 @@ impl App {
         Ok(())
     }
 
-    /// Despeja no tópico as últimas falas da conversa retomada.
+    /// Despeja no canal as últimas falas da conversa retomada.
     ///
     /// Vai em mensagens separadas por papel, e não num bloco só, porque no celular um muro de
     /// texto misturando pergunta e resposta não se lê. O que não é diálogo (ferramenta,
     /// raciocínio) fica de fora: aqui interessa o fio da conversa.
-    async fn publica_historico(&self, topic: i32, session_id: &str) {
+    async fn publica_historico(&self, canal: &Canal, session_id: &str) {
         let Some(s) = self.store.get(session_id).ok().flatten() else {
             return;
         };
-        let caminho = match s.transcript_path.as_deref() {
-            Some(p) => std::path::PathBuf::from(p),
-            None => ld_core::transcript::dir_do_projeto(&paths::claude_dir(), &s.cwd)
-                .join(format!("{session_id}.jsonl")),
-        };
-        let falas = ld_core::transcript::historico(&caminho, self.cfg.history_lines);
+        let falas = self.agente.historico(&s, self.cfg.history_lines);
         info!(
             sessao = %session_id,
             falas = falas.len(),
-            transcript = %caminho.display(),
-            "histórico publicado no tópico"
+            transcript = ?s.transcript_path,
+            "histórico publicado no canal"
         );
         if falas.is_empty() {
             return;
         }
 
         let _ = self
-            .tg
-            .send_html(
-                Some(topic),
+            .frontend
+            .envia(
+                Some(canal),
                 &format!(
                     "📜 <b>Retomando a conversa</b> <i>(últimas {} falas)</i>",
                     falas.len()
                 ),
+                &[],
+                None,
             )
             .await;
         for f in falas {
@@ -529,54 +553,63 @@ impl App {
             };
             let corpo = corta(&texto, 1200);
             let _ = self
-                .tg
-                .send_html(Some(topic), &format!("{marca} {}", escape_html(&corpo)))
+                .frontend
+                .envia(
+                    Some(canal),
+                    &format!("{marca} {}", escapa(&corpo)),
+                    &[],
+                    None,
+                )
                 .await;
         }
         let _ = self
-            .tg
-            .send_html(
-                Some(topic),
+            .frontend
+            .envia(
+                Some(canal),
                 "— <i>fim do histórico; pode continuar daqui</i>",
+                &[],
+                None,
             )
             .await;
     }
 
-    /// Encerra as sessões cujo tmux não existe mais.
+    /// Encerra as sessões cujo hospedeiro não existe mais.
     ///
     /// Duas coisas deixam esse lixo para trás: a sessão morre sozinha (crash, `exit` digitado no
     /// PC) com o daemon fora do ar, e o lançamento falha depois que o registro já foi gravado.
-    /// Sem isto elas ficam no painel para sempre, e o tópico delas vira um canal que não responde.
+    /// Sem isto elas ficam no painel para sempre, e o canal delas vira um canal que não responde.
     pub async fn reconcile(&self) -> Result<usize> {
         let mut mortas = 0;
         for s in self.store.live()? {
             let Some(tmux) = &s.tmux else {
                 continue; // sessão do terminal: quem cuida dela é o hook SessionEnd.
             };
-            if sessions::has_session(tmux).await || self.em_relancamento(&s.session_id) {
+            if self.hospedeiro.vive(tmux).await || self.em_relancamento(&s.session_id) {
                 continue;
             }
-            warn!(sessao = %s.session_id, tmux = %tmux, "tmux sumiu; encerrando a sessão");
+            warn!(sessao = %s.session_id, tmux = %tmux, "sessão sumiu no hospedeiro; encerrando");
             self.end_session(&s.session_id, true).await?;
             mortas += 1;
         }
 
-        // Tópico de sessão encerrada que sobrou no grupo (daemon caiu no meio do fechamento,
-        // API fora do ar na hora): vira um canal que não responde a ninguém.
-        for (sessao, topico) in self.store.topicos_vazados().unwrap_or_default() {
+        // Canal de sessão encerrada que sobrou (daemon caiu no meio do fechamento, adaptador
+        // fora do ar na hora): vira um canal que não responde a ninguém. A regra é a mesma para
+        // qualquer canal, numérico ou não: quem decide se ele existe é o adaptador, não aqui.
+        for (sessao, canal_id) in self.store.canais_vazados().unwrap_or_default() {
             if self.em_relancamento(&sessao) {
                 continue;
             }
-            match self.tg.delete_topic_sweep(topico).await {
-                crate::telegram::Resolvido::Apagado => {
-                    warn!(topico, sessao = %sessao, "tópico vazado; apagado");
-                    let _ = self.store.clear_topic(&sessao);
+            let canal = Canal::new(canal_id);
+            match self.frontend.apaga_canal(&canal).await {
+                crate::frontend::Resolvido::Apagado => {
+                    warn!(canal = %canal, sessao = %sessao, "canal vazado; apagado");
+                    let _ = self.store.clear_canal(&sessao);
                 }
-                // Já não existe: o objetivo era não ter esse tópico, e ele não está lá.
-                crate::telegram::Resolvido::JaNaoExiste => {
-                    let _ = self.store.clear_topic(&sessao);
+                // Já não existe: o objetivo era não ter esse canal, e ele não está lá.
+                crate::frontend::Resolvido::JaNaoExiste => {
+                    let _ = self.store.clear_canal(&sessao);
                 }
-                crate::telegram::Resolvido::TenteDepois => {}
+                crate::frontend::Resolvido::TenteDepois => {}
             }
         }
 
@@ -588,15 +621,18 @@ impl App {
             .into_iter()
             .map(|s| s.session_id)
             .collect();
-        let apagados = crate::arquivos::varre_orfaos(&vivas).await;
+        let apagados = crate::arquivos::varre_orfaos(&self.raiz_arquivos, &vivas).await;
         if apagados > 0 {
             info!(apagados, "arquivos de sessões mortas removidos");
         }
 
         // Áudio guardado tem prazo: ele existe para conferir uma transcrição estranha, e isso
         // ninguém faz semanas depois.
-        let velhos =
-            crate::arquivos::varre_audio_velho(self.cfg.transcricao.guardar_audio_dias).await;
+        let velhos = crate::arquivos::varre_audio_velho(
+            &self.raiz_arquivos,
+            self.cfg.transcricao.guardar_audio_dias,
+        )
+        .await;
         if velhos > 0 {
             info!(
                 velhos,
@@ -605,36 +641,36 @@ impl App {
             );
         }
 
-        // O contrário também acontece: o tmux ficou vivo com a sessão já encerrada no banco (um
-        // relançamento interrompido no meio, por exemplo). Ninguém mais fala com ele, e o tópico
-        // dele já foi apagado, então é lixo que só consome memória.
-        for tmux in sessions::nossas_sessoes().await {
+        // O contrário também acontece: o hospedeiro ficou com uma sessão viva já encerrada no
+        // banco (um relançamento interrompido no meio, por exemplo). Ninguém mais fala com ela,
+        // e o canal dela já foi apagado, então é lixo que só consome memória.
+        for tmux in self.hospedeiro.nossas().await {
             if self.store.tmux_de_sessao_morta(&tmux).unwrap_or(false) {
-                warn!(tmux = %tmux, "tmux órfão de sessão encerrada; matando");
-                let _ = sessions::kill(&tmux).await;
+                warn!(tmux = %tmux, "sessão órfã de sessão encerrada; matando");
+                let _ = self.hospedeiro.mata(&tmux).await;
             }
         }
         Ok(mortas)
     }
 
-    // ---------------------------------------------------------------- vindo do Telegram
+    // ---------------------------------------------------------------- vindo do chat
 
-    /// Mensagem sua num tópico de sessão.
-    pub async fn on_incoming(&self, topic: i32, texto: &str, de: &str) -> Result<()> {
-        self.on_incoming_com_arquivos(topic, texto, de, Vec::new())
+    /// Mensagem sua num canal de sessão.
+    pub async fn on_incoming(&self, canal: &Canal, texto: &str, de: &str) -> Result<()> {
+        self.on_incoming_com_arquivos(canal, texto, de, Vec::new())
             .await
     }
 
     /// O mesmo, com anexos já baixados: a sessão recebe os caminhos na própria linha.
     pub async fn on_incoming_com_arquivos(
         &self,
-        topic: i32,
+        canal: &Canal,
         texto: &str,
         de: &str,
         files: Vec<String>,
     ) -> Result<()> {
-        let Some(s) = self.store.by_topic(topic)? else {
-            bail!("tópico {topic} não tem sessão viva");
+        let Some(s) = self.store.by_canal(canal.as_str())? else {
+            bail!("canal {canal} não tem sessão viva");
         };
 
         let msg = Incoming {
@@ -649,10 +685,12 @@ impl App {
             // é só o caminho dele.
             self.store.enqueue(&s.session_id, texto, de, &files)?;
             let _ = self
-                .tg
-                .send_html(
-                    Some(topic),
+                .frontend
+                .envia(
+                    Some(canal),
                     "⏳ <i>a sessão está sem monitor armado; guardei a mensagem e ela entra assim que ele voltar</i>",
+                    &[],
+                    None,
                 )
                 .await;
             return Ok(());
@@ -668,19 +706,19 @@ impl App {
 
         // Você respondeu: o aviso de "esperando a sua resposta" virou passado.
         if let Some(id) = self.tira_aviso(&s.session_id) {
-            self.tg.delete(id).await;
+            self.frontend.apaga(&id).await;
         }
 
         self.marca_pedido(&s.session_id);
         self.store.set_status(&s.session_id, "pensando")?;
         self.status
-            .set(&self.ctx(), &s.session_id, topic, "Pensando...".into());
+            .set(&self.ctx(), &s.session_id, canal, "Pensando...".into());
         Ok(())
     }
 
-    /// A sessão devolvendo um arquivo pelo tópico dela.
+    /// A sessão devolvendo um arquivo pelo canal dela.
     ///
-    /// Devolve a linha que o agente vê no terminal: ele não enxerga o Telegram, então o retorno
+    /// Devolve a linha que o agente vê no terminal: ele não enxerga o chat, então o retorno
     /// precisa dizer o que saiu e como.
     pub async fn send_file(
         &self,
@@ -692,11 +730,17 @@ impl App {
         let Some(s) = self.store.get(session_id)? else {
             bail!("não conheço a sessão {session_id}");
         };
-        let Some(topic) = s.topic_id else {
-            bail!("esta sessão não tem tópico no Telegram");
+        let Some(canal) = canal_da_sessao(&s) else {
+            bail!("esta sessão não tem canal");
         };
 
-        let pronto = crate::arquivos::para_enviar(std::path::Path::new(caminho), como_arquivo)?;
+        let limites = self.frontend.limites();
+        let pronto = crate::arquivos::para_enviar(
+            std::path::Path::new(caminho),
+            como_arquivo,
+            &limites,
+            &self.divisores,
+        )?;
         let nome = pronto
             .caminho
             .file_name()
@@ -704,47 +748,47 @@ impl App {
             .unwrap_or_else(|| caminho.to_string());
         let tamanho = crate::arquivos::humano_u64(pronto.tamanho);
 
-        // Maior que uma mensagem do Telegram: vai em volumes, e não na frente do fim de turno.
-        // Dividir e subir 200 MB leva minutos, e o hook Stop desiste em 60 segundos; segurar o
-        // turno por causa disso deixaria a sessão parada e o texto preso junto.
+        // Maior que o teto do frontend: vai em volumes, e não na frente do fim de turno.
+        // Dividir e subir um arquivo grande leva minutos, e o hook Stop desiste em 60 segundos;
+        // segurar o turno por causa disso deixaria a sessão parada e o texto preso junto.
         if pronto.precisa_dividir {
             self.envia_em_partes(
                 &s.session_id,
-                topic,
+                canal,
                 pronto.caminho.clone(),
                 nome.clone(),
                 legenda.map(str::to_string),
             );
             return Ok(format!(
-                "{nome} ({tamanho}) passa do teto do Telegram; mandando em partes de {} MB",
-                crate::arquivos::VOLUME_MB
+                "{nome} ({tamanho}) passa do teto do frontend; mandando em partes"
             ));
         }
 
         if pronto.como_foto {
             match self
-                .tg
-                .send_photo(Some(topic), &pronto.caminho, legenda)
+                .frontend
+                .envia_arquivo(Some(&canal), &pronto.caminho, legenda, Midia::Foto)
                 .await
             {
                 Ok(_) => {
                     info!(sessao = %session_id, arquivo = %pronto.caminho.display(), "foto enviada");
                     return Ok(format!("{nome} ({tamanho}) enviado como foto"));
                 }
-                // O Telegram recusa foto por dimensão, proporção e formato que ele não reconhece.
-                // Cair para documento entrega o arquivo do mesmo jeito, que é o que foi pedido.
-                Err(e) => warn!(erro = %e, "sendPhoto recusado; mando como documento"),
+                // O frontend recusa foto por dimensão, proporção e formato que ele não
+                // reconhece. Cair para documento entrega o arquivo do mesmo jeito, que é o que
+                // foi pedido.
+                Err(e) => warn!(erro = %e, "envio como foto recusado; mando como documento"),
             }
         }
 
-        self.tg
-            .send_document(Some(topic), &pronto.caminho, legenda)
+        self.frontend
+            .envia_arquivo(Some(&canal), &pronto.caminho, legenda, Midia::Documento)
             .await?;
         info!(sessao = %session_id, arquivo = %pronto.caminho.display(), "documento enviado");
         Ok(format!("{nome} ({tamanho}) enviado como documento"))
     }
 
-    /// `true` quando este prompt é o que o daemon acabou de entregar pelo Telegram.
+    /// `true` quando este prompt é o que o daemon acabou de entregar pelo frontend.
     fn e_eco(&self, session_id: &str, texto: &str) -> bool {
         const JANELA: std::time::Duration = std::time::Duration::from_secs(120);
         let mut mapa = self.entregues.lock().unwrap_or_else(|e| e.into_inner());
@@ -755,20 +799,20 @@ impl App {
         }
     }
 
-    fn tira_aviso(&self, session_id: &str) -> Option<teloxide::types::MessageId> {
+    fn tira_aviso(&self, session_id: &str) -> Option<MsgId> {
         self.avisos
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(session_id)
     }
 
-    fn avisos_handle(&self) -> Arc<Mutex<HashMap<String, teloxide::types::MessageId>>> {
+    fn avisos_handle(&self) -> Arc<Mutex<HashMap<String, MsgId>>> {
         // O mapa é consultado de dentro de uma tarefa que sobrevive a esta chamada, então ele
         // precisa ser compartilhado por Arc, e não emprestado.
         self.avisos.clone()
     }
 
-    /// Entrega uma mensagem direto a uma sessão, sem Telegram no caminho.
+    /// Entrega uma mensagem direto a uma sessão, sem passar pelo chat.
     pub fn inject(&self, session_id: &str, texto: &str) -> Result<bool> {
         let entregue = self
             .hub
@@ -793,7 +837,7 @@ impl App {
             return Ok(());
         }
 
-        // `/clear` troca o id da sessão sem trocar o terminal. Sem isto o tópico ficaria falando
+        // `/clear` troca o id da sessão sem trocar o terminal. Sem isto o canal ficaria falando
         // com um id morto, que é exatamente o bug que derrubava a ponte antiga.
         if r.reason == "clear"
             && let Some(anterior) = self.store.live_by_cwd(&r.cwd, &r.session_id)?
@@ -816,13 +860,13 @@ impl App {
         let Some(s) = self.store.get(&ev.session_id)? else {
             return Ok(());
         };
-        // Troca de modelo conta para o painel mesmo em sessão sem tópico (as do seu terminal).
+        // Troca de modelo conta para o painel mesmo em sessão sem canal (as do seu terminal).
         if let EventKind::ModelSwitch { model } = &ev.event {
             self.store.set_model(&ev.session_id, Some(model), None)?;
             self.panel.refresh();
             return Ok(());
         }
-        let Some(topic) = s.topic_id else {
+        let Some(canal) = canal_da_sessao(&s) else {
             // Sessão de terminal: conta para o painel, não tem onde escrever.
             return Ok(());
         };
@@ -837,49 +881,49 @@ impl App {
                 }
                 self.store.set_status(&ev.session_id, "ferramenta")?;
                 self.status
-                    .set(&self.ctx(), &ev.session_id, topic, label.clone());
+                    .set(&self.ctx(), &ev.session_id, &canal, label.clone());
             }
             EventKind::ToolEnd { .. } => {
                 self.store.set_status(&ev.session_id, "pensando")?;
                 self.status
-                    .set(&self.ctx(), &ev.session_id, topic, "Pensando...".into());
+                    .set(&self.ctx(), &ev.session_id, &canal, "Pensando...".into());
             }
             EventKind::Streaming => {
                 self.status
-                    .set(&self.ctx(), &ev.session_id, topic, "Escrevendo...".into());
+                    .set(&self.ctx(), &ev.session_id, &canal, "Escrevendo...".into());
             }
             EventKind::UserPrompt { text } => {
                 // Guarda repetida de propósito: o hook já filtra, mas um binário velho no PATH
-                // mandaria encanamento para o tópico e ninguém veria o erro.
-                if !ld_core::transcript::e_fala_digitada(text) || self.e_eco(&ev.session_id, text) {
+                // mandaria encanamento para o canal e ninguém veria o erro.
+                if !self.agente.e_fala_digitada(text) || self.e_eco(&ev.session_id, text) {
                     return Ok(());
                 }
-                info!(sessao = %ev.session_id, "prompt digitado no PC, espelhado no tópico");
+                info!(sessao = %ev.session_id, "prompt digitado no PC, espelhado no canal");
                 self.marca_pedido(&ev.session_id);
                 self.store.set_status(&ev.session_id, "pensando")?;
-                let corpo = format!("👤 <i>do PC</i>\n{}", escape_html(&corta(text, 1200)));
-                let tg = self.tg.clone();
+                let corpo = format!("👤 <i>do PC</i>\n{}", escapa(&corta(text, 1200)));
+                let frontend = self.frontend.clone();
                 tokio::spawn(async move {
-                    let _ = tg.send_html(Some(topic), &corpo).await;
+                    let _ = frontend.envia(Some(&canal), &corpo, &[], None).await;
                 });
             }
             EventKind::Elicitation { servidor, pedido } => {
                 let tmux = s.tmux.clone().unwrap_or_else(|| "a sessão".into());
                 let corpo = format!(
                     "🧩 <b>{}</b> está pedindo confirmação:\n{}\n\n<i>Este diálogo é do próprio                      servidor MCP, fora do sistema de permissões do Claude Code, e não dá para                      responder daqui. Responda no PC:</i>\n<code>tmux attach -t {}</code>",
-                    escape_html(servidor),
-                    escape_html(&corta(pedido, 600)),
-                    escape_html(&tmux)
+                    escapa(servidor),
+                    escapa(&corta(pedido, 600)),
+                    escapa(&tmux)
                 );
-                let tg = self.tg.clone();
+                let frontend = self.frontend.clone();
                 let anterior = self.tira_aviso(&ev.session_id);
                 let sessao = ev.session_id.clone();
                 let avisos = self.avisos_handle();
                 tokio::spawn(async move {
                     if let Some(id) = anterior {
-                        tg.delete(id).await;
+                        frontend.apaga(&id).await;
                     }
-                    if let Ok(id) = tg.send_html(Some(topic), &corpo).await {
+                    if let Ok(id) = frontend.envia(Some(&canal), &corpo, &[], None).await {
                         avisos
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
@@ -890,8 +934,8 @@ impl App {
             // Respondido no PC: o aviso já cumpriu o papel e vira ruído.
             EventKind::ElicitationFim => {
                 if let Some(id) = self.tira_aviso(&ev.session_id) {
-                    let tg = self.tg.clone();
-                    tokio::spawn(async move { tg.delete(id).await });
+                    let frontend = self.frontend.clone();
+                    tokio::spawn(async move { frontend.apaga(&id).await });
                 }
             }
             EventKind::ModelSwitch { model } => {
@@ -900,17 +944,17 @@ impl App {
             }
             EventKind::Notification { text } | EventKind::Failure { text } => {
                 let texto = text.clone();
-                let tg = self.tg.clone();
+                let frontend = self.frontend.clone();
                 let anterior = self.tira_aviso(&ev.session_id);
                 let sessao = ev.session_id.clone();
                 let app_avisos = self.avisos_handle();
                 tokio::spawn(async move {
                     // Dois avisos seguidos não se acumulam: o novo substitui o velho.
                     if let Some(id) = anterior {
-                        tg.delete(id).await;
+                        frontend.apaga(&id).await;
                     }
-                    if let Ok(id) = tg
-                        .send_html(Some(topic), &format!("⚠️ {}", escape_html(&texto)))
+                    if let Ok(id) = frontend
+                        .envia(Some(&canal), &format!("⚠️ {}", escapa(&texto)), &[], None)
                         .await
                     {
                         app_avisos
@@ -943,8 +987,8 @@ impl App {
         // O fim do turno é quando o contexto realmente mudou: é a hora certa de redesenhar.
         self.panel.refresh();
 
-        if let Some(topic) = s.topic_id {
-            self.status.clear(&self.ctx(), &r.session_id, topic);
+        if let Some(canal) = canal_da_sessao(&s) {
+            self.status.clear(&self.ctx(), &r.session_id, &canal);
             let pedida = self.tinha_pedido(&r.session_id);
             let resposta = self.resposta_do_turno(r, &s);
             info!(
@@ -961,18 +1005,18 @@ impl App {
                 for pedaco in crate::arquivos::divide_resposta(&texto) {
                     match pedaco {
                         crate::arquivos::Pedaco::Envio(envio) => {
-                            self.envia_marcado(&r.session_id, topic, &envio).await;
+                            self.envia_marcado(&r.session_id, &canal, &envio).await;
                         }
                         crate::arquivos::Pedaco::Texto(t) => {
-                            self.tg.send(Some(topic), &t).await?;
+                            self.frontend.envia_texto(Some(&canal), &t).await?;
                         }
                     }
                 }
             }
         }
 
-        // Só sessão do bot com tópico precisa de monitor: a do terminal fala pelo teclado.
-        let precisa_monitor = s.owned_by_bot() && s.topic_id.is_some();
+        // Só sessão do bot com canal precisa de monitor: a do terminal fala pelo teclado.
+        let precisa_monitor = s.owned_by_bot() && canal_da_sessao(&s).is_some();
         if !precisa_monitor || self.hub.has_listener(&r.session_id) {
             return Ok(Response::Listener {
                 alive: true,
@@ -983,10 +1027,12 @@ impl App {
 
         let tentativas = self.hub.bump_rearm(&r.session_id);
         if tentativas > TETO_REARME {
-            if let Some(topic) = s.topic_id {
-                let _ = self.tg.send_html(
-                    Some(topic),
+            if let Some(canal) = canal_da_sessao(&s) {
+                let _ = self.frontend.envia(
+                    Some(&canal),
                     "🔇 <b>Sessão surda.</b> O monitor não voltou depois de três lembretes, então parei de insistir. Mande /kill e abra outra, ou reative pelo tmux.",
+                    &[],
+                    None,
                 ).await;
             }
             return Ok(Response::Listener {
@@ -1006,75 +1052,42 @@ impl App {
     /// Divide um arquivo grande e manda os volumes, em segundo plano.
     ///
     /// Em segundo plano porque isto demora: o que a sessão recebe de volta é "vai chegar aí", e
-    /// quem acompanha o progresso é o tópico, que ganha uma parte de cada vez.
+    /// quem acompanha o progresso é o canal, que ganha uma parte de cada vez.
     fn envia_em_partes(
         &self,
         session_id: &str,
-        topic: i32,
+        canal: Canal,
         caminho: std::path::PathBuf,
         nome: String,
         legenda: Option<String>,
     ) {
-        let tg = self.tg.clone();
-        let dir = crate::arquivos::dir_partes(session_id);
+        let frontend = self.frontend.clone();
+        let divisores = self.divisores.clone();
+        let dir = crate::arquivos::dir_partes(&self.raiz_arquivos, session_id);
         let sessao = session_id.to_string();
+        let teto = frontend.limites().enviar;
         tokio::spawn(async move {
-            // Vídeo é cortado por tempo, e o resto em volumes: um trecho de vídeo toca sozinho
-            // no celular, enquanto um volume de 7z não serve para nada até estarem todos lá.
-            let e_video = crate::arquivos::e_video(&caminho) && crate::arquivos::tem_ffmpeg();
-            let _ = tg
-                .send_html(
-                    Some(topic),
-                    &format!(
-                        "📦 <b>{}</b> não cabe numa mensagem; {}.",
-                        escape_html(&nome),
-                        if e_video {
-                            "estou cortando em trechos que tocam sozinhos".to_string()
-                        } else {
-                            format!(
-                                "estou dividindo em volumes de {} MB",
-                                crate::arquivos::VOLUME_MB
-                            )
-                        }
-                    ),
-                )
-                .await;
+            let anuncio = divisores
+                .candidatos(&caminho)
+                .first()
+                .map(|d| d.anuncio(teto))
+                .unwrap_or_else(|| "dividindo o arquivo".to_string());
+            let _ = frontend.envia(Some(&canal), &anuncio, &[], None).await;
 
-            let cortado = if e_video {
-                match crate::arquivos::corta_video(
-                    &caminho,
-                    dir.clone(),
-                    crate::arquivos::alvo_trecho(),
-                )
-                .await
-                {
-                    Ok(p) => Some(p),
-                    // Container que o ffmpeg não fatia por cópia (fluxo sem keyframe utilizável,
-                    // por exemplo) ainda tem o caminho dos volumes: pior de usar, mas entrega.
-                    Err(e) => {
-                        warn!(sessao = %sessao, erro = %e, "corte por tempo falhou; caio nos volumes");
-                        None
-                    }
+            let partes = match divisores.divide(&caminho, dir.clone(), teto).await {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!(sessao = %sessao, erro = %e, "não consegui dividir o arquivo");
+                    let _ = frontend
+                        .envia(
+                            Some(&canal),
+                            &format!("⚠️ {}", escapa(&format!("{e:#}"))),
+                            &[],
+                            None,
+                        )
+                        .await;
+                    return;
                 }
-            } else {
-                None
-            };
-
-            let partes = match cortado {
-                Some(p) => p,
-                None => match crate::arquivos::divide(&caminho, dir).await {
-                    Ok(p) => p,
-                    Err(e) => {
-                        warn!(sessao = %sessao, erro = %e, "não consegui dividir o arquivo");
-                        let _ = tg
-                            .send_html(
-                                Some(topic),
-                                &format!("⚠️ {}", escape_html(&format!("{e:#}"))),
-                            )
-                            .await;
-                        return;
-                    }
-                },
             };
 
             let total = partes.arquivos.len();
@@ -1084,34 +1097,35 @@ impl App {
                     Some(l) => format!("{nome} · parte {}/{total} · {l}", i + 1),
                     None => format!("{nome} · parte {}/{total}", i + 1),
                 };
-                let enviou = match partes.corte {
-                    // Trecho de vídeo vai como vídeo, para virar player em vez de download; se o
-                    // Telegram não digerir o container, o documento ainda entrega.
-                    crate::arquivos::Corte::Trechos => {
-                        match tg.send_video(Some(topic), parte, Some(&rotulo)).await {
-                            Ok(id) => Ok(id),
-                            Err(e) => {
-                                warn!(erro = %e, "sendVideo recusado; mando como documento");
-                                tg.send_document(Some(topic), parte, Some(&rotulo)).await
-                            }
-                        }
+                let enviou = match frontend
+                    .envia_arquivo(Some(&canal), parte, Some(&rotulo), partes.midia)
+                    .await
+                {
+                    Ok(id) => Ok(id),
+                    // Vídeo recusado (formato, container) ainda entrega como documento; o resto
+                    // do fluxo não distingue os dois.
+                    Err(e) if partes.midia == Midia::Video => {
+                        warn!(erro = %e, "envio como vídeo recusado; mando como documento");
+                        frontend
+                            .envia_arquivo(Some(&canal), parte, Some(&rotulo), Midia::Documento)
+                            .await
                     }
-                    crate::arquivos::Corte::Volumes => {
-                        tg.send_document(Some(topic), parte, Some(&rotulo)).await
-                    }
+                    Err(e) => Err(e),
                 };
                 match enviou {
                     Ok(_) => enviadas += 1,
                     Err(e) => {
                         warn!(sessao = %sessao, erro = %e, parte = %parte.display(), "parte não subiu");
-                        let _ = tg
-                            .send_html(
-                                Some(topic),
+                        let _ = frontend
+                            .envia(
+                                Some(&canal),
                                 &format!(
                                     "⚠️ a parte {}/{total} não subiu: {}",
                                     i + 1,
-                                    escape_html(&format!("{e:#}"))
+                                    escapa(&format!("{e:#}"))
                                 ),
+                                &[],
+                                None,
                             )
                             .await;
                         break;
@@ -1119,26 +1133,11 @@ impl App {
                 }
             }
 
-            // Sem a instrução de juntar, um punhado de .001, .002 no celular é só lixo.
+            // Sem a instrução de juntar, um punhado de partes no celular é só lixo.
             if enviadas == total {
-                let instrucao = match partes.corte {
-                    crate::arquivos::Corte::Trechos => format!(
-                        "🧩 {total} trechos de <b>{}</b>, na ordem. Cada um toca sozinho; para \
-                         remontar o vídeo inteiro no PC, <code>ffmpeg -f concat -safe 0 -i \
-                         lista.txt -c copy {}</code>, com os trechos listados em lista.txt.",
-                        escape_html(&nome),
-                        escape_html(&nome)
-                    ),
-                    crate::arquivos::Corte::Volumes => format!(
-                        "🧩 {total} partes de <b>{}</b>. Baixe todas para a mesma pasta e abra a \
-                         <code>{}</code>: no celular o ZArchiver ou o RAR juntam sozinhos, e no PC é \
-                         <code>7z x {}</code>.",
-                        escape_html(&nome),
-                        escape_html(&partes.primeiro),
-                        escape_html(&partes.primeiro)
-                    ),
-                };
-                let _ = tg.send_html(Some(topic), &instrucao).await;
+                let _ = frontend
+                    .envia(Some(&canal), &partes.como_juntar, &[], None)
+                    .await;
                 info!(sessao = %sessao, arquivo = %caminho.display(), partes = total, "arquivo grande enviado em partes");
             }
             partes.limpa().await;
@@ -1148,8 +1147,13 @@ impl App {
     /// Manda um arquivo que o agente marcou na resposta.
     ///
     /// Falha aqui não derruba o fim de turno: o texto ainda tem que chegar. O que não pode é o
-    /// arquivo sumir calado, então o motivo vai para o tópico, com o caminho que falhou.
-    async fn envia_marcado(&self, session_id: &str, topic: i32, envio: &crate::arquivos::Marcado) {
+    /// arquivo sumir calado, então o motivo vai para o canal, com o caminho que falhou.
+    async fn envia_marcado(
+        &self,
+        session_id: &str,
+        canal: &Canal,
+        envio: &crate::arquivos::Marcado,
+    ) {
         match self
             .send_file(
                 session_id,
@@ -1163,10 +1167,12 @@ impl App {
             Err(e) => {
                 warn!(sessao = %session_id, erro = %e, "marcador de arquivo falhou");
                 let _ = self
-                    .tg
-                    .send_html(
-                        Some(topic),
-                        &format!("⚠️ {}", escape_html(&format!("{e:#}"))),
+                    .frontend
+                    .envia(
+                        Some(canal),
+                        &format!("⚠️ {}", escapa(&format!("{e:#}"))),
+                        &[],
+                        None,
                     )
                     .await;
             }
@@ -1175,7 +1181,7 @@ impl App {
 
     // ---------------------------------------------------------------- perguntas
 
-    /// Abre o card de pergunta no tópico da sessão e devolve por onde a resposta chega.
+    /// Abre o card de pergunta no canal da sessão e devolve por onde a resposta chega.
     ///
     /// O hook chama isto e fica esperando. Quem responde primeiro (aqui ou na janela do PC)
     /// resolve o mesmo `oneshot`, e o segundo a chegar encontra a pendência já fechada.
@@ -1187,10 +1193,10 @@ impl App {
         let Some(s) = self.store.get(session_id)? else {
             bail!("sessão desconhecida");
         };
-        let Some(topic) = s.topic_id else {
+        let Some(canal) = canal_da_sessao(&s) else {
             // Sessão de terminal: o menu nativo do Claude Code é melhor do que um card no
             // celular para quem já está na frente do teclado.
-            bail!("sessão sem tópico");
+            bail!("sessão sem canal");
         };
         if ask.is_empty() {
             bail!("pergunta vazia");
@@ -1200,21 +1206,24 @@ impl App {
         let mut card = Card::nova_pergunta(
             ask_id.clone(),
             session_id.to_string(),
-            topic,
-            teloxide::types::MessageId(0),
+            canal.clone(),
+            MsgId::new(""),
             ask,
         );
-        let Efeito::Redesenhar(texto, teclado) = card.desenhar() else {
+        let Efeito::Redesenhar(texto, botoes) = card.desenhar() else {
             self.hub.close_ask(&ask_id);
             bail!("não consegui desenhar o card");
         };
-        let msg = self.tg.send_keyboard(Some(topic), &texto, teclado).await?;
+        let msg = self
+            .frontend
+            .envia(Some(&canal), &texto, &botoes, None)
+            .await?;
         card.msg = msg;
         self.cards.abrir(&ask_id, card);
 
         self.store.set_status(session_id, "perguntando")?;
         self.status
-            .set(&self.ctx(), session_id, topic, "Perguntando...".into());
+            .set(&self.ctx(), session_id, &canal, "Perguntando...".into());
         Ok((ask_id, rx))
     }
 
@@ -1228,8 +1237,8 @@ impl App {
         let Some(s) = self.store.get(session_id)? else {
             bail!("sessão desconhecida");
         };
-        let Some(topic) = s.topic_id else {
-            bail!("sessão sem tópico");
+        let Some(canal) = canal_da_sessao(&s) else {
+            bail!("sessão sem canal");
         };
         // O portão dispara para TODA ferramenta; a política mora aqui.
         //
@@ -1250,23 +1259,26 @@ impl App {
         let detalhe = ld_core::labels::label_for_tool(ferramenta, entrada);
         let texto = format!(
             "🔐 <b>Permissão</b>\n{}\n<code>{}</code>",
-            escape_html(ferramenta),
-            escape_html(&detalhe)
+            escapa(ferramenta),
+            escapa(&detalhe)
         );
-        let teclado = crate::telegram::coluna(vec![
-            ("✅ Permitir".into(), format!("p:{ask_id}:a")),
-            ("⛔ Negar".into(), format!("p:{ask_id}:d")),
-        ]);
-        let msg = self.tg.send_keyboard(Some(topic), &texto, teclado).await?;
+        let botoes = vec![
+            Botao::new("✅ Permitir", format!("p:{ask_id}:a")),
+            Botao::new("⛔ Negar", format!("p:{ask_id}:d")),
+        ];
+        let msg = self
+            .frontend
+            .envia(Some(&canal), &texto, &botoes, None)
+            .await?;
         self.cards.abrir(
             &ask_id,
-            Card::nova_permissao(ask_id.clone(), session_id.to_string(), topic, msg),
+            Card::nova_permissao(ask_id.clone(), session_id.to_string(), canal.clone(), msg),
         );
         self.store.set_status(session_id, "permissão")?;
         self.status.set(
             &self.ctx(),
             session_id,
-            topic,
+            &canal,
             "Esperando você liberar...".into(),
         );
         Ok((ask_id, rx))
@@ -1276,7 +1288,7 @@ impl App {
     /// tanto no caminho feliz quanto no timeout.
     ///
     /// Com resposta, o card **não some**: ele vira o registro do que foi perguntado e do que foi
-    /// respondido, sem botões. Apagar deixava a sua resposta escrita no tópico sem a pergunta ao
+    /// respondido, sem botões. Apagar deixava a sua resposta escrita no canal sem a pergunta ao
     /// lado, e quem lesse depois não saberia do que se tratava. Sem resposta (timeout, sessão
     /// morta), aí sim ele some: pergunta que ninguém respondeu e ninguém mais pode responder é só
     /// ruído.
@@ -1287,24 +1299,27 @@ impl App {
         };
         match resposta {
             Some(resumo) => {
-                if self.tg.edit_html(card.msg, resumo).await.is_err() {
+                if self.frontend.edita(&card.msg, resumo, &[]).await.is_err() {
                     // Mensagem sumiu (apagada na mão): manda o registro como mensagem nova.
-                    let _ = self.tg.send_html(Some(card.topic), resumo).await;
+                    let _ = self
+                        .frontend
+                        .envia(Some(&card.canal), resumo, &[], None)
+                        .await;
                 }
             }
-            None => self.tg.delete(card.msg).await,
+            None => self.frontend.apaga(&card.msg).await,
         }
         // A sessão volta a trabalhar: deixar "Perguntando..." parado seria mentira na tela.
         let _ = self.store.set_status(&card.session_id, "pensando");
         self.status.set(
             &self.ctx(),
             &card.session_id,
-            card.topic,
+            &card.canal,
             "Pensando...".into(),
         );
     }
 
-    /// Como a pergunta respondida fica no tópico.
+    /// Como a pergunta respondida fica no canal.
     pub fn resumo_respondido(&self, bruta: &str) -> String {
         match serde_json::from_str::<Answer>(bruta) {
             Ok(a) => {
@@ -1312,13 +1327,13 @@ impl App {
                 for item in &a.items {
                     s.push_str(&format!(
                         "\n\n<b>{}</b>\n{}",
-                        escape_html(&item.question),
-                        escape_html(&item.answers.join(", "))
+                        escapa(&item.question),
+                        escapa(&item.answers.join(", "))
                     ));
                 }
                 s
             }
-            Err(_) => format!("✅ <b>Respondido</b>\n{}", escape_html(bruta)),
+            Err(_) => format!("✅ <b>Respondido</b>\n{}", escapa(bruta)),
         }
     }
 
@@ -1329,10 +1344,10 @@ impl App {
         } else {
             "⛔ Negado"
         };
-        format!("🔐 <b>{}</b>\n{decisao}", escape_html(ferramenta))
+        format!("🔐 <b>{}</b>\n{decisao}", escapa(ferramenta))
     }
 
-    /// Responde o card aberto com o texto que você escreveu no tópico.
+    /// Responde o card aberto com o texto que você escreveu no canal.
     ///
     /// Devolve `true` quando havia card esperando. Enquanto ele existe, a sessão está parada
     /// dentro da ferramenta de pergunta: mandar a mensagem para lá seria jogá-la num processo que
@@ -1359,9 +1374,9 @@ impl App {
         }
 
         match self.cards.tocar(&ask_id, Acao::Texto(texto.to_string())) {
-            Efeito::Redesenhar(corpo, teclado) => {
+            Efeito::Redesenhar(corpo, botoes) => {
                 if let Some(msg) = self.cards.msg(&ask_id) {
-                    self.tg.edit_keyboard(msg, &corpo, teclado).await?;
+                    self.frontend.edita(&msg, &corpo, &botoes).await?;
                 }
                 Ok(true)
             }
@@ -1374,7 +1389,7 @@ impl App {
         }
     }
 
-    /// Toque em botão de card, vindo do Telegram.
+    /// Toque em botão de card, vindo do chat.
     pub async fn on_card_touch(&self, dado: &str) -> Result<()> {
         let mut partes = dado.split(':');
         let tipo = partes.next().unwrap_or("");
@@ -1396,9 +1411,9 @@ impl App {
                     }
                 };
                 match self.cards.tocar(&ask_id, acao) {
-                    Efeito::Redesenhar(texto, teclado) => {
+                    Efeito::Redesenhar(texto, botoes) => {
                         if let Some(msg) = self.cards.msg(&ask_id) {
-                            self.tg.edit_keyboard(msg, &texto, teclado).await?;
+                            self.frontend.edita(&msg, &texto, &botoes).await?;
                         }
                     }
                     Efeito::Pronto(resposta) => {
@@ -1427,32 +1442,16 @@ impl App {
     ///
     /// O hook entrega a ÚLTIMA mensagem do assistente, e o agente costuma continuar falando
     /// depois de responder: entrega o resultado e anuncia que re-armou o monitor. Quando a
-    /// última é só esse anúncio, a resposta boa é a anterior do mesmo turno, que sai do
-    /// transcript.
+    /// última é só esse anúncio, quem sabe achar a resposta anterior do mesmo turno é o agente
+    /// (a sua conversa gravada tem um formato só ele conhece).
     fn resposta_do_turno(&self, r: &StopReport, s: &Session) -> Option<String> {
-        let ultima = r
-            .last_assistant_message
+        let caminho = r
+            .transcript_path
             .as_deref()
-            .map(str::trim)
-            .filter(|t| !t.is_empty());
-
-        match ultima {
-            Some(t) if !ld_core::transcript::e_recado_de_monitor(t) => Some(t.to_string()),
-            _ => {
-                let caminho = r
-                    .transcript_path
-                    .as_deref()
-                    .or(s.transcript_path.as_deref())?;
-                let falas =
-                    ld_core::transcript::respostas_do_ultimo_turno(std::path::Path::new(caminho));
-                falas
-                    .into_iter()
-                    .rev()
-                    .find(|f| !ld_core::transcript::e_recado_de_monitor(f))
-                    // Turno que só teve anúncio de monitor não tem resposta nenhuma a dar.
-                    .or(None)
-            }
-        }
+            .or(s.transcript_path.as_deref())
+            .map(std::path::Path::new);
+        self.agente
+            .resposta_do_turno(r.last_assistant_message.as_deref(), caminho)
     }
 
     // ---------------------------------------------------------------- painel
@@ -1463,19 +1462,22 @@ impl App {
             .live()?
             .into_iter()
             .map(|s| {
-                let ctx = s
-                    .transcript_path
-                    .as_deref()
-                    .map(std::path::Path::new)
-                    .and_then(|p| context::read_with_model(p, s.model.as_deref()));
+                let ctx = self.agente.contexto(&s);
                 s.summary(ctx)
             })
             .collect())
     }
 
-    pub async fn session_for_topic(&self, topic: i32) -> Result<Option<Session>> {
-        self.store.by_topic(topic).context("consultando tópico")
+    pub async fn session_for_canal(&self, canal: &Canal) -> Result<Option<Session>> {
+        self.store
+            .by_canal(canal.as_str())
+            .context("consultando canal")
     }
+}
+
+/// O canal opaco guardado no banco, como o tipo que o resto do domínio entende.
+fn canal_da_sessao(s: &Session) -> Option<Canal> {
+    s.canal_id.as_deref().map(Canal::new)
 }
 
 /// Linha de identificação da sessão: modelo, esforço, modo de permissão e tmux.
@@ -1494,9 +1496,9 @@ fn nova_sessao(r: &RegisterSession) -> Session {
         cwd: r.cwd.clone(),
         transcript_path: Some(r.transcript_path.clone()),
         tmux: None,
-        topic_id: None,
+        canal_id: None,
         status: "ocioso".into(),
-        status_message_id: None,
+        status_msg_id: None,
         model: r.model.clone(),
         effort: None,
         permission_mode: None,

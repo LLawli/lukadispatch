@@ -1,7 +1,8 @@
-//! O painel do tópico General: uma mensagem só, fixada, editada para sempre.
+//! O painel do canal principal: uma mensagem só, fixada, editada para sempre.
 //!
-//! O General é o único tópico que o Telegram não deixa apagar, e é por isso que ele é o lugar do
-//! painel: tudo mais nesse grupo é transitório e some junto com a sessão.
+//! O canal principal é o lugar do painel porque é o único que não some: no Telegram é o tópico
+//! General, que a plataforma não deixa apagar, e tudo mais no grupo é transitório e vai embora
+//! junto com a sessão.
 //!
 //! Mostra o que não dá para ver de dentro de um tópico: quanto de janela de contexto cada sessão
 //! está gastando (inclusive as que você abriu no terminal, se a telemetria global estiver
@@ -15,16 +16,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ld_core::state::Store;
-use ld_core::usage::{self, Window};
-use ld_core::{context, paths};
-use teloxide::types::MessageId;
+use ld_core::usage::Window;
 use tokio::sync::mpsc;
 use tracing::warn;
 
-use crate::telegram::{Tg, escape_html};
+use crate::agente::Agente;
+use crate::frontend::formato::escapa as escape_html;
+use crate::frontend::{Frontend, MsgId};
 
 /// Piso entre duas edições. O painel reage a evento e também a um relógio, então sem isto ele
-/// bateria no rate limit do Telegram sozinho.
+/// bateria no limite de edições da plataforma sozinho.
 const DEBOUNCE: Duration = Duration::from_secs(3);
 
 /// Chave do id da mensagem no banco: o painel precisa sobreviver a restart do daemon, senão cada
@@ -37,9 +38,9 @@ pub struct Panel {
 
 impl Panel {
     /// Sobe a tarefa do painel. Ela é a única dona da mensagem: ninguém mais edita.
-    pub fn start(tg: Tg, store: Arc<Store>) -> Self {
+    pub fn start(frontend: Arc<dyn Frontend>, store: Arc<Store>, agente: Arc<dyn Agente>) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        tokio::spawn(tarefa(tg, store, rx));
+        tokio::spawn(tarefa(frontend, store, agente, rx));
         Self { tx }
     }
 
@@ -49,20 +50,20 @@ impl Panel {
     }
 }
 
-async fn tarefa(tg: Tg, store: Arc<Store>, mut rx: mpsc::UnboundedReceiver<()>) {
-    let mut msg = store
-        .kv_get(CHAVE)
-        .ok()
-        .flatten()
-        .and_then(|v| v.parse::<i32>().ok())
-        .map(MessageId);
+async fn tarefa(
+    frontend: Arc<dyn Frontend>,
+    store: Arc<Store>,
+    agente: Arc<dyn Agente>,
+    mut rx: mpsc::UnboundedReceiver<()>,
+) {
+    let mut msg = store.kv_get(CHAVE).ok().flatten().map(MsgId::new);
     let mut ultimo = String::new();
 
     while rx.recv().await.is_some() {
         tokio::time::sleep(DEBOUNCE).await;
         while rx.try_recv().is_ok() {} // junta os pedidos que chegaram durante a espera
 
-        let texto = match desenha(&store) {
+        let texto = match desenha(&store, agente.as_ref()) {
             Ok(t) => t,
             Err(e) => {
                 warn!(erro = %e, "não consegui montar o painel");
@@ -73,28 +74,27 @@ async fn tarefa(tg: Tg, store: Arc<Store>, mut rx: mpsc::UnboundedReceiver<()>) 
             continue;
         }
 
-        match msg {
+        match &msg {
             Some(id) => {
-                if tg.edit_html(id, &texto).await.is_err() {
+                if frontend.edita(id, &texto, &[]).await.is_err() {
                     // Apagada na mão: manda outra e refixa.
-                    msg = nova(&tg, &store, &texto).await;
+                    msg = nova(&frontend, &store, &texto).await;
                 }
             }
-            None => msg = nova(&tg, &store, &texto).await,
+            None => msg = nova(&frontend, &store, &texto).await,
         }
         ultimo = texto;
     }
 }
 
-async fn nova(tg: &Tg, store: &Store, texto: &str) -> Option<MessageId> {
-    let id = tg.send_html(None, texto).await.ok()?;
-    tg.pin(id).await;
-    let _ = store.kv_set(CHAVE, &id.0.to_string());
+async fn nova(frontend: &Arc<dyn Frontend>, store: &Store, texto: &str) -> Option<MsgId> {
+    let id = frontend.envia(None, texto, &[], None).await.ok()?;
+    frontend.fixa(&id).await;
+    let _ = store.kv_set(CHAVE, id.as_str());
     Some(id)
 }
 
-fn desenha(store: &Store) -> anyhow::Result<String> {
-    let db = paths::usage_db();
+fn desenha(store: &Store, agente: &dyn Agente) -> anyhow::Result<String> {
     let mut s = String::from("📊 <b>lukadispatch</b>\n");
 
     let sessoes = store.live()?;
@@ -103,17 +103,17 @@ fn desenha(store: &Store) -> anyhow::Result<String> {
     }
     for sessao in &sessoes {
         // Sessão que já estava aberta quando a telemetria foi instalada não passou pelo hook
-        // SessionStart, então o modelo dela nunca foi gravado. O transcript sabe: descobre uma
-        // vez e guarda, para o painel não ficar incompleto para sempre.
-        let modelo = match (&sessao.model, &sessao.transcript_path) {
-            (None, Some(caminho)) => {
-                let achado = context::model_from_transcript(std::path::Path::new(caminho));
+        // SessionStart, então o modelo dela nunca foi gravado. O agente sabe: descobre uma vez
+        // (lendo a conversa gravada) e guarda, para o painel não ficar incompleto para sempre.
+        let modelo = match &sessao.model {
+            None => {
+                let achado = agente.modelo_da_sessao(sessao);
                 if let Some(m) = &achado {
                     let _ = store.set_model(&sessao.session_id, Some(m), None);
                 }
                 achado
             }
-            (m, _) => m.clone(),
+            m => m.clone(),
         };
         let dono = if sessao.owned_by_bot() {
             "🤖"
@@ -135,12 +135,13 @@ fn desenha(store: &Store) -> anyhow::Result<String> {
                 .unwrap_or_default();
             detalhe.push(format!("{}{esforco}", escape_html(m)));
         }
-        if let Some(ctx) = sessao
-            .transcript_path
-            .as_deref()
-            .map(std::path::Path::new)
-            .and_then(|p| context::read_with_model(p, modelo.as_deref()))
-        {
+        // O modelo pode ter acabado de ser descoberto pela conversa gravada, acima: o que o
+        // agente lê da sessão precisa refletir isso, senão o contexto some no primeiro desenho.
+        let com_modelo = ld_core::state::Session {
+            model: modelo.clone(),
+            ..sessao.clone()
+        };
+        if let Some(ctx) = agente.contexto(&com_modelo) {
             detalhe.push(format!(
                 "contexto {} / {} ({:.0}%)",
                 milhares(ctx.tokens),
@@ -148,7 +149,7 @@ fn desenha(store: &Store) -> anyhow::Result<String> {
                 ctx.pct()
             ));
         }
-        if let Some(t) = usage::session_tokens(&db, &sessao.session_id) {
+        if let Some(t) = agente.tokens_da_sessao(&sessao.session_id) {
             detalhe.push(format!("{} tokens", milhares(t.total())));
         }
         if let Some(m) = &sessao.permission_mode {
@@ -159,7 +160,7 @@ fn desenha(store: &Store) -> anyhow::Result<String> {
         }
     }
 
-    let janelas = usage::windows(&db);
+    let janelas = agente.uso();
     s.push_str("\n<b>Limites da conta</b>\n");
     s.push_str(&linha_janela("5h", janelas.five_hour));
     s.push_str(&linha_janela("7d", janelas.seven_day));
@@ -267,7 +268,19 @@ mod tests {
     #[test]
     fn painel_sem_sessao_ainda_desenha() {
         let store = Store::open_memory().unwrap();
-        let t = desenha(&store).unwrap();
+        let raiz = tempfile::tempdir().unwrap();
+        let agente = crate::agente::claude_code::ClaudeCode::new(
+            crate::agente::claude_code::Locais {
+                cli: "/opt/ld/lukadispatch".into(),
+                mcp_proxy: "/opt/ld/lukadispatch-mcp".into(),
+                settings: raiz.path().join("bot-settings.json"),
+                claude_json: raiz.path().join("claude.json"),
+                claude_dir: raiz.path().join("claude"),
+                uso_db: raiz.path().join("uso.db"),
+            },
+            None,
+        );
+        let t = desenha(&store, &agente).unwrap();
         assert!(t.contains("nenhuma sessão viva"));
         assert!(t.contains("Limites da conta"));
     }
