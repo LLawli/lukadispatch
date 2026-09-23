@@ -2,7 +2,7 @@
 # Portões de validação do projeto. Roda tudo, não para no primeiro erro, e resume no fim:
 # um relatório com as quatro linhas é mais útil que descobrir um problema de cada vez.
 set -uo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit 1
 
 falhas=()
 passo() {
