@@ -125,7 +125,7 @@ fi
 cat <<EOF
 
 Falta pouco:
-  1. Crie o bot e o grupo (o README explica em seis passos) e ponha o token e o chat_id
+  1. Crie o bot e o grupo (o README explica em cinco passos) e ponha o token
      em $CONF_DIR/.env
   2. Ajuste [telegram] em $CONF_DIR/config.toml: chat_id e allowed_user_ids
   3. lukadispatch install --global        (os hooks do Claude Code; desfaz com uninstall)

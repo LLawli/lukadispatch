@@ -24,6 +24,9 @@ Quando um comportamento parecer estranho, procure aqui antes de "consertar".
   diretório acima **só até a raiz do repositório git** (medido no Claude Code 2.1.280): uma home
   confiada cobre pasta solta, mas não um projeto com `.git`. O daemon marca a pasta do projeto
   antes de abrir a sessão, com a mesma regra de subida que o Claude Code usa (`ld-core::trust`).
+- **Com o modo `auto`, não há card de permissão para ver.** O classificador decide antes de o
+  pedido virar prompt, e o mesmo vale para o diálogo de um servidor MCP. Para exercitar permissão
+  pelo celular, use `/mode` e escolha "perguntar sempre".
 - **O binário do Claude Code carrega o catálogo de modelos inteiro**, mais do que o menu `/model`
   mostra. É de lá que o `/model` do chat tira as opções.
 
@@ -32,6 +35,8 @@ Quando um comportamento parecer estranho, procure aqui antes de "consertar".
 - **Um workstream ativo por vez.** Um segundo `ai-memory run` no mesmo projeto responde 409 e o
   agente não sobe; cada sessão do bot usa `--new lukadispatch-<id>`, e relançar exige carimbo de
   tempo no nome.
+- **`--fresh` não combina com `--session-id`.** O ai-memory recusa com "cannot be combined with a
+  native session".
 
 ## Telegram
 
@@ -68,7 +73,8 @@ Quando um comportamento parecer estranho, procure aqui antes de "consertar".
 
 - **Instalar binário novo com `install` dá `ETXTBSY`**, porque o `lukadispatch listen` da sessão
   está com o arquivo aberto. Copie para `~/.local/bin/.<nome>.novo` e faça `mv`: o rename troca a
-  entrada do diretório e o processo vivo segue com o arquivo antigo.
+  entrada do diretório e o processo vivo segue com o arquivo antigo. O `install.sh` (e, por ele,
+  o `bin/deploy`) já faz assim.
 - **Reiniciar o daemon no meio de um turno perde a marca de pedido daquele turno**
   ([decisoes/0009](decisoes/0009-marca-de-pedido.md)). Reponha:
 

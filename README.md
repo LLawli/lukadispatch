@@ -1,339 +1,163 @@
 # lukadispatch
 
-Dirige as sessões de Claude Code desta máquina pelo Telegram. Cada sessão vira um tópico de um
-supergrupo: você conversa com ela ali, e fechar a sessão apaga o tópico. O tópico General, que o
-Telegram não deixa apagar, carrega um painel editado ao vivo com o contexto e os tokens de cada
-sessão e as janelas de limite de 5h e 7 dias.
+[![ci](https://github.com/LLawli/lukadispatch/actions/workflows/ci.yml/badge.svg)](https://github.com/LLawli/lukadispatch/actions/workflows/ci.yml)
 
-**Não há injeção de teclas nem leitura de terminal em lugar nenhum.** Os três canais são
-determinísticos:
+**Continue suas sessões de Claude Code pelo celular quando sair do computador.**
 
-| Canal | Mecanismo |
-|---|---|
-| Telegram para o Claude | um `Monitor` armado dentro da sessão lê `lukadispatch listen`; cada mensagem vira um evento no meio do turno |
-| Claude para o Telegram | hook `Stop` manda a resposta; `PreToolUse`/`PostToolUse` editam a mensagem de status |
-| Perguntas e permissões | hooks `PreToolUse:AskUserQuestion` e `PermissionRequest` abrem card no Telegram **e** janela GTK4 no PC; vale quem responder primeiro |
-| PC para o Telegram | o que você digita no `tmux attach` vira mensagem no tópico (hook `UserPromptSubmit`), marcada como vinda do PC |
-| Arquivos | anexo do Telegram é baixado para o disco e entregue como caminho; no sentido contrário, um marcador na resposta faz o hook `Stop` enviar o arquivo |
+Você deixa o Claude trabalhando numa tarefa longa e sai da mesa. Meia hora depois ele parou para
+pedir uma permissão, ou terminou e está esperando o próximo passo, e você só vai descobrir quando
+voltar. Com o lukadispatch, cada sessão de Claude Code da sua máquina vira um tópico de um grupo
+do Telegram: você lê as respostas, manda a próxima instrução, responde às perguntas e aprova
+permissões de onde estiver. As sessões continuam rodando no seu computador, com os seus
+projetos, as suas ferramentas e a sua conta.
 
-Nada disso depende de o agente resolver avisar alguém: quem fala é o hook.
+## O que dá para fazer
 
-## Componentes
-
-- `lukadispatchd`: o daemon. Fala com o Telegram, cria e mata as sessões em tmux, mantém o
-  painel e serve o socket de controle.
-- `lukadispatch`: o CLI. É o binário dos hooks (`lukadispatch hook claude <evento>`), o
-  `listen` que o Monitor consome e os comandos locais (`ls`, `kill`, `new`, `send`, `install`).
-- `lukadispatch-ask`: a janela GTK4 que aparece no PC quando há pergunta ou permissão.
-- `lukadispatch-mcp`: o proxy entre a sessão e cada servidor MCP, que traz o diálogo do servidor
-  para o celular.
-
-As sessões sobem como `ai-memory run claude` dentro de um tmux próprio, então continuam
-aparecendo na memória de longo prazo e dá para anexar no PC com `tmux attach -t ld-<projeto>-<id>`.
-
-Como o projeto é por dentro, por que cada coisa é como é e como trocar uma peça está em
-[`docs/`](docs/README.md).
-
-### Peças trocáveis
-
-O daemon fala com o mundo por portas (traits), e as implementações se escolhem no
-`config.toml`, sem recompilar:
-
-```toml
-frontend = "telegram"     # o aplicativo de chat; o modo offline usa o frontend nulo
-
-[agente]
-tipo = "claude-code"      # o agente de código das sessões
-envelope = "ai-memory"    # sobe como `ai-memory run --new <workstream> claude`; "nenhum" roda direto
-
-[transcricao]
-motor = "processo"        # qualquer programa local de voz para texto (ver abaixo)
-
-[arquivos]
-divisor = "7z"            # ou "rar": como arquivo grande demais é partido
-cortar_video = true       # vídeo é cortado por tempo antes de cair nos volumes
-```
-
-Mais uma porta, fixa, é onde a sessão roda (hoje, o tmux). Trocar o Telegram pelo WhatsApp, o
-Claude Code pelo Codex, o motor de voz por uma API ou o 7z por outro formato é implementar a trait
-correspondente; o passo a passo está em [`docs/portas.md`](docs/portas.md).
-
-## Pré-requisitos
-
-- Claude Code 2.1.274 ou mais novo (é a versão que traz `PermissionRequest`, `async` e
-  `asyncRewake` nos hooks).
-- tmux e `ai-memory` no PATH.
-- Rust 1.92+ para compilar; gtk4 e libadwaita para a janela de pergunta.
-
-## Configurar o Telegram
-
-1. Fale com o [@BotFather](https://t.me/BotFather), mande `/newbot` e guarde o token.
-2. Em `/mybots > seu bot > Bot Settings > Group Privacy`, **desligue** o modo de privacidade.
-   Sem isso o bot só recebe mensagens que começam com `/`, e o ponto aqui é conversar normal.
-3. Crie um grupo, adicione o bot e abra `Editar > Tópicos` para ligar os tópicos. O Telegram
-   converte o grupo em supergrupo nessa hora.
-4. Promova o bot a administrador com **Gerenciar tópicos** e **Apagar mensagens**. Sem
-   "Gerenciar tópicos" ele não cria nem apaga tópico nenhum.
-5. Descubra o `chat_id`: mande qualquer mensagem no grupo e rode
-   `curl -s "https://api.telegram.org/bot<TOKEN>/getUpdates" | jq '.result[-1].message.chat.id'`.
-   Um supergrupo começa com `-100`.
-6. Descubra o seu `user_id` na mesma saída (`.result[-1].message.from.id`).
+- **Abrir uma sessão nova** em qualquer projeto seu com `/new`, pelo celular, e continuar a
+  conversa anterior daquele projeto se quiser.
+- **Conversar com a sessão** pelo tópico dela, por texto ou por **mensagem de voz** (transcrita
+  na sua máquina, e só enviada depois do seu aval).
+- **Responder perguntas e permissões** num card com botões. A mesma pergunta aparece numa janela
+  no PC, e vale quem responder primeiro.
+- **Mandar e receber arquivos**: foto, PDF, log, vídeo. O que passa do limite do Telegram é
+  dividido em partes.
+- **Trocar modelo, esforço e modo de permissão** (`/model`, `/effort`, `/mode`) sem perder a
+  conversa.
+- **Ver o consumo**: um painel fixo mostra o contexto e os tokens de cada sessão e quanto resta
+  das janelas de 5h e 7 dias da conta.
+- **Voltar para o teclado** quando quiser: cada sessão é um tmux de verdade
+  (`tmux attach -t ld-<projeto>-<id>`), e o que você digitar lá também aparece no tópico.
 
 ## Instalar
 
+Linux x86_64 ou aarch64, com o systemd de usuário.
+
 ```bash
-./ci.sh                                   # fmt, clippy, testes e build release
-install -Dm755 target/release/lukadispatchd    ~/.local/bin/lukadispatchd
-install -Dm755 target/release/lukadispatch     ~/.local/bin/lukadispatch
-install -Dm755 target/release/lukadispatch-ask ~/.local/bin/lukadispatch-ask
-
-mkdir -p ~/.config/lukadispatch
-cp .env.example ~/.config/lukadispatch/.env   # preencha token e chat_id
-chmod 600 ~/.config/lukadispatch/.env
-
-lukadispatch install --global                 # hooks: sessões do bot + telemetria da máquina
-install -Dm644 dist/lukadispatch.service ~/.config/systemd/user/lukadispatch.service
-systemctl --user daemon-reload
-systemctl --user enable --now lukadispatch
+curl -fsSL https://raw.githubusercontent.com/LLawli/lukadispatch/master/install.sh | sh
 ```
 
-`~/.config/lukadispatch/config.toml`:
+O script baixa o binário da última release, confere o sha256, instala em `~/.local/bin`, põe o
+serviço do systemd e deixa um `.env` e um `config.toml` de exemplo em `~/.config/lukadispatch/`.
+Rodar de novo atualiza. Outros caminhos:
+
+```bash
+brew install llawli/tap/lukadispatch                 # Homebrew no Linux (compila do fonte)
+mise use -g github:LLawli/lukadispatch               # mise
+cargo install --locked --git https://github.com/LLawli/lukadispatch ld-daemon ld-cli ld-ask ld-mcp
+```
+
+Ou baixe o `lukadispatch-linux-<arq>.tar.gz` da [página de releases](https://github.com/LLawli/lukadispatch/releases)
+e rode o `install.sh --de .` que vem dentro dele.
+
+**Precisa ter:** [Claude Code](https://docs.claude.com/en/docs/claude-code) 2.1.274 ou mais
+novo, `tmux`, e gtk4 e libadwaita 1.5+ para a janela de pergunta no PC. Por padrão as sessões
+sobem dentro do [ai-memory](https://github.com/akitaonrails/ai-memory); sem ele, use
+`envelope = "nenhum"` no config. Para dividir arquivos grandes: `7z` (ou `rar`) e `ffmpeg`.
+Para transcrever voz: um programa local de voz para texto (o padrão é o whisper.cpp).
+
+## Configurar
+
+**1. O bot e o grupo.**
+
+1. Fale com o [@BotFather](https://t.me/BotFather), mande `/newbot` e guarde o token.
+2. Em `/mybots > seu bot > Bot Settings > Group Privacy`, **desligue** o modo de privacidade.
+   Sem isso o bot só recebe mensagens que começam com `/`.
+3. Crie um grupo, adicione o bot e ligue os tópicos em `Editar > Tópicos`. O Telegram converte o
+   grupo em supergrupo nessa hora.
+4. Promova o bot a administrador com **Gerenciar tópicos** e **Apagar mensagens**.
+5. Mande qualquer mensagem no grupo e rode
+   `curl -s "https://api.telegram.org/bot<TOKEN>/getUpdates" | jq '.result[-1].message | {chat: .chat.id, voce: .from.id}'`.
+   O `chat` começa com `-100`; o `voce` é o seu `user_id`.
+
+**2. Os arquivos.** Ponha o token em `~/.config/lukadispatch/.env`, e o `chat_id` e o seu
+`user_id` em `~/.config/lukadispatch/config.toml`:
 
 ```toml
 usuario = "Maria"                # como a sessão chama você; sem isto, "o seu usuário"
-default_permission_mode = "auto"
-trust_projects = true            # marca a pasta como confiada antes de abrir (veja abaixo)
 
 [telegram]
 chat_id = -1001234567890
-allowed_user_ids = [123456789]   # vazio nega todo mundo, de propósito
+allowed_user_ids = [123456789]   # quem o bot obedece; vazio nega todo mundo
 
 [scan]
-enabled = true
-roots = ["~/Personal", "~/Projetos"]
-depth = 1
-
-[[projects]]
-name = "lukadispatch"
-path = "~/Personal/lukadispatch"
-# permission_mode = "acceptEdits"   # opcional, por projeto
+roots = ["~/Projetos"]           # tudo com .git aqui dentro aparece no /new
 ```
 
-### O que `install --global` faz, e o que ele não faz
+O [`config.example.toml`](dist/config.example.toml) comenta todas as opções: modo de permissão
+padrão, projetos fixados, motor de voz, divisor de arquivos.
 
-Ele escreve duas coisas diferentes, e a diferença é deliberada:
+**3. Ligar.**
 
-- `~/.local/state/lukadispatch/bot-settings.json`: os hooks das sessões **do bot**. Inclui os que
-  respondem por você (pergunta e permissão vão para o Telegram).
-- `~/.claude/settings.json`: **só telemetria** (`SessionStart`, `SessionEnd`, ferramentas,
-  notificações), para as sessões que você abre no terminal entrarem no painel. O menu nativo de
-  pergunta continua sendo o seu nessas sessões, que é o certo para quem já está no teclado.
+```bash
+lukadispatch install --global          # os hooks do Claude Code (desfaz com uninstall)
+systemctl --user enable --now lukadispatch
+```
 
-Todos os hooks de telemetria são `async: true`: o Claude Code dispara e não espera. Se o daemon
-estiver fora do ar, o hook tenta subir o serviço (`systemctl --user start`) e sai. **Nenhum hook
-consegue travar uma sessão sua.**
-
-Para sair sem deixar rastro: `lukadispatch uninstall` (ele faz backup `.bak` antes de escrever).
+O `install --global` escreve os hooks completos só nas sessões que o bot abre. No
+`~/.claude/settings.json` ele põe apenas telemetria, para as sessões que você abre no terminal
+aparecerem no painel. Nessas, as perguntas continuam no seu terminal. Os hooks são assíncronos:
+com o daemon fora do ar, nenhuma sessão sua trava.
 
 ## Usar
 
-No tópico General (que se limpa sozinho: comando, resposta e teclado somem, e só o painel fica):
+No tópico **General**, onde fica o painel:
 
-- `/new` mostra os projetos em botões. Quando o projeto já tem conversa anterior, ele pergunta
-  entre **continuar de onde parou** e **começar do zero**; ao continuar, as últimas falas são
-  despejadas no tópico, separadas por quem falou.
-- `/new <projeto> [opus|claude-opus-4-8[1m]] [high|max]` abre direto, já com modelo e esforço.
-- `/ls` redesenha o painel.
-- `/kill <id>` fecha uma sessão.
+| Comando | Faz |
+|---|---|
+| `/new` | mostra os projetos em botões; se o projeto já tem conversa, pergunta se continua ou começa do zero |
+| `/new <projeto> [modelo] [esforço]` | abre direto, por exemplo `/new api opus high` |
+| `/ls` | redesenha o painel |
+| `/kill <id>` | fecha uma sessão |
 
-Dentro do tópico de uma sessão, qualquer mensagem vai para o Claude. Além disso:
+No **tópico de uma sessão**, qualquer mensagem vai para o Claude. Além disso:
 
-- `/model` abre a escolha em duas etapas (família, depois versão), com o catálogo lido do próprio
-  binário do Claude Code: aparecem também os modelos que o menu `/model` dele não mostra, e as
-  variantes de janela de 1M. `/model claude-opus-4-8[1m]` funciona direto, sem menu.
-- `/effort` faz o mesmo para o nível de esforço.
-- `/mode` troca o modo de permissão: auto, perguntar sempre, plano, liberar tudo. O modo é por
-  sessão e sobrevive a um relançamento, então ele não volta ao padrão do projeto sozinho.
-- `/kill` fecha a sessão e apaga o tópico.
+| Comando | Faz |
+|---|---|
+| `/model` | escolhe o modelo, incluindo os que o menu do Claude Code não mostra e as variantes de 1M |
+| `/effort` | escolhe o nível de esforço |
+| `/mode` | troca o modo de permissão: auto, perguntar sempre, plano, liberar tudo |
+| `/kill` | fecha a sessão e apaga o tópico |
 
-**Arquivo nos dois sentidos.** Anexo que você manda no tópico (documento, foto, vídeo, animação,
-nota de vídeo, figurinha, áudio, mensagem de voz) é baixado na hora para
-`~/.local/share/lukadispatch/arquivos/<sessão>/` e chega à sessão como caminho absoluto, no campo
-`files` da linha NDJSON e dentro do texto. A legenda vira a mensagem; sem legenda, o texto é a
-própria linha do arquivo. O teto é 20 MB, que é o do Bot API. Os arquivos são apagados junto com a
-sessão.
+**Voz.** A mensagem de voz é transcrita na sua máquina e volta como card com três saídas:
+**Enviar**, **Descartar**, ou **responder ao card** com a correção, quando só uma palavra saiu
+errada. Enquanto houver um card esperando (transcrição, pergunta ou permissão), o tópico só
+aceita a resposta a ele e comandos; texto solto volta como aviso, com o que você tinha escrito.
 
-**Voz vira texto, depois do seu aval.** Mensagem de voz é transcrita fora do turno (ela leva mais
-tempo que o hook `Stop` espera: a configuração padrão gasta ~44 s por minuto de fala), então o
-tópico mostra `transcrevendo…` e, quando fica pronta, a transcrição aparece num card com três
-saídas:
+**Arquivos.** O que você manda no tópico chega à sessão como um caminho em disco. Para mandar
+algo de volta, peça: a sessão sabe como. Acima de 50 MB, vídeo é cortado por tempo (cada parte
+toca sozinha no celular) e o resto vai em volumes de 7z, que o ZArchiver abre a partir do
+`.001`. Chave, token e `.env` só saem cifrados para uma chave pública que você fornecer na
+conversa.
 
-- **Enviar**: vai para a sessão como se você tivesse digitado, com o caminho do `.oga` junto.
-- **Descartar**: some sem deixar rastro, e a sessão nunca soube que houve áudio.
-- **Responder ao card** com a correção: a transcrição vai junto com o que você escreveu, marcada
-  como tal, e a sessão sabe que a versão escrita é a que vale. É para o caso de "está quase certo,
-  só essa palavra": reescrever a frase inteira anularia o ganho de ter falado. Exige responder
-  (reply) ao card.
+**Permissões.** Com o modo `auto`, o classificador do Claude Code decide antes de haver pergunta,
+então nenhum card aparece. Para aprovar cada ação pelo celular, use `/mode` e escolha "perguntar
+sempre".
 
-Enquanto houver um card esperando você (transcrição, pergunta ou permissão), o tópico só aceita a
-resposta a ele e comandos. Texto solto, ou resposta a outra mensagem qualquer, é apagado e volta
-como aviso com o que você tinha escrito: seria um pedido novo por cima de uma pergunta que a sessão
-ainda não pôde usar.
-
-O card responde ao áudio que o gerou, então a seta do Telegram diz de qual voz ele saiu. Resolvido,
-ele perde os botões e vira o registro do que a sessão recebeu (`Transcrição` e, quando houve,
-`Ratificação`); a mensagem que você digitou é apagada, para a mesma coisa não ficar espalhada em
-três lugares. Só o descarte não deixa registro, que é o sentido dele. Áudio destinado à transcrição
-também não gera o card de anexo com o caminho do arquivo.
-
-**Pendência aberta segura o tópico.** Com uma pergunta, um pedido de permissão ou uma transcrição
-esperando resposta, texto solto é apagado e um aviso efêmero explica o que falta responder (a
-mensagem que você escreveu vai citada nele, para não se perder). Responder ao card passa, porque é
-a resposta esperada, e **comando passa sempre**: `/kill` é a válvula de escape para o caso de um
-card ficar preso.
-
-**Um card por vez, em fila.** Dois áudios seguidos são duas mensagens suas e merecem duas decisões,
-mas os dois cards juntos tornariam ambíguo a qual deles uma correção escrita se refere. Então o
-segundo espera: resolvido o primeiro, o próximo sobe, como nos cards de pergunta e permissão. O
-rodapé do card diz quantos ainda estão na fila. Tópicos diferentes têm filas independentes.
-
-Comando (`/kill`, `/mode`…) continua sendo comando mesmo com um card aberto. O áudio guardado
-expira em `transcricao.guardar_audio_dias`.
-
-O motor é plugável e mora no `config.toml`, não no código, porque a escolha é do hardware. O padrão
-é o que ganhou o benchmark num Ryzen 5700U com Radeon Vega sem VRAM dedicada: whisper.cpp com
-`large-v3-turbo` quantizado em q5_0, no backend Vulkan (12,9% de erro por palavra em áudio real,
-~1 GB de memória). Trocar é editar `transcricao.comando`, `transcricao.modelo` e `transcricao.saida`;
-os marcadores são `{audio}` (WAV mono 16 kHz que o daemon prepara), `{modelo}` e `{saida}`. O tipo
-`Transcricao` traz presets medidos para CPU e para o FastConformer-pt, que é 5x mais rápido e cabe
-em 417 MB, cobrando quase o dobro de erro em jargão e nome próprio.
-
-No sentido contrário, o agente **não chama ferramenta nenhuma**: ele escreve na resposta uma linha
-sozinha com `@arquivo:` seguido do caminho absoluto (e, se quiser, ` | legenda`). O hook `Stop`
-manda o arquivo na posição em que a linha estava, entre os trechos de texto, e tira a linha da
-mensagem. `@documento:` força documento quando os
-bytes exatos importam; sem isso, imagem até 10 MB vai como foto e aparece na conversa.
-
-Chave, credencial, token e `.env` não saem em claro: o prompt inicial manda a sessão cifrar para
-uma chave pública sua antes de enviar, e recusar o envio enquanto você não tiver fornecido essa
-chave na conversa. O tópico é um grupo do Telegram, e o Telegram guarda o arquivo nos servidores
-dele.
-
-Acima de 50 MB (o teto do Bot API) o arquivo não é recusado, e o corte depende do que ele é.
-**Vídeo é cortado por tempo** com `ffmpeg -c copy`, sem recodificar: cada trecho é um vídeo de
-verdade, vai como vídeo (com player) e toca sozinho no celular; remontar é opcional, com
-`ffmpeg -f concat`. **O resto vai em volumes de 45 MB do 7z**, que o ZArchiver ou o RAR remontam a
-partir do `.001` no celular, e `7z x nome.7z.001` no PC (com `[arquivos] divisor = "rar"`, vão
-volumes de RAR). O teto vem do frontend: noutro aplicativo de chat, com outro limite, o corte
-acompanha. Sem `ffmpeg`, ou quando o corte por tempo
-falha, vídeo também cai nos volumes. O envio dividido sai em segundo plano, porque subir centenas
-de MB demora mais que o prazo do hook `Stop`; o teto é 20 partes.
-
-O reconhecimento é estreito de propósito: a linha precisa ser só o marcador, do começo ao fim.
-Marcador no meio de uma frase, dentro de crase ou depois de hífen de lista é o agente falando do
-formato, e não é envio. `lukadispatch send-file <caminho>` faz a mesma coisa pela linha de
-comando, para quando você quer mandar algo do PC. O token continua só do lado do daemon.
-
-Perguntas do Claude viram card com botões, e **também aceitam resposta escrita**: o que você
-digitar no tópico com um card aberto é a resposta dele. Respondido, o card perde os botões e vira
-o registro do que foi perguntado e escolhido; sem resposta (6h ou sessão morta), some.
-
-**Como a troca de modelo funciona, e por que ela não perde nada.** `/model` e `/effort` são
-comandos do frontend do Claude Code: nenhum evento consegue dispará-los, e digitar no terminal
-está fora de questão aqui. O daemon reinicia o processo com `--resume <id>`, que volta com o
-mesmo transcript e o mesmo id. A conversa continua exatamente de onde estava; o que se perde é o
-Monitor, e a sessão recebe um prompt curto mandando armá-lo de novo.
-
-No PC:
+**No PC:**
 
 ```bash
-lukadispatch ls
-lukadispatch models                  # catálogo lido do binário do Claude Code
-lukadispatch new <projeto> [--continuar]
-lukadispatch send <id> "texto"       # entrega sem passar pelo Telegram
-lukadispatch send-file <caminho> --legenda "..." --session <id>   # devolve arquivo pelo tópico
-lukadispatch model <id> claude-opus-4-8
-lukadispatch effort <id> high
+lukadispatch ls                       # as sessões e o consumo de cada uma
+lukadispatch new <projeto>            # abre uma sessão sem passar pelo Telegram
+lukadispatch send <id> "texto"        # manda uma mensagem para ela
+lukadispatch send-file <caminho>      # devolve um arquivo pelo tópico da sessão
 lukadispatch kill <id>
-tmux attach -t ld-<projeto>-<id>     # a sessão é um tmux de verdade
+tmux attach -t ld-<projeto>-<id>
 ```
-
-## Coisas que mordem (e já morderam)
-
-- **`ai-memory run` só aceita um workstream ativo por vez.** Ele responde `409 Conflict:
-  workstream is already active`, e a sessão morre ao subir. Por isso cada sessão do bot pede um
-  workstream próprio (`--new lukadispatch-<id>`). O nome precisa ser inédito: `--new` com nome
-  existente também dá 409.
-- **`--fresh` não combina com `--session-id`.** O ai-memory recusa com "cannot be combined with a
-  native session".
-- **Diálogo de confiança de pasta.** Abrir uma pasta que o Claude Code ainda não confia mostra um
-  diálogo esperando tecla, e pelo celular isso aparece como uma sessão muda. Confiar na home não
-  basta: a herança para na raiz do repositório git. `trust_projects` marca a pasta antes de abrir
-  (só para projetos que o próprio config oferece, nunca um caminho qualquer).
-- **O `Monitor` expira em 30 minutos.** O hook `Stop` percebe que o canal caiu e, via
-  `asyncRewake`, acorda a sessão para re-armar. Depois de três lembretes sem sucesso o daemon
-  desiste e avisa no tópico em vez de insistir para sempre.
-- **Caminho de socket unix tem limite de tamanho** (`SUN_LEN`, ~108 bytes). O padrão
-  (`$XDG_RUNTIME_DIR/lukadispatch.sock`) cabe folgado; um caminho de teste muito fundo não.
-- **O campo do `UserPromptSubmit` é `prompt`, não `user_prompt`.** A documentação diz o
-  contrário, e o hook falha em silêncio se você seguir a documentação: o payload real traz `cwd`,
-  `hook_event_name`, `permission_mode`, `prompt`, `prompt_id`, `session_id` e `transcript_path`.
-- **`ai-memory run` só aceita um workstream ativo, e `--new` recusa nome repetido.** Por isso o
-  workstream de um relançamento leva carimbo de tempo no nome.
-- **Matar o tmux para relançar dispara o `SessionEnd`.** Sem uma marca de "relançando", o daemon
-  entende isso como fim de sessão e apaga o tópico no meio da própria troca de modelo.
-- **O cliente HTTP do teloxide tem timeout de 17s**, menor que um long polling de 30s. O daemon
-  constrói o cliente com um teto maior; com o padrão, toda janela ociosa morre em erro de rede.
-- **Texto do agente vai sem `parse_mode`.** Resposta de Claude tem crase, asterisco e colchete o
-  tempo todo; em MarkdownV2 isso vira erro 400 e a mensagem não chega.
-- **Com `auto` ligado, não há card de permissão para ver.** O classificador decide antes de o
-  pedido virar prompt, e o mesmo vale para o diálogo próprio de um servidor MCP: ele nunca chega
-  a ser acionado. Para exercitar permissão pelo celular, `/mode` e escolha "perguntar sempre".
-- **Diálogo de servidor MCP (elicitation) não dá para responder pelo Telegram.** O hook existe,
-  mas é só notificação: a documentação diz que a saída dele é ignorada nesse evento. O daemon
-  avisa no tópico o que foi pedido e por qual `tmux attach` responder, e só.
-
-## Caminho não percorrido: preview como imagem
-
-As opções do `AskUserQuestion` podem trazer um `preview` (maquete em ASCII, trecho de código).
-Hoje ele vai em bloco `<pre>` no Telegram e em fonte de largura fixa com rolagem lateral na
-janela GTK4, e nos testes o desenho se manteve nos dois.
-
-Se um dia aparecer uma maquete larga demais e o Telegram quebrar a linha em vez de rolar, o
-conserto é **renderizar o preview como imagem** e mandar como foto, que é o que o `sdispath` faz
-com todas as mensagens dele. A diferença proposta é fazê-lo **só nos previews que precisam** (por
-exemplo, linha acima de ~40 colunas), mantendo o resto em texto, que é pesquisável e copiável.
-
-Custo estimado: três crates (`usvg`, `resvg`, `tiny-skia`), montar um SVG com o texto em fonte
-monoespaçada e rasterizar, mais a escolha da fonte em tempo de execução. Não foi feito porque o
-`<pre>` resolveu; fica registrado para não ser redescoberto do zero.
-
-## Desenvolver e testar sem bot
-
-Dá para exercitar o sistema inteiro (tmux, hooks, Monitor, fila) sem Telegram nenhum:
-
-```bash
-export LUKADISPATCH_OFFLINE=1
-cargo run -p ld-daemon
-lukadispatch new <projeto>
-lukadispatch ls
-lukadispatch send <id> "quanto é 2+2?"
-tmux attach -t ld-<projeto>-<id>     # para ver o que a sessão fez
-```
-
-Em modo offline o daemon usa o frontend nulo: as sessões ganham um canal de mentira
-(`nulo-<uuid>`) e nada é enviado a lugar nenhum; o resto funciona igual.
-
-Os fluxos do daemon (card de transcrição, guarda de pendência, envio em partes, fim de turno) têm
-testes em `crates/ld-daemon/tests/fluxos.rs`, que rodam o domínio inteiro contra um frontend em
-memória e dublês das outras portas, sem rede, sem tmux e sem modelo de voz.
-
-`./ci.sh` roda fmt, clippy com `-D warnings` (também com o crate compilado sem o Telegram, para
-garantir que o domínio não depende dele), os testes e o build release.
 
 ## Segurança
 
-- Só os `allowed_user_ids` são obedecidos; qualquer outro update é descartado sem ser lido.
-- O socket de controle fica no runtime dir do usuário (0700) e recebe 0600. Sem token, porque
-  quem consegue abrir o arquivo já é o dono da máquina.
-- O token do bot só existe no ambiente, nunca no config nem no git.
+- O bot só obedece aos `allowed_user_ids`. Qualquer outro update é descartado sem ser lido.
+- O token existe só no `.env` (modo 600), nunca no `config.toml` nem no git.
+- O socket de controle fica no seu runtime dir, com permissão 0600.
+- As sessões rodam com os seus privilégios, nos seus projetos. Quem controla o grupo controla
+  essas sessões: não adicione mais ninguém nele.
+
+## Para ir além
+
+- [`docs/`](docs/README.md): como o projeto é por dentro, por que cada peça é como é, como trocar
+  o Telegram, o agente ou o motor de voz, e as armadilhas já medidas.
+- [`docs/contribuir.md`](docs/contribuir.md): rodar sem bot, os testes, o CI, o deploy e como
+  sai uma release.
+- [`CHANGELOG.md`](CHANGELOG.md): o que mudou em cada versão.
+
+Licença [MIT](LICENSE).
