@@ -97,9 +97,10 @@ testa em x86_64 e aarch64 (cada um no runner nativo), monta os tarballs com sha2
 GitHub Release com a seção do changelog como notas e atualiza a fórmula no
 `LLawli/homebrew-tap`.
 
-A fórmula precisa do secret `HOMEBREW_TAP_TOKEN` no repositório: um token fine-grained com
-permissão *Contents: read and write* só no `LLawli/homebrew-tap`. Sem ele, a release sai do
-mesmo jeito e o job da fórmula só avisa.
+O job da fórmula segue o mesmo padrão da release do `note`: empurra por SSH com uma deploy key
+de escrita no `LLawli/homebrew-tap` (secret `HOMEBREW_TAP_DEPLOY_KEY`) e só roda com a variável
+de repositório `HOMEBREW_TAP=true`. Sem ela, a release sai do mesmo jeito e a fórmula fica na
+versão anterior.
 
 Os nomes dos tarballs (`lukadispatch-linux-<arq>.tar.gz`) são contrato: o `install.sh` e o mise
 dependem deles. O conteúdo é definido num lugar só, o `dist/empacota`.

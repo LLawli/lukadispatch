@@ -1,0 +1,188 @@
+name: release
+
+# Soltar uma versão: acertar a versão no Cargo.toml, fechar a seção no CHANGELOG.md, commitar e
+# empurrar o tag (docs/contribuir.md tem o passo a passo). O resto é daqui para baixo.
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "tag já existente a (re)publicar, ex.: v0.1.0"
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  confere:
+    name: tag, Cargo.toml e CHANGELOG concordam
+    runs-on: ubuntu-24.04
+    outputs:
+      versao: ${{ steps.v.outputs.versao }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+      - id: v
+        run: |
+          versao="${TAG#v}"
+          cargo_versao=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "$versao" != "$cargo_versao" ]; then
+            echo "::error::tag $TAG, mas o Cargo.toml diz $cargo_versao"
+            exit 1
+          fi
+          if ! grep -q "^## \[$versao\]" CHANGELOG.md; then
+            echo "::error::o CHANGELOG.md não tem a seção ## [$versao]"
+            exit 1
+          fi
+          echo "versao=$versao" >> "$GITHUB_OUTPUT"
+
+  # Compila uma vez por arquitetura, cada uma no runner nativo dela, para os testes rodarem no
+  # binário de verdade. O tarball daqui é o artefato que todo o resto reaproveita.
+  build:
+    name: build ${{ matrix.arq }}
+    needs: confere
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arq: x86_64
+            os: ubuntu-24.04
+          - arq: aarch64
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+      - name: dependências de sistema
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libadwaita-1-dev ffmpeg p7zip-full
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.arq }}
+      - run: cargo test --workspace --locked
+      - run: cargo build --workspace --release --locked
+      - name: empacota
+        run: |
+          nome="lukadispatch-linux-${{ matrix.arq }}.tar.gz"
+          dist/empacota target/release pacote
+          tar -czf "$nome" -C pacote .
+          sha256sum "$nome" > "$nome.sha256"
+          # Tarball de poucos bytes é empacotamento quebrado, mesmo com tudo verde acima.
+          test "$(stat -c %s "$nome")" -gt 1000000
+      - uses: actions/upload-artifact@v7
+        with:
+          name: lukadispatch-linux-${{ matrix.arq }}
+          path: lukadispatch-linux-${{ matrix.arq }}.tar.gz*
+          if-no-files-found: error
+
+  publica:
+    name: GitHub Release
+    needs: [confere, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/download-artifact@v8
+        with:
+          path: artefatos
+          merge-multiple: true
+      - name: notas da versão
+        env:
+          VERSAO: ${{ needs.confere.outputs.versao }}
+        run: |
+          awk -v ver="$VERSAO" '
+            BEGIN { hdr = "## [" ver "]" }
+            index($0, hdr) == 1 { flag = 1; next }
+            flag && index($0, "## [") == 1 { exit }
+            flag { print }
+          ' CHANGELOG.md > notas.md
+          if [ ! -s notas.md ]; then
+            echo "::error::a seção [$VERSAO] do CHANGELOG.md está vazia"
+            exit 1
+          fi
+          {
+            echo
+            echo "## Instalar"
+            echo
+            echo '```bash'
+            echo "curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/master/install.sh | sh"
+            echo '```'
+            echo
+            echo "Ou: \`brew install LLawli/tap/lukadispatch\`, \`mise use -g github:${{ github.repository }}\`, ou o tarball abaixo."
+            echo
+            echo "## sha256"
+            echo
+            echo '```'
+            cat artefatos/*.sha256
+            echo '```'
+          } >> notas.md
+      - name: cria a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls artefatos/lukadispatch-linux-x86_64.tar.gz artefatos/lukadispatch-linux-aarch64.tar.gz
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" artefatos/* --clobber
+            gh release edit "$TAG" --notes-file notas.md
+          else
+            gh release create "$TAG" artefatos/* --title "$TAG" --notes-file notas.md --verify-tag
+          fi
+
+  # Mesmo padrão da release do note: a fórmula vai para o LLawli/homebrew-tap por SSH, com uma
+  # deploy key que só escreve no tap (secret HOMEBREW_TAP_DEPLOY_KEY). Ligado pela variável de
+  # repositório HOMEBREW_TAP=true; sem ela, a release sai e a fórmula fica como estava.
+  homebrew:
+    name: fórmula no tap
+    needs: [confere, publica]
+    if: vars.HOMEBREW_TAP == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+      - name: monta a fórmula
+        env:
+          VERSAO: ${{ needs.confere.outputs.versao }}
+        run: |
+          fonte="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${TAG}.tar.gz"
+          # O curl roda dentro de uma substituição, onde o -f não derruba o job: por isso o retry
+          # (o codeload demora a servir um tag recém-criado) e a recusa do hash de entrada vazia.
+          sha=$(curl -fsSL --retry 5 --retry-all-errors "$fonte" | sha256sum | cut -d' ' -f1)
+          if [ -z "$sha" ] || [ "$sha" = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" ]; then
+            echo "::error::o tarball do código em $fonte não baixou; a fórmula não sai quebrada"
+            exit 1
+          fi
+          sed -e "s/@VERSAO@/$VERSAO/" -e "s/@SHA256@/$sha/" \
+            dist/homebrew/lukadispatch.rb > lukadispatch.rb
+          cat lukadispatch.rb
+      - name: empurra para o tap
+        env:
+          DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/tap_key
+          chmod 600 ~/.ssh/tap_key
+          # A chave de host publicada do GitHub, fixada: ssh-keyscan aceitaria a de quem estivesse
+          # no meio do caminho.
+          printf '%s\n' 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' >> ~/.ssh/known_hosts
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/tap_key -o IdentitiesOnly=yes"
+          git clone "git@github.com:${GITHUB_REPOSITORY_OWNER}/homebrew-tap.git" tap
+          install -D lukadispatch.rb tap/Formula/lukadispatch.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/lukadispatch.rb
+          git diff --cached --quiet || git commit -m "lukadispatch ${TAG}"
+          git push

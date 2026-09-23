@@ -41,7 +41,7 @@ serviço do systemd e deixa um `.env` e um `config.toml` de exemplo em `~/.confi
 Rodar de novo atualiza. Outros caminhos:
 
 ```bash
-brew install llawli/tap/lukadispatch                 # Homebrew no Linux (compila do fonte)
+brew install LLawli/tap/lukadispatch                 # Homebrew no Linux (compila do fonte)
 mise use -g github:LLawli/lukadispatch               # mise
 cargo install --locked --git https://github.com/LLawli/lukadispatch ld-daemon ld-cli ld-ask ld-mcp
 ```
