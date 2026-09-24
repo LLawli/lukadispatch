@@ -35,9 +35,10 @@ depth = 1
 # tipo = "claude-code"
 # envelope = "ai-memory"          # "nenhum" roda o claude direto, sem o ai-memory
 #
-# [transcricao]
-# ativa = true                    # false desliga a transcrição de voz
+# [transcricao]                   # o lukadispatch setup instala o motor e preenche isto
+# ativa = true                    # false: a voz chega como arquivo de áudio, sem texto
 # motor = "processo"              # qualquer programa local de voz para texto
+# comando, modelo e saida: veja a doc de Transcricao em crates/ld-core/src/config.rs
 #
 # [arquivos]
 # divisor = "7z"                  # ou "rar"

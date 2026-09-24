@@ -32,6 +32,17 @@ por minuto de fala, ~1 GB de pico. Os descartados, e por quê:
 
 Só o whisper.cpp usa a GPU nesta máquina: os outros não têm backend Vulkan ou ROCm utilizável.
 
+**Quem instala escolhe entre dois motores, e o setup instala.** Decidido em 23/09/2026: o
+`lukadispatch setup` oferece o whisper large-v3-turbo (o padrão acima) e o FastConformer-pt,
+que erra quase o dobro em jargão e inglês mas é ~5x mais rápido e cabe em máquina fraca: para
+fala corrida sem termo técnico, ele é confiável. Os programas vêm prontos da release do
+lukadispatch, compilados uma vez no CI: o whisper-cli em duas variantes, Vulkan (que cai para a
+CPU sozinho quando não há GPU, medido) e só CPU (para quem nem tem a libvulkan, onde a Vulkan
+não abre); e o `sherpa-onnx-offline` tirado do tarball estático oficial. Portáveis de propósito:
+sem `GGML_NATIVE`, sem OpenMP. Os modelos vêm da fonte deles, com tamanho e sha256 fixados no
+código. O setup só grava o config depois de transcrever um áudio de teste pelo mesmo motor que
+o daemon usa. O `sherpa-onnx-offline` imprime uma linha JSON, e por isso existe `saida = "json"`.
+
 **Uma transcrição por vez, em todo o daemon.** Não é CPU (o Vulkan ocupa 0,3 dos 8 núcleos), é
 memória: dois áudios juntos somam ~2 GB e empurram a máquina para o swap em zram, que comprime e
 segura em vez de devolver.
@@ -68,6 +79,9 @@ estranha, ele é a única forma de saber se o erro foi do modelo ou da gravaçã
 - **Modelo quente** (`whisper-server` com o modelo carregado): medido e rejeitado, porque carregar
   custa 0,44 s de 9,6 s e prenderia ~1 GB entre mensagens. Reabra se o uso passar a ser muitos
   áudios curtos em sequência, ou se a máquina ganhar RAM.
+- **Versão do whisper.cpp ou do sherpa-onnx**: estão fixadas (`WHISPER_CPP` no release.yml,
+  `VERSAO` em `dist/asr/sherpa`). Subir uma delas é refazer a medição de erro com os áudios reais,
+  porque uma mudança de decodificador muda o erro sem mudar a interface.
 - **Outro motor**: se a máquina mudar (GPU com VRAM, mais RAM), refaça o benchmark com áudio real,
   não com dataset público. No FLEURS pt-BR seis de oito configurações empataram em 2,8%; nos
   áudios reais a faixa abriu para 11% a 22% e a ordem mudou.

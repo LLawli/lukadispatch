@@ -116,18 +116,26 @@ pub struct Telegram {
 /// whisper.cpp com large-v3-turbo quantizado em q5_0, no backend Vulkan. Ali ele fez 12,9% de
 /// erro nos áudios reais a 44 s por minuto de fala, usando ~1 GB.
 ///
-/// Trocar é editar `comando`, `modelo` e `saida`. Alguns pontos de partida medidos:
+/// O `lukadispatch setup` instala um de dois motores e escreve estes campos. Trocar à mão é
+/// editar `comando`, `modelo` e `saida`. Os dois que o setup oferece, e o terceiro medido:
 ///
 /// ```toml
-/// # Mesmo motor na CPU: mesmo erro, 67 s por minuto, mas 155 MB a menos (não usa a GTT).
-/// comando = ["~/.local/share/lukadispatch/asr/whisper-cli-cpu", "-m", "{modelo}",
+/// # whisper.cpp large-v3-turbo q5_0 (o padrão): 12,9% de erro, 44 s por minuto no Vulkan.
+/// comando = ["~/.local/share/lukadispatch/asr/whisper-cli", "-m", "{modelo}",
 ///            "-f", "{audio}", "-l", "pt", "-t", "8", "-otxt", "-of", "{saida}", "-nt"]
+/// modelo = "~/.local/share/lukadispatch/asr/modelos/ggml-large-v3-turbo-q5_0.bin"
+/// saida = "arquivo"
 ///
-/// # FastConformer-pt (sherpa-onnx): 8 s por minuto e 417 MB, com 21,6% de erro. Bom para
-/// # fala corrida, ruim para jargão e nome próprio.
-/// comando = ["~/.cache/asr-bench/venv/bin/python", "~/.cache/asr-bench/sherpa_worker.py",
-///            "--tipo", "nemo_transducer", "--dir", "{modelo}", "--audio", "{audio}"]
-/// saida = "stdout"
+/// # O mesmo na CPU (whisper-cli-cpu): mesmo erro, 67 s por minuto, 155 MB a menos.
+///
+/// # FastConformer-pt no sherpa-onnx: 8 s por minuto e 417 MB, com 21,6% de erro. Bom para
+/// # fala corrida, ruim para jargão, nome próprio e palavra em inglês.
+/// comando = ["~/.local/share/lukadispatch/asr/sherpa-onnx-offline",
+///            "--encoder={modelo}/encoder.int8.onnx", "--decoder={modelo}/decoder.int8.onnx",
+///            "--joiner={modelo}/joiner.int8.onnx", "--tokens={modelo}/tokens.txt",
+///            "--model-type=nemo_transducer", "--num-threads=8", "{audio}"]
+/// modelo = "~/.local/share/lukadispatch/asr/modelos/sherpa-onnx-nemo-transducer-stt_pt_fastconformer_hybrid_large_pc-int8"
+/// saida = "json"
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -146,7 +154,8 @@ pub struct Transcricao {
     /// Caminho do modelo (ou do diretório dele). `~` é expandido. Vazio quando o comando já
     /// sabe onde está o seu.
     pub modelo: String,
-    /// Onde o comando deixa o texto: `"arquivo"` (escreve `{saida}.txt`) ou `"stdout"`.
+    /// Onde o comando deixa o texto: `"arquivo"` (escreve `{saida}.txt`), `"stdout"` (texto
+    /// puro) ou `"json"` (uma linha JSON com o texto no campo `text`, como o sherpa-onnx faz).
     pub saida: String,
     /// Teto de tempo por áudio. Transcrever é lento aqui: um minuto de fala leva de 8 s a 128 s
     /// dependendo do motor, e um áudio longo multiplica isso.

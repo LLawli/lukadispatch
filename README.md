@@ -46,7 +46,10 @@ no `lukadispatch setup`, que conversa com você até o bot estar respondendo:
    sozinho o grupo e o seu id;
 4. confere se o bot é administrador com os direitos que ele usa, e diz o que ajustar se não for;
 5. pergunta seu nome, onde ficam seus projetos e o modo de permissão;
-6. grava o config e o `.env` (só você lê), e liga os hooks e o serviço, perguntando antes.
+6. oferece instalar a transcrição de voz, com dois motores: o whisper large-v3-turbo, que erra
+   menos (inclusive em jargão e inglês) e baixa 574 MB, ou o FastConformer-pt, ~5x mais rápido e
+   leve (106 MB), bom para fala corrida; baixa, confere e testa num áudio antes de ligar;
+7. grava o config e o `.env` (só você lê), e liga os hooks e o serviço, perguntando antes.
 
 Rodar o `lukadispatch setup` de novo é seguro: ele oferece o que já está configurado e edita o
 config no lugar, com backup. Rodar o `install.sh` de novo atualiza.
@@ -65,9 +68,8 @@ e rode o `install.sh --de .` que vem dentro dele.
 **Precisa ter:** [Claude Code](https://docs.claude.com/en/docs/claude-code) 2.1.274 ou mais
 novo, `tmux`, e gtk4 e libadwaita 1.5+ para a janela de pergunta no PC. O
 [ai-memory](https://github.com/akitaonrails/ai-memory) é opcional: sem ele, o setup oferece rodar
-as sessões direto. Para dividir arquivos grandes: `7z` (ou `rar`) e `ffmpeg`. Para transcrever
-voz: um programa local de voz para texto (o padrão é o whisper.cpp; sem ele, o setup desliga a
-transcrição e a voz chega como arquivo).
+as sessões direto. Para dividir arquivos grandes: `7z` (ou `rar`) e `ffmpeg`. A transcrição de
+voz também precisa do `ffmpeg`; o motor em si o setup instala.
 
 ### Peças
 

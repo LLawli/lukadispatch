@@ -6,6 +6,17 @@ versão para as notas do GitHub Release, então escreva para quem vai decidir se
 
 ## [Unreleased]
 
+### Adicionado
+
+- O `lukadispatch setup` oferece instalar a transcrição de voz, com dois motores: o whisper
+  large-v3-turbo (erra menos, inclusive em jargão e palavra em inglês; baixa 574 MB) e o
+  FastConformer-pt (~5x mais rápido e leve, 106 MB; erra mais em jargão e inglês). O programa vem
+  pronto da release, o modelo tem o sha256 conferido, e a instalação só vale depois de transcrever
+  um áudio de teste. Antes, sem o transcritor na máquina, o setup só oferecia desligar a voz.
+- A release publica os programas de voz por arquitetura: `lukadispatch-whisper-linux-<arq>`
+  (Vulkan e CPU) e `lukadispatch-sherpa-linux-<arq>`.
+- `saida = "json"` no `[transcricao]`, para motor que imprime o texto numa linha JSON.
+
 ## [0.1.0] - 2026-09-23
 
 Primeira versão pública.
