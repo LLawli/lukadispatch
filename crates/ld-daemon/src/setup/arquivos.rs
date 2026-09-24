@@ -28,6 +28,11 @@ pub struct Rascunho {
     pub nome_sugerido: Option<String>,
     /// `true` quando algum programa está no PATH. Nos testes, a máquina é de mentira.
     pub tem_programa: Box<dyn Fn(&str) -> bool>,
+    /// Perguntar de novo o que já está resolvido (`setup --refazer`).
+    pub refazer: bool,
+    /// Para o serviço antes de o setup escutar o bot, e diz se ele estava rodando. Nos testes (e
+    /// por padrão) não faz nada: só o setup de verdade mexe no systemd.
+    pub pausa_servico: Box<dyn Fn() -> bool>,
 }
 
 impl Rascunho {
@@ -56,6 +61,8 @@ impl Rascunho {
             havia_config,
             nome_sugerido: None,
             tem_programa: Box::new(no_path),
+            refazer: false,
+            pausa_servico: Box::new(|| false),
         })
     }
 

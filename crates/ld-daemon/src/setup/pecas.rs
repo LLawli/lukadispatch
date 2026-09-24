@@ -18,8 +18,9 @@ pub trait Peca {
     /// Confere o que esta peça precisa na máquina, pergunta o que faltar e escreve o config.
     async fn configura(&self, tela: &mut Tela<'_>, r: &mut Rascunho) -> Result<()>;
 
-    /// Depois de o config estar gravado: liga o que a peça precisa fora dele.
-    fn ativa(&self, _tela: &mut Tela<'_>) -> Result<()> {
+    /// Depois de o config estar gravado: liga o que a peça precisa fora dele. O que já está
+    /// ligado só é conferido, a menos que `r.refazer`.
+    fn ativa(&self, _tela: &mut Tela<'_>, _r: &Rascunho) -> Result<()> {
         Ok(())
     }
 }
@@ -104,8 +105,10 @@ impl Peca for ClaudeCode {
                  primeira sessão: https://docs.claude.com/en/docs/claude-code",
             );
         } else if let Some(v) = versao_do_claude()
-            && v < CLAUDE_MINIMO
+            && v >= CLAUDE_MINIMO
         {
+            tela.diz(&format!("Claude Code {}.{}.{}: ok.", v.0, v.1, v.2));
+        } else if let Some(v) = versao_do_claude() {
             tela.diz(&format!(
                 "Aviso: o Claude Code instalado é {}.{}.{}; o lukadispatch precisa de {}.{}.{} ou \
                  mais novo. Atualize com `claude update`.",
@@ -116,8 +119,12 @@ impl Peca for ClaudeCode {
         Ok(())
     }
 
-    fn ativa(&self, tela: &mut Tela<'_>) -> Result<()> {
+    fn ativa(&self, tela: &mut Tela<'_>, r: &Rascunho) -> Result<()> {
         tela.passo("Os hooks do Claude Code");
+        if !r.refazer && hooks_instalados() {
+            tela.diz("Instalados: ok.");
+            return Ok(());
+        }
         tela.diz(
             "Os hooks são como o Claude Code avisa o lukadispatch do que acontece. Nas sessões \
              que você abre no terminal, entra só telemetria (para aparecerem no painel); o \
@@ -136,6 +143,17 @@ impl Peca for ClaudeCode {
         }
         Ok(())
     }
+}
+
+/// Os hooks de telemetria estão no settings do Claude Code como o install os deixaria, e o
+/// settings das sessões do bot existe.
+fn hooks_instalados() -> bool {
+    use ld_core::{hooks, paths};
+
+    let cli = paths::cli();
+    paths::bot_settings_file().is_file()
+        && hooks::le_settings(&paths::claude_settings())
+            .is_ok_and(|s| hooks::instalados(&s, &hooks::telemetry_hooks(&cli)))
 }
 
 /// `2.1.280 (Claude Code)` vira `(2, 1, 280)`.
@@ -167,6 +185,8 @@ impl Peca for Tmux {
                 "Aviso: o tmux não está no PATH, e cada sessão roda dentro de um. Instale pelo \
                  gerenciador de pacotes da sua distro.",
             );
+        } else {
+            tela.diz("tmux: ok.");
         }
         r.poe(None, "hospedeiro", "tmux");
         Ok(())
@@ -183,7 +203,9 @@ impl Peca for AiMemory {
 
     async fn configura(&self, tela: &mut Tela<'_>, r: &mut Rascunho) -> Result<()> {
         let mut envelope = "ai-memory";
-        if !(r.tem_programa)("ai-memory") {
+        if (r.tem_programa)("ai-memory") {
+            tela.diz("ai-memory: ok.");
+        } else {
             tela.diz(
                 "O ai-memory não está no PATH. Ele dá às sessões memória entre conversas \
                  (https://github.com/akitaonrails/ai-memory), mas não é obrigatório.",

@@ -21,6 +21,11 @@ impl<'a> Tela<'a> {
         }
     }
 
+    /// Se a conversa é num terminal de verdade (e não num roteiro de teste ou num pipe).
+    pub fn terminal(&self) -> bool {
+        self.terminal
+    }
+
     pub fn diz(&mut self, texto: &str) {
         let _ = writeln!(self.saida, "{texto}");
     }

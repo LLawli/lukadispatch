@@ -43,6 +43,8 @@ tempfile = "3"
 toml_edit = "0.23"
 # Token do bot digitado sem eco no terminal.
 rpassword = "7"
+# O setup confere o sha256 de cada download do motor de voz.
+sha2 = "0.10"
 
 [dev-dependencies]
 filetime = "0.2"

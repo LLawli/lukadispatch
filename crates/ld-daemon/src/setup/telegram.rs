@@ -84,11 +84,11 @@ pub async fn configura(tela: &mut Tela<'_>, r: &mut Rascunho, conecta: Conecta<'
     if let Some(de) = usuario {
         r.inclui_id("telegram", "allowed_user_ids", de.id as i64);
         r.nome_sugerido = de.nome.split_whitespace().next().map(str::to_string);
+        tela.diz(&format!(
+            "Grupo \"{}\" pronto para o @{}.",
+            chat.titulo, bot.usuario
+        ));
     }
-    tela.diz(&format!(
-        "Grupo \"{}\" pronto para o @{}.",
-        chat.titulo, bot.usuario
-    ));
     Ok(())
 }
 
@@ -102,6 +102,10 @@ async fn escolhe_bot(
         let api = conecta(&token);
         match api.quem_sou().await {
             Ok(bot) => {
+                if !r.refazer {
+                    tela.diz(&format!("@{}: ok.", bot.usuario));
+                    return Ok((token, api, bot));
+                }
                 if tela.sim(&format!(
                     "Já existe um bot configurado, @{}. Usar ele?",
                     bot.usuario
@@ -162,6 +166,10 @@ async fn escolhe_grupo(
     if chat_atual != 0 && !r.atual.telegram.allowed_user_ids.is_empty() {
         match api.chat(chat_atual).await {
             Ok(c) => {
+                if !r.refazer {
+                    tela.diz(&format!("\"{}\": ok.", c.titulo));
+                    return Ok((c.id, None));
+                }
                 if tela.sim(&format!(
                     "O grupo \"{}\" já está configurado. Usar ele?",
                     c.titulo
@@ -184,6 +192,9 @@ async fn escolhe_grupo(
          de novo: a mudança só vale para grupos em que ele entrar depois.",
         bot.usuario
     ));
+    if (r.pausa_servico)() {
+        tela.diz("O serviço fica parado enquanto o setup escuta o bot, e volta no fim.");
+    }
     tela.diz("Esperando a mensagem no grupo (Ctrl+C cancela)...");
     let mut desde = api.marca_inicio().await?;
     loop {

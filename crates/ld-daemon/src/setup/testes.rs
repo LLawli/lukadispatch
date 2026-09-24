@@ -37,14 +37,22 @@ fn selecao(s: &str) -> Selecao {
 fn sem_seletor_sao_os_padroes_que_existem() {
     let sel = selecao("");
     assert_eq!(sel, Selecao::default());
-    let nomes: Vec<&str> = pecas(&sel).unwrap().iter().map(|p| p.nome()).collect();
+    let nomes: Vec<&str> = pecas(&sel, None)
+        .unwrap()
+        .iter()
+        .map(|p| p.nome())
+        .collect();
     assert_eq!(nomes, ["tmux", "claude-code", "ai-memory", "telegram"]);
 }
 
 #[test]
 fn seletores_aceitam_espaco_igual_e_apelido() {
     let sel = selecao("--agent claude --envelope=nenhum --session tmux --frontend telegram");
-    let nomes: Vec<&str> = pecas(&sel).unwrap().iter().map(|p| p.nome()).collect();
+    let nomes: Vec<&str> = pecas(&sel, None)
+        .unwrap()
+        .iter()
+        .map(|p| p.nome())
+        .collect();
     assert_eq!(nomes, ["tmux", "claude-code", "nenhum", "telegram"]);
 }
 
@@ -56,12 +64,36 @@ fn implementacao_que_nao_existe_falha_dizendo_as_que_existem() {
         ("--session herdr", "tmux"),
         ("--envelope ai-jail", "ai-memory, nenhum"),
     ] {
-        let e = pecas(&selecao(arg)).err().expect(arg);
+        let e = pecas(&selecao(arg), None).err().expect(arg);
         let msg = format!("{e:#}");
         let (opcao, nome) = arg.split_once(' ').unwrap();
         assert!(msg.contains(opcao) && msg.contains(nome), "{msg}");
         assert!(msg.contains(esperado), "{msg}");
     }
+}
+
+#[test]
+fn sem_flag_vale_o_que_esta_no_config() {
+    // Rodar o setup de novo sem flag não pode desfazer uma escolha: o padrão só vale para
+    // config novo.
+    let cfg: Config = toml::from_str("[agente]\nenvelope = \"nenhum\"\n").unwrap();
+    let nomes = |sel: &Selecao| -> Vec<&'static str> {
+        pecas(sel, Some(&cfg))
+            .unwrap()
+            .iter()
+            .map(|p| p.nome())
+            .collect()
+    };
+    assert_eq!(
+        nomes(&selecao("")),
+        ["tmux", "claude-code", "nenhum", "telegram"]
+    );
+    assert_eq!(
+        nomes(&selecao("--envelope ai-memory")),
+        ["tmux", "claude-code", "ai-memory", "telegram"],
+        "a flag manda"
+    );
+    assert!(selecao("--refazer").refazer);
 }
 
 #[test]
@@ -406,16 +438,10 @@ async fn rodar_de_novo_reaproveita_bot_e_grupo_sem_esperar_mensagem() {
     let config = format!("[telegram]\nchat_id = {GRUPO_NOVO}\nallowed_user_ids = [{EU}]\n");
     let env = format!("LUKADISPATCH_TELEGRAM_TOKEN={TOKEN}\n");
     let mut r = Rascunho::de(Some(&config), Some(&env)).unwrap();
-    let (res, tela) = com_tela("\n\n", async |t| {
-        telegram::configura(t, &mut r, &conecta).await
-    })
-    .await;
+    let (res, tela) = com_tela("", async |t| telegram::configura(t, &mut r, &conecta).await).await;
     res.unwrap();
-    assert!(
-        tela.contains("Já existe um bot configurado, @meu_bot"),
-        "{tela}"
-    );
-    assert!(tela.contains("\"Sessões\" já está configurado"), "{tela}");
+    assert!(tela.contains("@meu_bot: ok"), "{tela}");
+    assert!(tela.contains("\"Sessões\": ok"), "{tela}");
     assert_eq!(roteiro.lock().unwrap().esperas, 0);
     let cfg: Config = toml::from_str(&r.config_texto()).unwrap();
     assert_eq!(cfg.telegram.allowed_user_ids, vec![EU as i64]);
@@ -464,7 +490,7 @@ async fn a_conversa_inteira_termina_num_config_que_o_daemon_aceita() {
         "",  // nome: fica o do Telegram
         "",  // raízes: fica a sugerida
         "2", // modo: perguntar
-        "s", // desligar a transcrição, que não existe nesta home
+        "3", // transcrição: agora não
     ]
     .join("\n")
         + "\n";
@@ -489,6 +515,68 @@ async fn a_conversa_inteira_termina_num_config_que_o_daemon_aceita() {
     crate::sessions::da_config(&cfg.hospedeiro).unwrap();
     crate::transcritor::da_config(&cfg.transcricao).unwrap();
     crate::divisor::Divisores::da_config(&cfg.arquivos).unwrap();
+}
+
+/// As peças de verdade do que o config pede, com o Telegram roteirizado no lugar do teloxide.
+fn pecas_de_teste(cfg: Option<&Config>, roteiro: &Arc<Mutex<Roteiro>>) -> Vec<Box<dyn Peca>> {
+    let mut v = pecas(&Selecao::default(), cfg).unwrap();
+    v.pop();
+    v.push(Box::new(TelegramFalso(roteiro.clone())));
+    v
+}
+
+#[tokio::test]
+async fn rodar_de_novo_com_tudo_resolvido_nao_pergunta_nada() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    std::fs::create_dir_all(h.join("code/api/.git")).unwrap();
+    let roteiro = Arc::new(Mutex::new(roteiro_completo()));
+
+    let mut r = Rascunho::de(None, None).unwrap();
+    r.tem_programa = Box::new(|p| p == "tmux");
+    let respostas = "s\nerrado\n123456:bom\n\n\n\n\n\n\n2\n3\n";
+    let pecas = pecas_de_teste(None, &roteiro);
+    let (res, _) = com_tela(respostas, async |t| conduz(t, &mut r, &pecas, h).await).await;
+    res.unwrap();
+    let (config, env) = (r.config_texto(), r.env_texto());
+    let esperas = roteiro.lock().unwrap().esperas;
+
+    // Segunda rodada com a entrada VAZIA: qualquer pergunta esgota a entrada e falha.
+    let mut r = Rascunho::de(Some(&config), Some(&env)).unwrap();
+    r.tem_programa = Box::new(|p| p == "tmux");
+    let pecas = pecas_de_teste(Some(&r.atual.clone()), &roteiro);
+    let (res, tela) = com_tela("", async |t| conduz(t, &mut r, &pecas, h).await).await;
+    res.unwrap_or_else(|e| panic!("perguntou algo resolvido: {e:#}\n{tela}"));
+    assert_eq!(r.config_texto(), config, "o config não pode mudar");
+    assert_eq!(r.env_texto(), env);
+    assert_eq!(
+        roteiro.lock().unwrap().esperas,
+        esperas,
+        "não escuta o bot de novo"
+    );
+    assert!(tela.contains("@meu_bot: ok"), "{tela}");
+    assert!(tela.contains("Desligada"), "{tela}");
+}
+
+#[tokio::test]
+async fn refazer_reabre_as_perguntas() {
+    let roteiro = Arc::new(Mutex::new(Roteiro {
+        privacidade: [true].into(),
+        forum: [true].into(),
+        direitos: [(true, true, true)].into(),
+        ..Default::default()
+    }));
+    let config = format!("[telegram]\nchat_id = {GRUPO_NOVO}\nallowed_user_ids = [{EU}]\n");
+    let env = format!("LUKADISPATCH_TELEGRAM_TOKEN={TOKEN}\n");
+    let mut r = Rascunho::de(Some(&config), Some(&env)).unwrap();
+    r.refazer = true;
+    let conecta = conecta_com(&roteiro);
+    let (res, tela) = com_tela("\n\n", async |t| {
+        telegram::configura(t, &mut r, &conecta).await
+    })
+    .await;
+    res.unwrap();
+    assert!(tela.contains("Usar ele?"), "{tela}");
 }
 
 #[test]
