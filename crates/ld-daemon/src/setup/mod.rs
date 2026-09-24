@@ -323,24 +323,58 @@ fn servico_ativo() -> bool {
     systemctl(&["is-active", "--quiet", "lukadispatch"])
 }
 
-/// A unit do systemd, se ainda não existir (quem instalou por `cargo install` não tem).
-/// Devolve se escreveu a unit agora.
+/// A unit do systemd para o daemon em `daemon`. Com o daemon em `~/.local/bin` ela sai igual à
+/// do pacote (com `%h`); em outro lugar, o `ExecStart` leva o caminho dele.
+pub fn unit_para(daemon: &Path, home: &Path) -> String {
+    let modelo = include_str!("../../../../dist/lukadispatch.service");
+    if daemon == home.join(".local/bin/lukadispatchd") {
+        return modelo.to_string();
+    }
+    modelo
+        .lines()
+        .map(|l| {
+            if l.starts_with("ExecStart=") {
+                format!("ExecStart={}", daemon.display())
+            } else {
+                l.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+/// A unit existente precisa ser refeita: o `ExecStart` não leva a um arquivo, ou leva a outro
+/// que não o daemon deste setup. Dois caminhos até o mesmo arquivo (um symlink do brew) valem.
+pub fn unit_pendente(texto: &str, daemon: &Path, home: &Path) -> bool {
+    let Some(exec) = texto
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("ExecStart="))
+    else {
+        return true;
+    };
+    let exec = exec
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .replace("%h", &home.to_string_lossy());
+    match (std::fs::canonicalize(&exec), std::fs::canonicalize(daemon)) {
+        (Ok(a), Ok(b)) => a != b,
+        _ => true,
+    }
+}
+
+/// A unit do systemd, se faltar ou apontar para um daemon que não existe mais (o `brew upgrade`
+/// apaga a pasta da versão anterior). Devolve se escreveu.
 fn garante_unit(tela: &mut Tela<'_>, home: &Path) -> Result<bool> {
     let unit = home.join(".config/systemd/user/lukadispatch.service");
-    if unit.exists() {
-        return Ok(false);
+    let daemon = std::path::PathBuf::from(paths::daemon());
+    match std::fs::read_to_string(&unit) {
+        Ok(t) if !unit_pendente(&t, &daemon, home) => return Ok(false),
+        Ok(_) => tela.diz("A unit apontava para um lukadispatchd que não é este; refazendo."),
+        Err(_) => {}
     }
-    let dir = std::env::current_exe()?
-        .parent()
-        .context("diretório do lukadispatchd")?
-        .to_path_buf();
-    let modelo = include_str!("../../../../dist/lukadispatch.service");
-    let texto = if dir == home.join(".local/bin") {
-        modelo.to_string()
-    } else {
-        modelo.replace("%h/.local/bin", &dir.to_string_lossy())
-    };
-    arquivos::grava(&unit, &texto, 0o644)?;
+    arquivos::grava(&unit, &unit_para(&daemon, home), 0o644)?;
     tela.diz(&format!("{}", unit.display()));
     Ok(true)
 }

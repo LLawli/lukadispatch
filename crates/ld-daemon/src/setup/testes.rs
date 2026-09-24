@@ -580,6 +580,46 @@ async fn refazer_reabre_as_perguntas() {
 }
 
 #[test]
+fn unit_que_aponta_para_versao_apagada_e_pendencia() {
+    // O caso real: a unit gravada pela 0.1.0 do brew apontava para Cellar/.../0.1.0, que o
+    // brew upgrade apagou, e o serviço ficou em 203/EXEC com o setup dizendo que estava tudo ok.
+    let raiz = tempfile::tempdir().unwrap();
+    let home = raiz.path().join("home");
+    let cellar = raiz.path().join("Cellar/lukadispatch/0.2.0/bin");
+    let bin = raiz.path().join("bin");
+    std::fs::create_dir_all(&cellar).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(cellar.join("lukadispatchd"), "").unwrap();
+    std::os::unix::fs::symlink(cellar.join("lukadispatchd"), bin.join("lukadispatchd")).unwrap();
+    let daemon = bin.join("lukadispatchd");
+
+    let velha = "[Service]\nExecStart=/brew/Cellar/lukadispatch/0.1.0/bin/lukadispatchd\n";
+    assert!(unit_pendente(velha, &daemon, &home));
+
+    let nova = unit_para(&daemon, &home);
+    assert!(
+        nova.contains(&format!("ExecStart={}", daemon.display())),
+        "{nova}"
+    );
+    assert!(!unit_pendente(&nova, &daemon, &home));
+
+    // Outro caminho que leva ao mesmo arquivo (o opt/ dos caveats do brew) não é pendência.
+    let pelo_cellar = format!("ExecStart={}\n", cellar.join("lukadispatchd").display());
+    assert!(!unit_pendente(&pelo_cellar, &daemon, &home));
+
+    // A do install.sh, com %h, vale quando o daemon é o de ~/.local/bin.
+    let local = home.join(".local/bin/lukadispatchd");
+    std::fs::create_dir_all(local.parent().unwrap()).unwrap();
+    std::fs::write(&local, "").unwrap();
+    let modelo = unit_para(&local, &home);
+    assert!(
+        modelo.contains("ExecStart=%h/.local/bin/lukadispatchd"),
+        "{modelo}"
+    );
+    assert!(!unit_pendente(&modelo, &local, &home));
+}
+
+#[test]
 fn grava_guarda_o_anterior_e_respeita_o_modo() {
     use std::os::unix::fs::PermissionsExt;
 
