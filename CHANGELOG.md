@@ -6,6 +6,8 @@ versão para as notas do GitHub Release, então escreva para quem vai decidir se
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-24
+
 ### Adicionado
 
 - O `lukadispatch setup` oferece instalar a transcrição de voz, com dois motores: o whisper
@@ -16,6 +18,14 @@ versão para as notas do GitHub Release, então escreva para quem vai decidir se
 - A release publica os programas de voz por arquitetura: `lukadispatch-whisper-linux-<arq>`
   (Vulkan e CPU) e `lukadispatch-sherpa-linux-<arq>`.
 - `saida = "json"` no `[transcricao]`, para motor que imprime o texto numa linha JSON.
+- `lukadispatch setup --refazer` pergunta de novo o que já está resolvido, para trocar de bot,
+  de grupo ou de motor de voz.
+
+### Mudado
+
+- Rodar o `lukadispatch setup` de novo só resolve o que está pendente: o que já funciona (bot,
+  grupo, preferências, motor de voz, hooks, serviço) é conferido e aparece como ok, sem
+  pergunta. Sem flag, cada peça fica a que o config já tem, em vez de voltar ao padrão.
 
 ## [0.1.0] - 2026-09-23
 
@@ -59,5 +69,6 @@ Primeira versão pública.
 - Com o `~/.claude/settings.json` ilegível, o `install` gravava por cima só os hooks do
   lukadispatch. Agora ele recusa e não altera nada.
 
-[Unreleased]: https://github.com/LLawli/lukadispatch/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/LLawli/lukadispatch/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/LLawli/lukadispatch/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/LLawli/lukadispatch/releases/tag/v0.1.0
