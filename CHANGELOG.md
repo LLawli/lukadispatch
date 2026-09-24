@@ -6,6 +6,15 @@ versão para as notas do GitHub Release, então escreva para quem vai decidir se
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-24
+
+### Corrigido
+
+- Instalado pelo Homebrew, o serviço parava de subir depois de um `brew upgrade`: a unit do
+  systemd e os hooks guardavam o caminho da pasta da versão (`Cellar/lukadispatch/<versão>`),
+  que o upgrade apaga. Agora eles guardam o caminho estável pelo qual o lukadispatch é chamado.
+  Quem já está nessa situação resolve com `lukadispatch setup`, que refaz a unit e os hooks.
+
 ## [0.2.0] - 2026-09-24
 
 ### Adicionado
@@ -69,6 +78,7 @@ Primeira versão pública.
 - Com o `~/.claude/settings.json` ilegível, o `install` gravava por cima só os hooks do
   lukadispatch. Agora ele recusa e não altera nada.
 
-[Unreleased]: https://github.com/LLawli/lukadispatch/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/LLawli/lukadispatch/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/LLawli/lukadispatch/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/LLawli/lukadispatch/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/LLawli/lukadispatch/releases/tag/v0.1.0
