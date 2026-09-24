@@ -18,6 +18,20 @@ A marca mora no SQLite (`sessions.pedido`), consumida na mesma transação que a
 memória, e trocar o binário do daemon entre a sua mensagem e o fim do turno apagava a marca: a
 resposta inteira, com os arquivos marcados nela, era descartada em silêncio.
 
+Dois casos contam como pedido além da mensagem (24/09/2026, depois de duas respostas sumirem
+numa sessão real):
+
+- **Responder a um card** (pergunta ou permissão, pelo chat ou pela janela do PC) marca o
+  pedido. Quem respondeu está no turno, e a resposta final dele é para essa pessoa. O caso real:
+  o turno foi acordado pelo fim de um CI, a sessão perguntou "faço o deploy?", a resposta veio
+  pelo celular, e o resultado do deploy nunca chegou lá.
+- **Turno aberto por trabalho da própria sessão** (a `task-notification` de um comando em
+  segundo plano ou de um monitor dela) é entregue mesmo sem marca: ele continua o que foi pedido
+  antes. O que abriu o turno se lê no transcript (`transcript::origem_do_turno`). Fica de fora o
+  re-arme do canal, que chega como `Monitor "mensagens do ..." stream ended`: a descrição do
+  monitor do canal é a constante `DESCRICAO_DO_CANAL`, a mesma no prompt que o arma e no
+  classificador. E fica de fora a fala que é só recado de monitor, em qualquer turno.
+
 Duas regras vizinhas, da mesma família:
 
 - **A resposta é a fala que responde, não a última.** O agente costuma entregar o resultado e

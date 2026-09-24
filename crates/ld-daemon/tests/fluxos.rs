@@ -770,6 +770,110 @@ async fn turno_que_ninguem_pediu_nao_vai_para_o_canal() {
     );
 }
 
+fn textos(c: &Cena) -> Vec<String> {
+    c.fe.chamadas()
+        .into_iter()
+        .filter_map(|ch| match ch {
+            Chamada::Texto { texto, .. } => Some(texto),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn responder_um_card_faz_a_resposta_do_turno_ir_para_o_canal() {
+    // O caso real: o turno foi acordado pelo CI que a sessão deixou rodando (sem pedido), ela
+    // perguntou "faço o deploy?", você respondeu no card, e a resposta final sumiu.
+    let c = cena().await;
+    c.app
+        .store
+        .set_permission_mode(SESSAO, "perguntar")
+        .unwrap();
+    let (ask, rx) = c
+        .app
+        .start_permission(SESSAO, "Bash", &serde_json::json!({"command": "deploy"}))
+        .await
+        .unwrap();
+    c.app.hub.answer(&ask, "allow".into());
+    rx.await.unwrap();
+    c.app.cleanup_ask(&ask, Some("✅ Permitido")).await;
+
+    c.app.on_stop(&stop("O deploy não saiu")).await.unwrap();
+    assert!(
+        textos(&c).iter().any(|t| t == "O deploy não saiu"),
+        "{:?}",
+        c.fe.chamadas()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn card_que_expira_sem_resposta_nao_conta_como_pedido() {
+    let c = cena().await;
+    c.app
+        .store
+        .set_permission_mode(SESSAO, "perguntar")
+        .unwrap();
+    let (ask, _rx) = c
+        .app
+        .start_permission(SESSAO, "Bash", &serde_json::json!({"command": "ls"}))
+        .await
+        .unwrap();
+    c.app.cleanup_ask(&ask, None).await;
+    c.app.on_stop(&stop("Monitor rearmado")).await.unwrap();
+    assert!(textos(&c).is_empty(), "{:?}", c.fe.chamadas());
+}
+
+/// Um transcript cujo último turno foi aberto por `gatilho`.
+fn transcript_aberto_por(c: &Cena, gatilho: &str) -> String {
+    let fala = "resposta";
+    let caminho = c.raiz.path().join("turno.jsonl");
+    let linha = |tipo: &str, conteudo: serde_json::Value| {
+        serde_json::json!({"type": tipo, "message": {"role": tipo, "content": conteudo}})
+            .to_string()
+    };
+    let linhas = [
+        linha("user", serde_json::json!(gatilho)),
+        linha(
+            "assistant",
+            serde_json::json!([{"type": "text", "text": fala}]),
+        ),
+    ];
+    std::fs::write(&caminho, linhas.join("\n")).unwrap();
+    caminho.to_string_lossy().into_owned()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn turno_aberto_por_tarefa_de_fundo_da_sessao_vai_para_o_canal() {
+    let c = cena().await;
+    let transcript = transcript_aberto_por(
+        &c,
+        "<task-notification>\n<task-id>b5tudmugw</task-id>\n<status>completed</status>\n<summary>Background command \"Wait for the first MarkChatRead after deploy\" completed (exit code 0)</summary>\n</task-notification>",
+    );
+    let mut r = stop("Pronto: a correção funcionou em produção.");
+    r.transcript_path = Some(transcript);
+    c.app.on_stop(&r).await.unwrap();
+    assert!(
+        textos(&c)
+            .iter()
+            .any(|t| t.starts_with("Pronto: a correção")),
+        "{:?}",
+        c.fe.chamadas()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn turno_aberto_pelo_canal_expirando_continua_fora_do_canal() {
+    let c = cena().await;
+    let transcript = transcript_aberto_por(
+        &c,
+        "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n<summary>Monitor \"mensagens do Telegram\" stream ended</summary>\n</task-notification>",
+    );
+    let mut r = stop("Monitor rearmado");
+    r.transcript_path = Some(transcript);
+    c.app.on_stop(&r).await.unwrap();
+    assert!(textos(&c).is_empty(), "{:?}", c.fe.chamadas());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn foto_recusada_cai_para_documento() {
     let c = cena().await;

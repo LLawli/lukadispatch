@@ -6,6 +6,13 @@ versão para as notas do GitHub Release, então escreva para quem vai decidir se
 
 ## [Unreleased]
 
+### Corrigido
+
+- A resposta de um turno podia sumir do chat. A regra de só mandar o que foi pedido (para o
+  "Monitor rearmado" não virar mensagem) descartava também: a resposta final de um turno em que
+  você tinha respondido a um card de pergunta ou de permissão, e a de um turno acordado pelo fim
+  de um trabalho que a própria sessão deixou rodando (um CI, por exemplo). As duas agora chegam.
+
 ## [0.2.1] - 2026-09-24
 
 ### Corrigido

@@ -994,14 +994,26 @@ impl App {
         if let Some(canal) = canal_da_sessao(&s) {
             self.status.clear(&self.ctx(), &r.session_id, &canal);
             let pedida = self.tinha_pedido(&r.session_id);
+            let origem = r
+                .transcript_path
+                .as_deref()
+                .or(s.transcript_path.as_deref())
+                .and_then(|t| ld_core::transcript::origem_do_turno(std::path::Path::new(t)));
+            // Trabalho que a própria sessão deixou rodando (um CI, um monitor dela) acorda um
+            // turno sem mensagem nova, mas ele continua o que foi pedido: a resposta é de quem
+            // pediu. O que fica de fora é o re-arme do canal e os prompts do daemon.
+            let de_fundo = origem == Some(ld_core::transcript::Origem::TarefaDeFundo);
             let resposta = self.resposta_do_turno(r, &s);
             info!(
                 sessao = %r.session_id,
                 pedida,
+                ?origem,
                 tem_texto = resposta.is_some(),
                 "fim de turno"
             );
-            if pedida && let Some(texto) = resposta {
+            if (pedida || de_fundo)
+                && let Some(texto) = resposta
+            {
                 // Texto e arquivo saem na ordem em que o agente os escreveu. Uma resposta que
                 // explica, mostra o gráfico, explica de novo e mostra o log só funciona nessa
                 // sequência: agrupar os arquivos num bloco separaria cada imagem do parágrafo
@@ -1303,6 +1315,11 @@ impl App {
         };
         match resposta {
             Some(resumo) => {
+                // Quem responde a um card está no turno: a resposta final dele é para essa
+                // pessoa, mesmo num turno que ninguém abriu pelo chat (um que o fim de um CI
+                // acordou, por exemplo). Sem isto, "faço o deploy?" era respondido no celular e
+                // o resultado do deploy nunca chegava lá.
+                self.marca_pedido(&card.session_id);
                 if self.frontend.edita(&card.msg, resumo, &[]).await.is_err() {
                     // Mensagem sumiu (apagada na mão): manda o registro como mensagem nova.
                     let _ = self
