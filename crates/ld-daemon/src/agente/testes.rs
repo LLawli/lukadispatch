@@ -226,6 +226,14 @@ fn sessao_nova_cria_com_o_id_escolhido_e_carrega_os_ganchos() {
         prompt.contains("@arquivo:"),
         "a sessão precisa saber devolver arquivo"
     );
+    // O classificador do fim de turno reconhece o canal expirando por esta descrição.
+    assert!(
+        prompt.contains(&format!(
+            "description: {}Telegram",
+            ld_core::transcript::DESCRICAO_DO_CANAL
+        )),
+        "{prompt}"
+    );
 }
 
 #[test]

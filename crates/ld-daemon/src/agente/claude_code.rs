@@ -145,7 +145,7 @@ Faça agora, nesta ordem, e nada além disso:
 1. Chame ToolSearch com query "select:Monitor" para carregar o schema da ferramenta Monitor.
 2. Chame Monitor com exatamente estes argumentos:
    command: {cli} listen --session {session_id}
-   description: mensagens do {plataforma}
+   description: {descricao}{plataforma}
    timeout_ms: 1800000
 3. Pare. Não escreva relatório, não explore o projeto, não chame mais nenhuma ferramenta. Fique em silêncio até chegar o primeiro evento do monitor.
 
@@ -160,6 +160,7 @@ Como funciona daqui em diante:
 - O monitor expira a cada 30 minutos. Quando isso acontecer, arme-o de novo com a mesma chamada do passo 2, SEM ESCREVER NADA sobre isso: não diga "monitor rearmado", não avise, não comente. O re-arme é encanamento, e qualquer frase sua depois de uma resposta vira a mensagem que chega no celular no lugar da resposta. Se você terminar um turno sem monitor armado, um lembrete vai chegar: cumpra-o na hora, senão a sessão fica surda.
 "#,
         plataforma = chat.plataforma,
+        descricao = ld_core::transcript::DESCRICAO_DO_CANAL,
         onde = chat.onde,
     )
 }
@@ -189,10 +190,11 @@ fn rearm_prompt(cli: &str, session_id: &str, retomada: bool, chat: &DescricaoDoC
 Faça só isto, agora:
 
 1. Chame ToolSearch com query "select:Monitor".
-2. Chame Monitor com command "{cli} listen --session {session_id}", description "mensagens do {plataforma}" e timeout_ms 1800000.
+2. Chame Monitor com command "{cli} listen --session {session_id}", description "{descricao}{plataforma}" e timeout_ms 1800000.
 3. Pare e fique em silêncio até chegar o próximo evento do monitor: nem "pronto", nem "monitor rearmado", nada. Não retome o que estava fazendo por conta própria, não resuma nada e não pergunte se pode continuar: se o seu usuário quiser seguir, ele manda.
 "#,
         plataforma = chat.plataforma,
+        descricao = ld_core::transcript::DESCRICAO_DO_CANAL,
     )
 }
 

@@ -196,6 +196,90 @@ pub fn e_recado_de_monitor(texto: &str) -> bool {
 pub const MARCA_SISTEMA: &str =
     "«lukadispatch: mensagem automática do sistema, não é o usuário falando»";
 
+/// O começo da descrição do `Monitor` que escuta o canal (`mensagens do Telegram`). O prompt que
+/// arma o monitor e o classificador de [`origem_do_turno`] usam esta mesma constante: se o texto
+/// divergisse, o canal expirando passaria por trabalho da sessão, e vice-versa.
+pub const DESCRICAO_DO_CANAL: &str = "mensagens do ";
+
+/// O que abriu o turno que acabou de terminar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origem {
+    /// Uma mensagem que chegou pelo canal (o daemon já marcou o pedido ao entregá-la).
+    MensagemDoCanal,
+    /// O monitor do canal expirou: o turno é o re-arme, e o que ele diz é encanamento.
+    CanalExpirou,
+    /// Trabalho da própria sessão terminou (um comando em segundo plano, um monitor dela): o
+    /// turno continua o que foi pedido antes, e a resposta é para quem pediu.
+    TarefaDeFundo,
+    /// Um prompt do daemon (partida, re-arme depois de troca de modelo).
+    Sistema,
+    /// Outra coisa: texto digitado no terminal, aviso de hook.
+    Outra,
+}
+
+/// Classifica o turno que acabou de terminar pela entrada que o abriu.
+///
+/// O `Stop` do Claude Code não diz o que originou o turno, e é daí que depende se a resposta vai
+/// para o canal: o re-arme do monitor não deve ir, o fim de um CI que a sessão deixou rodando
+/// deve. A entrada que abre o turno é a última fala `user` em texto: resultado de ferramenta é
+/// meio de turno, e o empurrão de "saída vazia" do Claude Code também.
+pub fn origem_do_turno(caminho: &Path) -> Option<Origem> {
+    let conteudo = std::fs::read_to_string(caminho).ok()?;
+    // De trás para frente: a entrada que interessa é a mais recente, e o transcript cresce.
+    let gatilho = conteudo
+        .lines()
+        .rev()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|v| v.get("type").and_then(Value::as_str) == Some("user"))
+        .filter_map(|v| texto_de_entrada(v.get("message")?))
+        .find(|t| !t.starts_with("[Your previous response had no visible output"))?;
+    Some(classifica(&gatilho))
+}
+
+/// O texto de uma entrada do usuário, ou `None` quando ela é resultado de ferramenta.
+fn texto_de_entrada(msg: &Value) -> Option<String> {
+    match msg.get("content")? {
+        Value::String(s) => Some(s.clone()),
+        Value::Array(blocos) => {
+            if blocos
+                .iter()
+                .any(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
+            {
+                return None;
+            }
+            let t: Vec<&str> = blocos
+                .iter()
+                .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|b| b.get("text").and_then(Value::as_str))
+                .collect();
+            (!t.is_empty()).then(|| t.join("\n"))
+        }
+        _ => None,
+    }
+}
+
+fn classifica(texto: &str) -> Origem {
+    let t = texto.trim_start();
+    if t.starts_with(PREFIXO_MARCA) {
+        return Origem::Sistema;
+    }
+    if !t.starts_with("<task-notification>") {
+        return Origem::Outra;
+    }
+    let resumo = t
+        .split("<summary>")
+        .nth(1)
+        .and_then(|r| r.split("</summary>").next())
+        .unwrap_or_default();
+    if resumo.starts_with(&format!("Monitor event: \"{DESCRICAO_DO_CANAL}")) {
+        Origem::MensagemDoCanal
+    } else if resumo.starts_with(&format!("Monitor \"{DESCRICAO_DO_CANAL}")) {
+        Origem::CanalExpirou
+    } else {
+        Origem::TarefaDeFundo
+    }
+}
+
 /// O prefixo basta para reconhecer a marca, mesmo que o resto da frase mude.
 const PREFIXO_MARCA: &str = "«lukadispatch:";
 
@@ -294,6 +378,94 @@ fn primeira_linha(texto: &str, teto: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // As notificações abaixo são cópias literais de um transcript real (24/09/2026).
+    const MSG_DO_CANAL: &str = "<task-notification>\n<task-id>b11znyhr7</task-id>\n<summary>Monitor event: \"mensagens do Telegram\"</summary>\n<event>{\"kind\":\"message\",\"text\":\"Pode começar\",\"from\":\"Luka\",\"at\":1790251993}</event>\nIf this event is something the user would act on now, send a PushNotification. Routine or benign output doesn't need one.\n</task-notification>";
+    const CI_DE_FUNDO: &str = "<task-notification>\n<task-id>bm64xovu8</task-id>\n<tool-use-id>toolu_01EGhFg7i7n5h99xisWnQYfb</tool-use-id>\n<output-file>/tmp/x/tasks/bm64xovu8.output</output-file>\n<status>completed</status>\n<summary>Background command \"Run full CI pipeline in background\" completed (exit code 0)</summary>\n</task-notification>";
+    const MONITOR_DA_SESSAO: &str = "<task-notification>\n<task-id>bq2hp7nlu</task-id>\n<tool-use-id>toolu_01Bj9qg47vjgLLYWLaYbuwMR</tool-use-id>\n<output-file>/tmp/x/tasks/bq2hp7nlu.output</output-file>\n<status>completed</status>\n<summary>Monitor \"aguarda validação da fase 4\" stream ended</summary>\n</task-notification>";
+    const CANAL_EXPIROU: &str = "<task-notification>\n<task-id>b0000000</task-id>\n<tool-use-id>toolu_x</tool-use-id>\n<output-file>/tmp/x/tasks/b0000000.output</output-file>\n<status>completed</status>\n<summary>Monitor \"mensagens do Telegram\" stream ended</summary>\n</task-notification>";
+
+    fn linha_de(tipo: &str, conteudo: serde_json::Value) -> String {
+        serde_json::json!({"type": tipo, "message": {"role": tipo, "content": conteudo}})
+            .to_string()
+    }
+
+    /// Um transcript em que o último turno começa com `gatilho` e tem uma ferramenta no meio.
+    fn turno_aberto_por(gatilho: &str) -> tempfile::NamedTempFile {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let linhas = [
+            linha_de("user", serde_json::json!("pedido antigo")),
+            linha_de(
+                "assistant",
+                serde_json::json!([{"type": "text", "text": "feito"}]),
+            ),
+            linha_de("user", serde_json::json!(gatilho)),
+            linha_de(
+                "assistant",
+                serde_json::json!([{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}]),
+            ),
+            linha_de(
+                "user",
+                serde_json::json!([{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]),
+            ),
+            linha_de(
+                "assistant",
+                serde_json::json!([{"type": "text", "text": "O deploy não saiu"}]),
+            ),
+        ];
+        std::fs::write(f.path(), linhas.join("\n")).unwrap();
+        f
+    }
+
+    #[test]
+    fn o_que_abriu_o_turno_se_le_do_transcript() {
+        for (gatilho, esperado) in [
+            (MSG_DO_CANAL, Origem::MensagemDoCanal),
+            (CI_DE_FUNDO, Origem::TarefaDeFundo),
+            (MONITOR_DA_SESSAO, Origem::TarefaDeFundo),
+            (CANAL_EXPIROU, Origem::CanalExpirou),
+            (
+                &format!("{MARCA_SISTEMA}\nArme o monitor de novo."),
+                Origem::Sistema,
+            ),
+            ("roda os testes", Origem::Outra),
+        ] {
+            let f = turno_aberto_por(gatilho);
+            assert_eq!(origem_do_turno(f.path()), Some(esperado), "{gatilho}");
+        }
+    }
+
+    #[test]
+    fn o_empurrao_de_saida_vazia_nao_abre_turno() {
+        // O Claude Code injeta este texto no meio de um turno que terminou sem fala; ele não é
+        // o que abriu o turno.
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let linhas = [
+            linha_de("user", serde_json::json!(CI_DE_FUNDO)),
+            linha_de(
+                "assistant",
+                serde_json::json!([{"type": "text", "text": ""}]),
+            ),
+            linha_de(
+                "user",
+                serde_json::json!(
+                    "[Your previous response had no visible output. Please continue and produce a user-visible response.]"
+                ),
+            ),
+            linha_de(
+                "assistant",
+                serde_json::json!([{"type": "text", "text": "CI verde"}]),
+            ),
+        ];
+        std::fs::write(f.path(), linhas.join("\n")).unwrap();
+        assert_eq!(origem_do_turno(f.path()), Some(Origem::TarefaDeFundo));
+    }
+
+    #[test]
+    fn o_prompt_do_monitor_usa_a_descricao_que_o_classificador_conhece() {
+        assert!(CANAL_EXPIROU.contains(&format!("Monitor \"{DESCRICAO_DO_CANAL}")));
+        assert!(MSG_DO_CANAL.contains(&format!("Monitor event: \"{DESCRICAO_DO_CANAL}")));
+    }
     use std::io::Write;
 
     fn transcript(dir: &Path, nome: &str, linhas: &[&str]) -> PathBuf {
