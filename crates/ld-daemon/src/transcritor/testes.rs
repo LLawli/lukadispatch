@@ -171,11 +171,32 @@ fn contagem_de_fallback_nao_e_queda_de_backend() {
 }
 
 #[test]
-fn saida_so_aceita_os_dois_modos() {
+fn saida_so_aceita_os_modos_que_existem() {
     assert_eq!(Saida::de("arquivo").unwrap(), Saida::Arquivo);
     assert_eq!(Saida::de("stdout").unwrap(), Saida::Stdout);
+    assert_eq!(Saida::de("json").unwrap(), Saida::Json);
     assert!(Saida::de("Arquivo").is_err());
     assert!(Saida::de("").is_err());
+}
+
+/// A linha que o `sherpa-onnx-offline` 1.13.8 imprime no stdout, copiada de uma execução real e
+/// com as listas de tempo encurtadas.
+const LINHA_DO_SHERPA: &str = r#"{"lang": "", "emotion": "", "event": "", "text": "Bom dia? hoje eu preciso revisar as três mensagens.", "timestamps": [0.00, 0.08], "durations": [], "tokens":[" ", "B"], "ys_log_probs": [-0.038460, -0.004154], "words": []}"#;
+
+#[test]
+fn saida_json_le_o_campo_text_da_linha_do_sherpa() {
+    let stdout = format!("aviso qualquer\n{LINHA_DO_SHERPA}\n");
+    assert_eq!(
+        processo::texto_do_json(&stdout).unwrap(),
+        "Bom dia? hoje eu preciso revisar as três mensagens."
+    );
+}
+
+#[test]
+fn saida_json_sem_campo_text_e_erro_que_mostra_o_que_veio() {
+    let e = processo::texto_do_json("{\"lang\": \"\"}\n").unwrap_err();
+    assert!(format!("{e:#}").contains("text"), "{e:#}");
+    assert!(processo::texto_do_json("nada de json aqui").is_err());
 }
 
 #[test]
@@ -286,6 +307,25 @@ async fn saida_por_stdout_vem_aparada() {
         .await
         .unwrap();
     assert_eq!(t.texto, "oi do stdout");
+}
+
+#[tokio::test]
+async fn saida_json_passa_pelo_motor_inteiro() {
+    let dir = tempfile::tempdir().unwrap();
+    let Some(audio) = audio_curto(dir.path()) else {
+        return;
+    };
+    // Por arquivo: as chaves do JSON no comando seriam lidas como marcadores.
+    let linha = dir.path().join("sherpa.out");
+    std::fs::write(&linha, format!("{LINHA_DO_SHERPA}\n")).unwrap();
+    let t = motor(&cfg_com(&["cat", linha.to_str().unwrap()], "json", 60))
+        .transcreve(&audio)
+        .await
+        .unwrap();
+    assert_eq!(
+        t.texto,
+        "Bom dia? hoje eu preciso revisar as três mensagens."
+    );
 }
 
 #[tokio::test]

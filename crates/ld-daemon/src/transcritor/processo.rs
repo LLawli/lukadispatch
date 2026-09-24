@@ -49,6 +49,8 @@ pub(crate) enum Saida {
     Arquivo,
     /// Imprime o texto na saída padrão (é o caso dos workers de sherpa-onnx e faster-whisper).
     Stdout,
+    /// Imprime uma linha JSON com o texto no campo `text` (é o caso do `sherpa-onnx-offline`).
+    Json,
 }
 
 impl Saida {
@@ -56,8 +58,11 @@ impl Saida {
         match bruto {
             "arquivo" => Ok(Self::Arquivo),
             "stdout" => Ok(Self::Stdout),
+            "json" => Ok(Self::Json),
             outro => {
-                bail!("saida do transcritor deve ser \"arquivo\" ou \"stdout\", veio {outro:?}")
+                bail!(
+                    "saida do transcritor deve ser \"arquivo\", \"stdout\" ou \"json\", veio {outro:?}"
+                )
             }
         }
     }
@@ -149,6 +154,26 @@ async fn converte_para_wav16k(origem: &Path, destino: &Path) -> Result<()> {
     Ok(())
 }
 
+/// O campo `text` da última linha JSON do stdout.
+///
+/// A última, porque é onde o resultado sai; linha de aviso antes dela não é JSON e é pulada.
+pub(crate) fn texto_do_json(stdout: &str) -> Result<String> {
+    let objeto = stdout
+        .lines()
+        .rev()
+        .find_map(|l| serde_json::from_str::<serde_json::Value>(l.trim()).ok())
+        .with_context(|| format!("o transcritor não imprimiu JSON: {:?}", resumo(stdout)))?;
+    objeto
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .with_context(|| format!("o JSON do transcritor não tem o campo text: {objeto}"))
+}
+
+fn resumo(texto: &str) -> String {
+    texto.trim().chars().take(200).collect()
+}
+
 async fn roda(
     argumentos: &[String],
     saida: Saida,
@@ -186,6 +211,7 @@ async fn roda(
 
     match saida {
         Saida::Stdout => Ok(String::from_utf8_lossy(&fim.stdout).into_owned()),
+        Saida::Json => texto_do_json(&String::from_utf8_lossy(&fim.stdout)),
         Saida::Arquivo => {
             let txt = prefixo.with_extension("txt");
             tokio::fs::read_to_string(&txt).await.with_context(|| {
