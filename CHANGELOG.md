@@ -6,6 +6,8 @@ versão para as notas do GitHub Release, então escreva para quem vai decidir se
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-09-24
+
 ### Corrigido
 
 - A resposta de um turno podia sumir do chat. A regra de só mandar o que foi pedido (para o
@@ -85,7 +87,8 @@ Primeira versão pública.
 - Com o `~/.claude/settings.json` ilegível, o `install` gravava por cima só os hooks do
   lukadispatch. Agora ele recusa e não altera nada.
 
-[Unreleased]: https://github.com/LLawli/lukadispatch/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/LLawli/lukadispatch/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/LLawli/lukadispatch/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/LLawli/lukadispatch/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/LLawli/lukadispatch/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/LLawli/lukadispatch/releases/tag/v0.1.0
