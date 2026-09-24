@@ -169,6 +169,16 @@ pub fn strip(settings: &mut Value) {
     }
 }
 
+/// Os nossos hooks já estão no settings exatamente como o `merge_into` os deixaria?
+///
+/// É o que deixa o setup não perguntar de novo o que já está resolvido: caminho do binário
+/// diferente ou hook faltando dão `false`, e a instalação é oferecida.
+pub fn instalados(settings: &Value, nossos: &Value) -> bool {
+    let mut depois = settings.clone();
+    merge_into(&mut depois, nossos);
+    &depois == settings
+}
+
 /// Lê um settings do Claude Code. Ausente é `{}`; presente e ilegível é erro.
 ///
 /// Nunca trate o ilegível como vazio: quem chama grava o resultado de volta, e o arquivo do
@@ -411,6 +421,18 @@ mod tests {
         std::fs::write(&quebrado, "{\"hooks\": {},}").unwrap();
         let e = le_settings(&quebrado).expect_err("json inválido");
         assert!(format!("{e:#}").contains("settings.json"), "{e:#}");
+    }
+
+    #[test]
+    fn instalados_so_quando_nada_mudaria() {
+        let mut s = settings_do_usuario();
+        assert!(!instalados(&s, &telemetry_hooks("/a/lukadispatch")));
+        merge_into(&mut s, &telemetry_hooks("/a/lukadispatch"));
+        assert!(instalados(&s, &telemetry_hooks("/a/lukadispatch")));
+        assert!(
+            !instalados(&s, &telemetry_hooks("/b/lukadispatch")),
+            "binário em outro caminho é instalação pendente"
+        );
     }
 
     #[test]
