@@ -138,15 +138,7 @@ fn abre_janela(pergunta: Ask, pid: Arc<Mutex<Option<u32>>>) -> Option<Answer> {
 
 /// A janela fica ao lado deste binário; só depois disso vale tentar o PATH.
 fn caminho_da_janela() -> Option<PathBuf> {
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        let vizinho = dir.join("lukadispatch-ask");
-        if vizinho.is_file() {
-            return Some(vizinho);
-        }
-    }
-    Some(PathBuf::from("lukadispatch-ask"))
+    Some(PathBuf::from(crate::paths::janela()))
 }
 
 /// Mata o processo da janela.
