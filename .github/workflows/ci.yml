@@ -61,4 +61,4 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - run: shellcheck install.sh ci.sh bin/deploy dist/empacota
+      - run: shellcheck install.sh ci.sh bin/deploy dist/empacota dist/asr/whisper dist/asr/sherpa

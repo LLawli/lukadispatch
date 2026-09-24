@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Compila o whisper-cli para o pacote de transcrição da release.
+#
+#   dist/asr/whisper <tag-do-whisper.cpp> <destino>
+#
+# Duas variantes do mesmo código: `whisper-cli`, com Vulkan (usa a GPU quando há uma, e cai para
+# a CPU sozinho quando não há), e `whisper-cli-cpu`, para a máquina que nem tem a libvulkan, onde
+# a variante Vulkan não chega a abrir. O setup escolhe testando se a Vulkan abre.
+#
+# Portável de propósito: sem GGML_NATIVE (que afinaria para o processador do runner) e sem
+# OpenMP (que puxaria a libgomp, ausente em várias distros).
+set -euo pipefail
+
+[[ $# -eq 2 ]] || { echo "uso: $0 <tag> <destino>" >&2; exit 2; }
+tag="$1"
+destino="$(mkdir -p "$2" && cd "$2" && pwd)"
+trabalho="$(mktemp -d "${TMPDIR:-/tmp}/whisper.XXXXXX")"
+trap 'rm -rf "$trabalho"' EXIT
+
+git -c advice.detachedHead=false clone -q --depth 1 --branch "$tag" https://github.com/ggml-org/whisper.cpp "$trabalho/src"
+
+comum=(-DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF
+       -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_SERVER=OFF)
+
+compila() {
+  local nome="$1"; shift
+  cmake -S "$trabalho/src" -B "$trabalho/build-$nome" "${comum[@]}" "$@" >/dev/null
+  cmake --build "$trabalho/build-$nome" -j"$(nproc)" --target whisper-cli >/dev/null
+}
+
+compila vulkan -DGGML_VULKAN=ON
+compila cpu -DGGML_VULKAN=OFF
+
+install -m755 "$trabalho/build-vulkan/bin/whisper-cli" "$destino/whisper-cli"
+install -m755 "$trabalho/build-cpu/bin/whisper-cli" "$destino/whisper-cli-cpu"
+# Um áudio curto e conhecido, para o setup provar que binário e modelo transcrevem de verdade.
+install -m644 "$trabalho/src/samples/jfk.wav" "$destino/teste.wav"
+install -m644 "$trabalho/src/LICENSE" "$destino/LICENSE-whisper.cpp"
+
+# O artefato, e não o código de saída do cmake: binário vazio aqui seria um pacote que instala
+# e não transcreve.
+for f in whisper-cli whisper-cli-cpu teste.wav LICENSE-whisper.cpp; do
+  [[ -s "$destino/$f" ]] || { echo "whisper: falta $f" >&2; exit 1; }
+done
+"$destino/whisper-cli-cpu" --help >/dev/null 2>&1 || { echo "whisper: a variante CPU não abre" >&2; exit 1; }
+ls -la "$destino"

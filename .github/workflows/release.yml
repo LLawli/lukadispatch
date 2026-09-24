@@ -16,6 +16,8 @@ permissions:
 
 env:
   TAG: ${{ inputs.tag || github.ref_name }}
+  # A versão do whisper.cpp dos pacotes de transcrição. Trocar é medir de novo (decisão 0007).
+  WHISPER_CPP: v1.9.4
 
 jobs:
   confere:
@@ -63,7 +65,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libgtk-4-dev libadwaita-1-dev ffmpeg p7zip-full
+            libgtk-4-dev libadwaita-1-dev ffmpeg p7zip-full \
+            cmake libvulkan-dev glslc spirv-headers bzip2
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -78,10 +81,23 @@ jobs:
           sha256sum "$nome" > "$nome.sha256"
           # Tarball de poucos bytes é empacotamento quebrado, mesmo com tudo verde acima.
           test "$(stat -c %s "$nome")" -gt 1000000
+      # Os programas de voz que o `lukadispatch setup` oferece instalar: compilados (whisper) ou
+      # extraídos do tarball oficial (sherpa) uma vez aqui, e baixados prontos pelo setup.
+      - name: pacotes de transcrição
+        run: |
+          arq="${{ matrix.arq }}"
+          dist/asr/whisper "$WHISPER_CPP" asr-whisper
+          dist/asr/sherpa "$arq" asr-sherpa
+          for p in whisper sherpa; do
+            nome="lukadispatch-$p-linux-$arq.tar.gz"
+            tar -czf "$nome" -C "asr-$p" .
+            sha256sum "$nome" > "$nome.sha256"
+            test "$(stat -c %s "$nome")" -gt 1000000
+          done
       - uses: actions/upload-artifact@v7
         with:
           name: lukadispatch-linux-${{ matrix.arq }}
-          path: lukadispatch-linux-${{ matrix.arq }}.tar.gz*
+          path: lukadispatch-*linux-${{ matrix.arq }}.tar.gz*
           if-no-files-found: error
 
   publica:
@@ -132,7 +148,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          ls artefatos/lukadispatch-linux-x86_64.tar.gz artefatos/lukadispatch-linux-aarch64.tar.gz
+          for arq in x86_64 aarch64; do
+            for p in "" whisper- sherpa-; do
+              ls "artefatos/lukadispatch-${p}linux-$arq.tar.gz" "artefatos/lukadispatch-${p}linux-$arq.tar.gz.sha256"
+            done
+          done
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" artefatos/* --clobber
             gh release edit "$TAG" --notes-file notas.md

@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Tira o sherpa-onnx-offline do tarball estático oficial, para o pacote de transcrição.
+#
+#   dist/asr/sherpa <x86_64|aarch64> <destino>
+#
+# O tarball oficial traz todos os programas do sherpa-onnx (~370 MB); o lukadispatch usa um. Os
+# sha256 são os que o GitHub publica para cada asset da release do sherpa-onnx.
+set -euo pipefail
+
+VERSAO=v1.13.8
+[[ $# -eq 2 ]] || { echo "uso: $0 <x86_64|aarch64> <destino>" >&2; exit 2; }
+case "$1" in
+  x86_64)
+    nome="sherpa-onnx-$VERSAO-linux-x64-static-no-tts"
+    sha=cb9efc3014d66b4c68f602db2447ac0fc847d6b6e9152216e12ccb6b6e4c4d10 ;;
+  aarch64)
+    nome="sherpa-onnx-$VERSAO-linux-aarch64-static"
+    sha=d1c621ed68f2ff77738505ba0137b947141c27e431c12f266a6b4ba218e78a4e ;;
+  *) echo "arquitetura sem sherpa: $1" >&2; exit 2 ;;
+esac
+destino="$(mkdir -p "$2" && cd "$2" && pwd)"
+trabalho="$(mktemp -d "${TMPDIR:-/tmp}/sherpa.XXXXXX")"
+trap 'rm -rf "$trabalho"' EXIT
+
+curl -fsSL --retry 3 -o "$trabalho/s.tar.bz2" \
+  "https://github.com/k2-fsa/sherpa-onnx/releases/download/$VERSAO/$nome.tar.bz2"
+echo "$sha  $trabalho/s.tar.bz2" | sha256sum -c --quiet
+tar -xjf "$trabalho/s.tar.bz2" -C "$trabalho" "$nome/bin/sherpa-onnx-offline"
+install -m755 "$trabalho/$nome/bin/sherpa-onnx-offline" "$destino/sherpa-onnx-offline"
+curl -fsSL --retry 3 -o "$destino/LICENSE-sherpa-onnx" \
+  "https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/$VERSAO/LICENSE"
+
+for f in sherpa-onnx-offline LICENSE-sherpa-onnx; do
+  [[ -s "$destino/$f" ]] || { echo "sherpa: falta $f" >&2; exit 1; }
+done
+"$destino/sherpa-onnx-offline" --help >/dev/null 2>&1 || { echo "sherpa: o binário não abre" >&2; exit 1; }
+ls -la "$destino"
