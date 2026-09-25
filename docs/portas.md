@@ -151,9 +151,22 @@ num tmux ld-<projeto>-<id>, ou aba do herdr            ← Hospedeiro (Tmux, Her
 ```
 
 **Trocar só a memória** é config: `[agente] memoria = "nenhuma"` roda o agente sem o
-`ai-memory`. Outra memória de longo prazo é uma implementação de `Memoria`, que recebe a linha
-de comando do agente e devolve a final. Ela é opcional: nada fora da implementação pode depender
-de haver uma. (A chave e a trait se chamavam `envelope`; o config antigo ainda carrega.)
+`ai-memory`. Ela é opcional: nada fora da implementação pode depender de haver uma. (A chave e a
+trait se chamavam `envelope`; o config antigo ainda carrega.)
+
+Outra memória de longo prazo é uma implementação de `Memoria`. Só `embrulha` é obrigatório (a
+linha de comando final, a partir da do agente); o resto tem padrão que não faz nada, e existe
+para a sessão numa worktree ([decisoes/0018](decisoes/0018-memoria-do-projeto-na-worktree.md)):
+
+- `instrucoes`: o que vai no fim do prompt de partida (o `AiMemory` manda a sessão guardar o
+  estado da branch numa página, e não em handoff);
+- `antes_da_partida` e `devolve`: preparar o disco e tirar do caminho o que a sessão não deve
+  receber, e devolver depois que ela passou pelo início;
+- `ocupada`: reconhecer, pelo que o painel mostrou, a partida que morreu porque a memória ainda
+  estava presa a uma anterior (o domínio espera e tenta de novo);
+- `a_parar`: que processo sinalizar para a sessão parar com calma (o agente, e não quem o
+  embrulha);
+- `worktree_apagada`: esquecer o que era só daquela worktree.
 
 **Trocar o agente** é implementar `Agente`:
 

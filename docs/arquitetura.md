@@ -92,7 +92,9 @@ primeiro: o árbitro é o próprio hook, que roda dentro do tmux com o ambiente 
 
 | Estado | Onde | Por quê |
 |---|---|---|
-| sessões, vínculo sessão e canal, fila de mensagens, marca de pedido, id do painel | SQLite em `~/.local/state/lukadispatch/state.db` | precisa sobreviver a restart do daemon |
+| sessões, vínculo sessão e canal, fila de mensagens, marca de pedido, id do painel, as worktrees que o bot abriu | SQLite em `~/.local/state/lukadispatch/state.db` | precisa sobreviver a restart do daemon |
 | quem está ouvindo, perguntas abertas | `Hub`, em memória | uma conexão `listen` e um hook bloqueado morrem junto com o daemon; persistir seria mentir |
 | cards de pergunta, fila de transcrições | `Cards` e `Confirmacoes`, em memória | valem por um instante e só fazem sentido com o card à vista |
 | anexos recebidos | `~/.local/share/lukadispatch/arquivos/<sessao>/` | fora do projeto (senão `git add -A` leva) e fora do `/tmp` (tmpfs, vira RAM presa) |
+| as worktrees das sessões | `~/.local/share/lukadispatch/worktrees/<projeto a partir do $HOME>/<branch>` | fora do repositório e das raízes do scan, e sempre na mesma pasta por branch, porque o agente acha a conversa pelo cwd ([decisoes/0017](decisoes/0017-worktree-por-sessao.md)) |
+| as escolhas dos teclados do `/new` e do `/kill` | `novo::Estado`, em memória | o dado de um botão não cabe caminho nem branch; um restart invalida os teclados abertos |

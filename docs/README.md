@@ -28,9 +28,13 @@ uma peça sem reescrever o resto.
 | [0009](decisoes/0009-marca-de-pedido.md) | Só vai para o canal a resposta de um turno que alguém pediu, e a marca mora no banco |
 | [0010](decisoes/0010-painel-e-status.md) | O canal principal é um painel editado, e o status de cada sessão é uma mensagem só |
 | [0011](decisoes/0011-armazenamento-nao-e-porta.md) | O SQLite não é uma porta, e o que faria isso mudar |
-| [0012](decisoes/0012-agente-e-envelope.md) | O agente de código é uma porta, e o `ai-memory run` é um envelope separado dele |
+| [0012](decisoes/0012-agente-e-envelope.md) | O agente de código é uma porta, e o `ai-memory run` é um envelope separado dele (a porta virou `Memoria` na 0018) |
 | [0013](decisoes/0013-preview-em-texto.md) | O preview de uma pergunta vai como texto, não como imagem |
 | [0014](decisoes/0014-hospedagem-neutra.md) | O id da sessão no hospedeiro se chama `hospedagem`, no Rust e no banco |
+| [0015](decisoes/0015-vida-pelo-processo.md) | A sessão herdr vive enquanto o processo dela vive, e a hospedagem começa pelo rótulo |
+| [0016](decisoes/0016-readocao-depois-do-restart.md) | O daemon relança no mesmo tópico a sessão que caiu com o servidor do herdr |
+| [0017](decisoes/0017-worktree-por-sessao.md) | Cada sessão do bot roda na git worktree da branch dela, fora do repositório |
+| [0018](decisoes/0018-memoria-do-projeto-na-worktree.md) | A sessão numa worktree grava na memória do projeto, e o registro dela é da worktree |
 
 ## Como escrever uma decisão nova
 

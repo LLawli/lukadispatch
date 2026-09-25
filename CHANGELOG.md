@@ -6,8 +6,33 @@ versão para as notas do GitHub Release, então escreva para quem vai decidir se
 
 ## [Unreleased]
 
+### Adicionado
+
+- Cada sessão aberta pelo bot roda numa git worktree da branch dela, em
+  `~/.local/share/lukadispatch/worktrees`, fora do repositório. Duas sessões no mesmo projeto não
+  pisam mais uma na outra, nem no checkout que você usa no terminal. Vale para tmux e herdr.
+- O `/new` pergunta a pasta, o projeto e a branch, e se continua a conversa anterior daquela
+  branch. A branch principal nunca abre direto: escolhê-la pede o nome de uma branch nova, digitado
+  ou gerado. Branch que já tem sessão aberta aponta o canal dela.
+- `/new <projeto> <branch>` abre direto na branch, criando-a se não existir.
+- `/new new-project` cria um projeto numa das suas pastas (com `git init` e um commit vazio, sem
+  assinatura) e abre a sessão nele.
+- `/kill` numa sessão de worktree pergunta se mantém a worktree para continuar depois ou apaga
+  worktree e branch, e avisa antes de apagar arquivo sem commit ou commit sem push.
+- Com o ai-memory, a sessão numa worktree grava na memória do projeto (e não num projeto com o nome
+  da branch), cada worktree tem o próprio registro de workstream, e o estado da branch fica numa
+  página `worktrees/<branch>` em vez de handoff. O handoff manual que você deixou no terminal não
+  é mais consumido por uma sessão do bot.
+
 ### Mudado
 
+- Com o herdr, as sessões do bot sobem numa sessão própria, `lukadispatch`, e não mais na padrão,
+  ao lado das suas. `[herdr] sessao = "default"` volta ao jeito antigo. Sessão aberta antes da
+  atualização continua na padrão até ser fechada.
+- Relançar ou fechar uma sessão pede primeiro ao agente que saia, e só depois derruba o terminal:
+  com o ai-memory, o fim da conversa entra no registro, e uma troca de modelo não esbarra mais no
+  workstream preso.
+- O canal, o painel e o `/ls` mostram a sessão como `projeto · branch`.
 - A escolha do ai-memory no config passa a se chamar `[agente] memoria` (`"ai-memory"` ou
   `"nenhuma"`), e no setup `--memoria`. O config com `envelope = "nenhum"` e a flag `--envelope`
   continuam valendo; o setup, ao gravar, troca a chave velha pela nova.

@@ -26,6 +26,8 @@ lugar errado.
 | `confirmacao` | a fila de transcrições esperando aval: um card por vez por canal, casamento da correção pelo id do card respondido | transcrever; desenhar o card |
 | `hub` | o estado vivo: quem está ouvindo (`listen`), perguntas abertas e seus `oneshot`, a contagem de re-arme. Não sobrevive a restart, de propósito | persistir nada |
 | `status` | a mensagem de status de cada sessão, uma tarefa por sessão com debounce, adotando a mensagem do banco depois de um restart | decidir o texto do status (recebe pronto) |
+| `novo` | o `/new` em etapas (pasta, projeto, branch, continuar ou do zero), o `/new <projeto> <branch>`, o `/new new-project` e a pergunta do `/kill` numa worktree, com as escolhas dos botões guardadas em memória | abrir sessão (chama o `app`); falar com o git (é o `worktree`) |
+| `worktree` | o git das worktrees: onde cada uma mora, as branches e onde estão em checkout, criar, contar o que se perderia e apagar; criar projeto com commit vazio | decidir quando (quem decide é o `novo`); saber de chat ou de memória |
 | `panel` | o painel do canal principal: uma mensagem, fixada, redesenhada com debounce a partir do banco e do uso da conta | responder comando |
 | `arquivos` | o lado do domínio dos arquivos: o marcador `@arquivo:` na resposta, a validação do que o agente pediu para mandar, a raiz de anexos por sessão, a limpeza de anexo de sessão morta e de áudio vencido | baixar da plataforma (é `Frontend::baixa`); partir arquivo (é `Divisor`) |
 | `socket` | servir o protocolo NDJSON do `ld-core::proto` aos hooks e ao `listen` | lógica de negócio (repassa para o `app`) |

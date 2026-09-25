@@ -20,7 +20,7 @@
 //!   a guardar o "onde parei" numa página da branch, e antes de ela subir o daemon tira da fila os
 //!   handoffs manuais abertos e os devolve depois que ela já passou pelo início.
 //!
-//! O que foi medido para chegar aqui está na decisão 0017.
+//! O que foi medido para chegar aqui está na decisão 0018.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

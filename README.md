@@ -13,8 +13,10 @@ projetos, as suas ferramentas e a sua conta.
 
 ## O que dá para fazer
 
-- **Abrir uma sessão nova** em qualquer projeto seu com `/new`, pelo celular, e continuar a
-  conversa anterior daquele projeto se quiser.
+- **Abrir uma sessão nova** em qualquer projeto seu com `/new`, pelo celular: pasta, projeto e
+  branch. Cada branch roda numa git worktree própria, fora do repositório, então duas sessões no
+  mesmo projeto não pisam uma na outra nem no checkout do seu terminal. Dá para continuar a
+  conversa anterior daquela branch, ou criar um projeto novo (`/new new-project`).
 - **Conversar com a sessão** pelo tópico dela, por texto ou por **mensagem de voz** (transcrita
   na sua máquina, e só enviada depois do seu aval).
 - **Responder perguntas e permissões** num card com botões. A mesma pergunta aparece numa janela
@@ -113,10 +115,11 @@ No tópico **General**, onde fica o painel:
 
 | Comando | Faz |
 |---|---|
-| `/new` | mostra os projetos em botões; se o projeto já tem conversa, pergunta se continua ou começa do zero |
-| `/new <projeto> [modelo] [esforço]` | abre direto, por exemplo `/new api opus high` |
+| `/new` | pergunta a pasta, o projeto e a branch, e se continua a conversa anterior da branch ou começa do zero. A branch principal nunca abre direto: escolhê-la pede o nome de uma branch nova a partir dela |
+| `/new <projeto> [branch] [modelo] [esforço]` | abre direto, por exemplo `/new api feat/login opus high`; branch que não existe é criada |
+| `/new new-project` | cria um projeto (pasta, `git init` e um commit vazio) e abre a sessão nele |
 | `/ls` | redesenha o painel |
-| `/kill <id>` | fecha uma sessão |
+| `/kill <id>` | fecha uma sessão; numa worktree, pergunta se a mantém ou apaga junto com a branch |
 
 No **tópico de uma sessão**, qualquer mensagem vai para o Claude. Além disso:
 

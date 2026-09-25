@@ -37,6 +37,17 @@ Quando um comportamento parecer estranho, procure aqui antes de "consertar".
   tempo no nome.
 - **`--fresh` não combina com `--session-id`.** O ai-memory recusa com "cannot be combined with a
   native session".
+- **Numa worktree, sem marcador, a memória vai para um projeto com o nome da branch.** Os hooks
+  mandam só o cwd, e o servidor usa o nome da pasta; o CLI, na mesma pasta, resolve o projeto
+  certo, então a sessão fica partida em dois sem dar erro. O daemon grava o `.ai-memory.toml`
+  acima das worktrees ([0018](decisoes/0018-memoria-do-projeto-na-worktree.md)).
+- **O handoff manual vale para o projeto inteiro**, e o `cwd` que o `memory_handoff_begin` recebe
+  é só registro: a próxima sessão de qualquer pasta do projeto o consome. Só o automático (do
+  `SessionEnd`) é entregue por pasta.
+- **Derrubar o `ai-memory run` deixa o workstream preso por até 90 s** e perde o fim da conversa
+  no registro. `SIGTERM` no agente (o filho dele) faz ele terminar direito; `SIGTERM` nele mesmo,
+  não, porque ele só trata `SIGINT`.
+- **Nome de workstream não aceita `/`.** O de uma worktree é a branch com `/` trocada por `-`.
 
 ## Telegram
 
