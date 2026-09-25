@@ -1,7 +1,7 @@
 //! Onde as sessões rodam: o hospedeiro, que sobe o script de partida que o agente montou e mata
 //! quando pedido.
 //!
-//! O que compõe a partida (linha de comando, prompt, envelope) não é deste módulo: mora em
+//! O que compõe a partida (linha de comando, prompt, memória) não é deste módulo: mora em
 //! [`crate::agente`], que devolve uma [`crate::agente::Partida`] já pronta para rodar. Aqui fica
 //! só o mecanismo que a mantém de pé: o tmux ([`Tmux`], o padrão) ou o herdr ([`Herdr`]). Os
 //! dois deixam a sessão anexável no PC e sobrevivem a restart do daemon.

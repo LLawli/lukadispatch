@@ -75,7 +75,7 @@ async fn main() -> Result<()> {
 
     info!(
         agente = pecas.agente.nome(),
-        envelope = pecas.envelope.nome(),
+        memoria = pecas.memoria.nome(),
         hospedeiro = %cfg.hospedeiro,
         "agente configurado"
     );
@@ -86,7 +86,7 @@ async fn main() -> Result<()> {
         Portas {
             frontend,
             agente: pecas.agente,
-            envelope: pecas.envelope,
+            memoria: pecas.memoria,
             transcritor,
             divisores,
             hospedeiro,

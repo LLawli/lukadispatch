@@ -99,13 +99,24 @@ async fn passo_do_herdr_grava_o_hospedeiro_e_avisa_o_que_falta() {
 
 #[test]
 fn seletores_aceitam_espaco_igual_e_apelido() {
-    let sel = selecao("--agent claude --envelope=nenhum --session tmux --frontend telegram");
+    let sel = selecao("--agent claude --memoria=nenhuma --session tmux --frontend telegram");
     let nomes: Vec<&str> = pecas(&sel, None, &so_tmux)
         .unwrap()
         .iter()
         .map(|p| p.nome())
         .collect();
-    assert_eq!(nomes, ["tmux", "claude-code", "nenhum", "telegram"]);
+    assert_eq!(nomes, ["tmux", "claude-code", "nenhuma", "telegram"]);
+}
+
+#[test]
+fn o_nome_antigo_da_flag_da_memoria_ainda_vale() {
+    // `--envelope nenhum` é como a memória se escolhia antes da troca de nome.
+    let nomes: Vec<&str> = pecas(&selecao("--envelope nenhum"), None, &so_tmux)
+        .unwrap()
+        .iter()
+        .map(|p| p.nome())
+        .collect();
+    assert_eq!(nomes[2], "nenhuma");
 }
 
 #[test]
@@ -114,7 +125,7 @@ fn implementacao_que_nao_existe_falha_dizendo_as_que_existem() {
         ("--frontend whatsapp", "telegram"),
         ("--agent codex", "claude-code"),
         ("--session zellij", "tmux, herdr"),
-        ("--envelope ai-jail", "ai-memory, nenhum"),
+        ("--memoria ai-jail", "ai-memory, nenhuma"),
     ] {
         let e = pecas(&selecao(arg), None, &so_tmux).err().expect(arg);
         let msg = format!("{e:#}");
@@ -128,7 +139,7 @@ fn implementacao_que_nao_existe_falha_dizendo_as_que_existem() {
 fn sem_flag_vale_o_que_esta_no_config() {
     // Rodar o setup de novo sem flag não pode desfazer uma escolha: o padrão só vale para
     // config novo.
-    let cfg: Config = toml::from_str("[agente]\nenvelope = \"nenhum\"\n").unwrap();
+    let cfg: Config = toml::from_str("[agente]\nmemoria = \"nenhuma\"\n").unwrap();
     let nomes = |sel: &Selecao| -> Vec<&'static str> {
         // Com config, a máquina não decide: só herdr instalado e o config segue no tmux.
         pecas(sel, Some(&cfg), &|p| p == "herdr")
@@ -139,10 +150,10 @@ fn sem_flag_vale_o_que_esta_no_config() {
     };
     assert_eq!(
         nomes(&selecao("")),
-        ["tmux", "claude-code", "nenhum", "telegram"]
+        ["tmux", "claude-code", "nenhuma", "telegram"]
     );
     assert_eq!(
-        nomes(&selecao("--envelope ai-memory")),
+        nomes(&selecao("--memoria ai-memory")),
         ["tmux", "claude-code", "ai-memory", "telegram"],
         "a flag manda"
     );
@@ -163,7 +174,7 @@ fn config_novo_sai_do_exemplo_e_carrega() {
     r.poe(None, "usuario", "Maria");
     r.poe(Some("telegram"), "chat_id", GRUPO_NOVO);
     r.inclui_id("telegram", "allowed_user_ids", EU as i64);
-    r.poe(Some("agente"), "envelope", "nenhum");
+    r.poe(Some("agente"), "memoria", "nenhuma");
     let texto = r.config_texto();
     assert!(
         texto.contains("# Modo de permissão"),
@@ -174,7 +185,7 @@ fn config_novo_sai_do_exemplo_e_carrega() {
     assert_eq!(cfg.telegram.chat_id, GRUPO_NOVO);
     // O exemplo traz 123456789 de enfeite; o setup não pode deixar um estranho na allowlist.
     assert_eq!(cfg.telegram.allowed_user_ids, vec![EU as i64]);
-    assert_eq!(cfg.agente.envelope, "nenhum");
+    assert_eq!(cfg.agente.memoria, "nenhuma");
 }
 
 #[test]
@@ -206,14 +217,14 @@ fn tabela_nova_vira_secao_e_valor_trocado_guarda_o_comentario() {
     let mut r = Rascunho::de(Some(antes), None).unwrap();
     r.poe(None, "usuario", "Maria");
     r.poe(Some("telegram"), "chat_id", GRUPO_NOVO);
-    r.poe(Some("agente"), "envelope", "nenhum");
+    r.poe(Some("agente"), "memoria", "nenhuma");
     let texto = r.config_texto();
     assert!(
         texto.contains(&format!("chat_id = {GRUPO_NOVO}          # grupo \"Casa\"")),
         "{texto}"
     );
     assert!(
-        texto.contains("\n[agente]\nenvelope = \"nenhum\""),
+        texto.contains("\n[agente]\nmemoria = \"nenhuma\""),
         "{texto}"
     );
     assert!(
@@ -223,10 +234,28 @@ fn tabela_nova_vira_secao_e_valor_trocado_guarda_o_comentario() {
 
     // Tabela inline que já existe continua inline, com as chaves que tinha.
     let mut r = Rascunho::de(Some("agente = { tipo = \"claude-code\" }\n"), None).unwrap();
-    r.poe(Some("agente"), "envelope", "nenhum");
+    r.poe(Some("agente"), "memoria", "nenhuma");
     let cfg: Config = toml::from_str(&r.config_texto()).unwrap();
     assert_eq!(cfg.agente.tipo, "claude-code");
-    assert_eq!(cfg.agente.envelope, "nenhum");
+    assert_eq!(cfg.agente.memoria, "nenhuma");
+}
+
+#[tokio::test]
+async fn gravar_a_memoria_tira_a_chave_com_o_nome_antigo() {
+    // As duas chaves juntas não carregam: `envelope` é apelido de `memoria`.
+    let mut r = Rascunho::de(Some("[agente]\nenvelope = \"ai-memory\"\n"), None).unwrap();
+    let (res, _) = com_tela("", async |t| {
+        pecas::memoria("nenhuma")
+            .unwrap()
+            .configura(t, &mut r)
+            .await
+    })
+    .await;
+    res.unwrap();
+    let texto = r.config_texto();
+    assert!(!texto.contains("envelope"), "{texto}");
+    let cfg: Config = toml::from_str(&texto).unwrap();
+    assert_eq!(cfg.agente.memoria, "nenhuma");
 }
 
 #[test]
@@ -524,7 +553,7 @@ async fn a_conversa_inteira_termina_num_config_que_o_daemon_aceita() {
     let pecas: Vec<Box<dyn Peca>> = vec![
         pecas::hospedeiro("tmux").unwrap(),
         pecas::agente("claude").unwrap(),
-        pecas::envelope("ai-memory").unwrap(),
+        pecas::memoria("ai-memory").unwrap(),
         Box::new(TelegramFalso(roteiro.clone())),
     ];
     let mut r = Rascunho::de(None, None).unwrap();
@@ -555,7 +584,7 @@ async fn a_conversa_inteira_termina_num_config_que_o_daemon_aceita() {
     assert_eq!(cfg.frontend, "telegram");
     assert_eq!(cfg.hospedeiro, "tmux");
     assert_eq!(cfg.agente.tipo, "claude-code");
-    assert_eq!(cfg.agente.envelope, "nenhum");
+    assert_eq!(cfg.agente.memoria, "nenhuma");
     assert_eq!(cfg.usuario.as_deref(), Some("Maria"));
     assert_eq!(cfg.scan.roots, vec!["~/code".to_string()]);
     assert_eq!(cfg.default_permission_mode, "perguntar");

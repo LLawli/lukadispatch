@@ -30,7 +30,7 @@ lukadispatch
                             não precisa do --session: ela já tem LD_SESSION no ambiente)
   model <id> <modelo>       troca o modelo reiniciando com o contexto inteiro
   effort <id> <nível>       idem para o esforço (low, medium, high, xhigh, max)
-  setup [--frontend telegram] [--agent claude-code] [--session tmux|herdr] [--envelope ai-memory]
+  setup [--frontend telegram] [--agent claude-code] [--session tmux|herdr] [--memoria ai-memory]
                             configura tudo conversando: o bot, o grupo, o config, os hooks e o
                             serviço (os padrões são os que existem hoje; --help lista)
   install [--global]        escreve os hooks; --global acrescenta a telemetria ao settings do

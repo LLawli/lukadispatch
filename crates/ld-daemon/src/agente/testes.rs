@@ -1,4 +1,4 @@
-//! Testes da porta do agente, do envelope e do Claude Code: o script de partida, o embrulho do
+//! Testes da porta do agente, da memória e do Claude Code: o script de partida, o embrulho do
 //! `ai-memory`, e as escolhas (modo, modelo, esforço) e leituras (histórico, contexto, uso) que
 //! o Claude Code faz por baixo da trait.
 //!
@@ -70,7 +70,7 @@ fn depois_de<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
         .map(String::as_str)
 }
 
-// ------------------------------------------------------------------ envelope
+// ------------------------------------------------------------------ memória
 
 #[test]
 fn ai_memory_embrulha_com_workstream_proprio_da_sessao() {
@@ -96,9 +96,9 @@ fn workstream_e_unico_por_partida() {
 }
 
 #[test]
-fn direto_nao_mexe_em_nada() {
+fn sem_memoria_nao_mexe_em_nada() {
     let argv = vec!["claude".to_string(), "--x".into()];
-    assert_eq!(Direto.embrulha(ID, argv.clone()), argv);
+    assert_eq!(SemMemoria.embrulha(ID, argv.clone()), argv);
 }
 
 fn config_com(agente: CfgAgente) -> Config {
@@ -109,24 +109,32 @@ fn config_com(agente: CfgAgente) -> Config {
 }
 
 #[test]
-fn config_escolhe_agente_e_envelope() {
+fn config_escolhe_agente_e_memoria() {
     let p = da_config(&Config::default()).unwrap();
     assert_eq!(p.agente.nome(), "claude-code");
-    assert_eq!(p.envelope.nome(), "ai-memory");
+    assert_eq!(p.memoria.nome(), "ai-memory");
 
     let p = da_config(&config_com(CfgAgente {
         tipo: "claude-code".into(),
-        envelope: "nenhum".into(),
+        memoria: "nenhuma".into(),
     }))
     .unwrap();
-    assert_eq!(p.envelope.nome(), "nenhum");
+    assert_eq!(p.memoria.nome(), "nenhuma");
+
+    // O valor de antes da troca de nome, que está nos configs instalados.
+    let p = da_config(&config_com(CfgAgente {
+        tipo: "claude-code".into(),
+        memoria: "nenhum".into(),
+    }))
+    .unwrap();
+    assert_eq!(p.memoria.nome(), "nenhuma");
 }
 
 #[test]
 fn nome_desconhecido_falha_na_partida_dizendo_qual() {
     let e = da_config(&config_com(CfgAgente {
         tipo: "codex".into(),
-        envelope: "ai-memory".into(),
+        memoria: "ai-memory".into(),
     }))
     .err()
     .expect("agente desconhecido");
@@ -134,10 +142,10 @@ fn nome_desconhecido_falha_na_partida_dizendo_qual() {
 
     let e = da_config(&config_com(CfgAgente {
         tipo: "claude-code".into(),
-        envelope: "docker".into(),
+        memoria: "docker".into(),
     }))
     .err()
-    .expect("envelope desconhecido");
+    .expect("memória desconhecida");
     assert!(format!("{e:#}").contains("docker"), "{e:#}");
 }
 
@@ -158,7 +166,7 @@ fn o_script_roda_cada_argumento_exatamente_como_veio() {
         ],
         prompt: Some("linha 1\nlinha \"2\" e 'três'".into()),
     };
-    let p = escreve_partida(dir.path(), ID, &Direto, inv).unwrap();
+    let p = escreve_partida(dir.path(), ID, &SemMemoria, inv).unwrap();
     assert_eq!(p.session_id, ID);
     assert_eq!(p.log, dir.path().join("pane.log"));
     assert!(p.script.starts_with(dir.path()));
@@ -175,7 +183,7 @@ fn o_script_roda_cada_argumento_exatamente_como_veio() {
 }
 
 #[test]
-fn o_script_passa_pelo_envelope() {
+fn o_script_passa_pela_memoria() {
     let dir = tempfile::tempdir().unwrap();
     let inv = Invocacao {
         argv: vec!["claude".into()],
@@ -624,5 +632,5 @@ fn texto_injetado_nao_e_fala_digitada() {
 fn claude_code_cabe_atras_da_trait() {
     let raiz = tempfile::tempdir().unwrap();
     let _: Arc<dyn Agente> = Arc::new(claude(raiz.path()));
-    let _: Arc<dyn Envelope> = Arc::new(AiMemory);
+    let _: Arc<dyn Memoria> = Arc::new(AiMemory);
 }

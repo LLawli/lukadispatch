@@ -37,7 +37,7 @@ depth = 1
 #
 # [agente]
 # tipo = "claude-code"
-# envelope = "ai-memory"          # "nenhum" roda o claude direto, sem o ai-memory
+# memoria = "ai-memory"           # "nenhuma" roda o claude direto, sem o ai-memory
 #
 # [transcricao]                   # o lukadispatch setup instala o motor e preenche isto
 # ativa = true                    # false: a voz chega como arquivo de áudio, sem texto

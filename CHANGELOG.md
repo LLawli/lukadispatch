@@ -6,6 +6,12 @@ versão para as notas do GitHub Release, então escreva para quem vai decidir se
 
 ## [Unreleased]
 
+### Mudado
+
+- A escolha do ai-memory no config passa a se chamar `[agente] memoria` (`"ai-memory"` ou
+  `"nenhuma"`), e no setup `--memoria`. O config com `envelope = "nenhum"` e a flag `--envelope`
+  continuam valendo; o setup, ao gravar, troca a chave velha pela nova.
+
 ## [0.2.3] - 2026-09-25
 
 ### Mudado

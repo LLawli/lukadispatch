@@ -23,7 +23,7 @@ use ld_core::proto::{
 use ld_core::state::{Session, Store};
 use tracing::{info, warn};
 
-use crate::agente::{Agente, DescricaoDoChat, Envelope, PedidoDePartida};
+use crate::agente::{Agente, DescricaoDoChat, Memoria, PedidoDePartida};
 use crate::cards::{Acao, Card, Cards, Efeito};
 use crate::divisor::Divisores;
 use crate::frontend::formato::escapa;
@@ -73,7 +73,7 @@ const TETO_REARME: u32 = 3;
 pub struct Portas {
     pub frontend: Arc<dyn Frontend>,
     pub agente: Arc<dyn Agente>,
-    pub envelope: Arc<dyn Envelope>,
+    pub memoria: Arc<dyn Memoria>,
     /// `None` desliga a transcrição: áudio ainda chega como arquivo, só não vira card.
     pub transcritor: Option<Arc<dyn Transcritor>>,
     pub divisores: Divisores,
@@ -98,7 +98,7 @@ pub struct App {
     pub store: Arc<Store>,
     pub frontend: Arc<dyn Frontend>,
     pub agente: Arc<dyn Agente>,
-    pub envelope: Arc<dyn Envelope>,
+    pub memoria: Arc<dyn Memoria>,
     pub transcritor: Option<Arc<dyn Transcritor>>,
     pub divisores: Divisores,
     pub hospedeiro: Arc<dyn Hospedeiro>,
@@ -157,7 +157,7 @@ impl App {
             store,
             frontend: portas.frontend,
             agente: portas.agente,
-            envelope: portas.envelope,
+            memoria: portas.memoria,
             transcritor: portas.transcritor,
             divisores: portas.divisores,
             hospedeiro: portas.hospedeiro,
@@ -202,7 +202,7 @@ impl App {
         }
     }
 
-    /// Monta a partida (pede ao agente a invocação, embrulha no envelope, escreve o script) e
+    /// Monta a partida (pede ao agente a invocação, embrulha na memória, escreve o script) e
     /// pede ao hospedeiro para subir. Usado tanto para abrir sessão nova quanto para relançar
     /// uma existente com `--resume`.
     async fn monta_e_lanca(&self, p: PedidoDeLancamento<'_>) -> Result<sessions::Launched> {
@@ -227,7 +227,7 @@ impl App {
         };
         let invocacao = self.agente.invocacao(&pedido, p.session_id, &dir)?;
         let partida =
-            crate::agente::escreve_partida(&dir, p.session_id, self.envelope.as_ref(), invocacao)?;
+            crate::agente::escreve_partida(&dir, p.session_id, self.memoria.as_ref(), invocacao)?;
         self.hospedeiro.lanca(&partida, p.projeto).await
     }
 

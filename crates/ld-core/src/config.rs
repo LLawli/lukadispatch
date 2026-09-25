@@ -27,7 +27,7 @@ pub struct Config {
     pub hospedeiro: String,
     /// Opções do hospedeiro herdr, lidas só quando `hospedeiro = "herdr"`.
     pub herdr: Herdr,
-    /// Qual agente de código roda nas sessões, e dentro de que envelope.
+    /// Qual agente de código roda nas sessões, e com que memória de longo prazo.
     pub agente: Agente,
     pub telegram: Telegram,
     pub scan: Scan,
@@ -214,21 +214,24 @@ impl Default for Transcricao {
 ///
 /// São duas escolhas independentes. `tipo` é o agente em si (hoje `"claude-code"`): quem sabe
 /// montar a linha de comando, o prompt de partida, os hooks e onde fica a conversa gravada.
-/// `envelope` é o que embrulha essa linha de comando antes de rodar: `"ai-memory"` sobe o agente
-/// como `ai-memory run --new <workstream> <agente...>`, para a sessão entrar na memória de longo
-/// prazo; `"nenhum"` roda o agente direto.
+/// `memoria` é a memória de longo prazo, que embrulha essa linha de comando antes de rodar:
+/// `"ai-memory"` sobe o agente como `ai-memory run ... <agente...>`, para a sessão entrar na
+/// memória de longo prazo; `"nenhuma"` roda o agente direto.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Agente {
     pub tipo: String,
-    pub envelope: String,
+    /// A chave nasceu `envelope` (com o valor `"nenhum"`), e é assim que está nos configs
+    /// instalados antes da troca de nome.
+    #[serde(alias = "envelope")]
+    pub memoria: String,
 }
 
 impl Default for Agente {
     fn default() -> Self {
         Self {
             tipo: "claude-code".into(),
-            envelope: "ai-memory".into(),
+            memoria: "ai-memory".into(),
         }
     }
 }
@@ -462,7 +465,7 @@ mod tests {
         let c = Config::default();
         assert_eq!(c.frontend, "telegram");
         assert_eq!(c.agente.tipo, "claude-code");
-        assert_eq!(c.agente.envelope, "ai-memory");
+        assert_eq!(c.agente.memoria, "ai-memory");
         assert_eq!(c.transcricao.motor, "processo");
         assert_eq!(c.arquivos.divisor, "7z");
         assert!(c.arquivos.cortar_video);
@@ -484,7 +487,7 @@ hospedeiro = "herdr"
 sessao = "bot"
 
 [agente]
-envelope = "nenhum"
+memoria = "nenhuma"
 
 [transcricao]
 motor = "api"
@@ -497,7 +500,7 @@ cortar_video = false
         .unwrap();
         let c = Config::load(&p).unwrap();
         assert_eq!(c.frontend, "whatsapp");
-        assert_eq!(c.agente.envelope, "nenhum");
+        assert_eq!(c.agente.memoria, "nenhuma");
         assert_eq!(
             c.agente.tipo, "claude-code",
             "a chave que faltou mantém o padrão"
@@ -590,5 +593,12 @@ permission_mode = "bypassPermissions"
         let d = c.projects_available();
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].name, "apelido", "o fixado vence e mantém o apelido");
+    }
+
+    #[test]
+    fn config_de_antes_da_troca_de_nome_ainda_escolhe_a_memoria() {
+        // Configs instalados antes da troca de nome dizem `envelope = "nenhum"`.
+        let c: Config = toml::from_str("[agente]\nenvelope = \"nenhum\"\n").unwrap();
+        assert_eq!(c.agente.memoria, "nenhum");
     }
 }

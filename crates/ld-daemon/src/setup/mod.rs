@@ -4,7 +4,7 @@
 //! O setup é uma sequência de peças, uma por porta, escolhidas pelos seletores:
 //!
 //! ```text
-//! lukadispatch setup --frontend telegram --agent claude-code --session tmux --envelope ai-memory
+//! lukadispatch setup --frontend telegram --agent claude-code --session tmux --memoria ai-memory
 //! ```
 //!
 //! Os padrões são as implementações que existem hoje. Cada implementação traz o próprio passo
@@ -47,7 +47,7 @@ lukadispatch setup: configura o lukadispatch nesta máquina, conversando.
   --frontend <nome>   o aplicativo de chat           (padrão: telegram)
   --agent <nome>      o agente de código das sessões  (padrão: claude-code)
   --session <nome>    onde cada sessão roda           (padrão: tmux; herdr sem tmux)
-  --envelope <nome>   o que envolve o agente          (padrão: ai-memory; ou nenhum)
+  --memoria <nome>    a memória de longo prazo        (padrão: ai-memory; ou nenhuma)
   --refazer           pergunta de novo o que já está resolvido (trocar de bot, grupo, motor)
 
 Rodar de novo é seguro: o que está resolvido só é conferido, e só o que falta é perguntado.
@@ -59,7 +59,7 @@ pub struct Selecao {
     pub frontend: Option<String>,
     pub agente: Option<String>,
     pub hospedeiro: Option<String>,
-    pub envelope: Option<String>,
+    pub memoria: Option<String>,
     /// Pergunta de novo o que já está resolvido.
     pub refazer: bool,
 }
@@ -96,7 +96,8 @@ pub fn le_argumentos(args: &[String]) -> Result<Pedido> {
             "--frontend" => &mut sel.frontend,
             "--agent" | "--agente" => &mut sel.agente,
             "--session" | "--sessao" => &mut sel.hospedeiro,
-            "--envelope" => &mut sel.envelope,
+            // `--envelope` é o nome de antes da troca, e pode estar em script de alguém.
+            "--memoria" | "--envelope" => &mut sel.memoria,
             outro => bail!("opção desconhecida: {outro}\n\n{AJUDA}"),
         };
         *campo = Some(valor);
@@ -125,7 +126,7 @@ pub fn pecas(
     Ok(vec![
         pecas::hospedeiro(&nome(&sel.hospedeiro, &base.hospedeiro))?,
         pecas::agente(&nome(&sel.agente, &base.agente.tipo))?,
-        pecas::envelope(&nome(&sel.envelope, &base.agente.envelope))?,
+        pecas::memoria(&nome(&sel.memoria, &base.agente.memoria))?,
         pecas::frontend(&nome(&sel.frontend, &base.frontend))?,
     ])
 }

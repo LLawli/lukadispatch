@@ -45,7 +45,7 @@ lugar errado.
 | `transcritor::processo` | chamar um programa local como transcritor: WAV 16 kHz, marcadores no comando, uma transcrição por vez, prazo, texto vazio como erro |
 | `divisor` (mod.rs) | a trait `Divisor` e a cadeia `Divisores`, com fallback e o teto de partes |
 | `divisor::video`, `sete_z`, `rar` | as três formas de partir: trechos de vídeo por tempo, volumes de 7z, volumes de RAR |
-| `agente` (mod.rs) | as traits `Agente` e `Envelope`, a `DescricaoDoChat` que o domínio passa ao agente, e o script de partida neutro (`escreve_partida`), que junta envelope e invocação |
+| `agente` (mod.rs) | as traits `Agente` e `Memoria`, a `DescricaoDoChat` que o domínio passa ao agente, e o script de partida neutro (`escreve_partida`), que junta memória e invocação |
 | `agente::claude_code` | tudo que é Claude Code: flags da linha de comando, prompts de partida e de re-arme, `bot-settings.json` com os ganchos, confiança de pasta, catálogo de modelos, modos de permissão, leitura do transcript e do uso da conta |
 | `sessions` | a trait `Hospedeiro`, o `Tmux` e o `Herdr`: rodar o script de partida num terminal de verdade, saber se está vivo, matar, listar, dizer como anexar |
 

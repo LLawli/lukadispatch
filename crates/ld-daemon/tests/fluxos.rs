@@ -1,6 +1,6 @@
 //! Os fluxos do daemon de ponta a ponta, com todas as portas trocadas por dublês.
 //!
-//! Prova que o `App` e o roteador falam só com as traits (`Frontend`, `Agente`, `Envelope`,
+//! Prova que o `App` e o roteador falam só com as traits (`Frontend`, `Agente`, `Memoria`,
 //! `Hospedeiro`, `Transcritor`, `Divisor`), e nunca com uma implementação por baixo.
 //!
 //! O frontend é o [`Memoria`], que registra tudo que o daemon mandou, editou e apagou. Se um
@@ -30,7 +30,7 @@ use ld_core::state::{Session, Store};
 use ld_core::transcript::{Fala, SessaoAnterior};
 use ld_core::usage::{SessionTokens, Windows};
 use ld_daemon::agente::claude_code::{ClaudeCode, Locais};
-use ld_daemon::agente::{Agente, AiMemory, Direto, Invocacao, Modo, Partida, PedidoDePartida};
+use ld_daemon::agente::{Agente, AiMemory, Invocacao, Modo, Partida, PedidoDePartida, SemMemoria};
 use ld_daemon::app::{App, Portas};
 use ld_daemon::divisor::{Divisor, Divisores, Partes};
 use ld_daemon::frontend::memoria::{Chamada, Memoria};
@@ -364,7 +364,7 @@ async fn cena_com(limites: Limites) -> Cena {
         Portas {
             frontend: fe.clone(),
             agente: Arc::new(AgenteFalso),
-            envelope: Arc::new(Direto),
+            memoria: Arc::new(SemMemoria),
             transcritor: Some(Arc::new(TranscritorFalso("roda os testes"))),
             divisores: Divisores::new(vec![Arc::new(DivisorFalso)]),
             hospedeiro: hospedeiro.clone(),
@@ -715,7 +715,7 @@ async fn o_frontend_nulo_sustenta_o_daemon_inteiro() {
         Portas {
             frontend: Arc::new(Nulo::default()),
             agente: Arc::new(AgenteFalso),
-            envelope: Arc::new(Direto),
+            memoria: Arc::new(SemMemoria),
             transcritor: None,
             divisores: Divisores::new(vec![]),
             hospedeiro: Arc::new(HospedeiroFalso::default()),
@@ -1298,7 +1298,7 @@ async fn relancar_grava_a_hospedagem_nova_e_a_reconciliacao_nao_encerra() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn o_claude_code_sobe_dentro_do_ai_memory() {
-    // A composição de verdade, com o agente e o envelope reais: é a linha que roda no tmux.
+    // A composição de verdade, com o agente e a memória reais: é a linha que roda no tmux.
     let c = cena().await;
     let raiz = tempfile::tempdir().unwrap();
     let locais = Locais {
@@ -1320,7 +1320,7 @@ async fn o_claude_code_sobe_dentro_do_ai_memory() {
         Portas {
             frontend: c.fe.clone(),
             agente: Arc::new(ClaudeCode::new(locais, None)),
-            envelope: Arc::new(AiMemory),
+            memoria: Arc::new(AiMemory),
             transcritor: None,
             divisores: Divisores::new(vec![]),
             hospedeiro: hospedeiro.clone(),

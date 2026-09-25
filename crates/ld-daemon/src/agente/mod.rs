@@ -9,9 +9,10 @@
 //!
 //! - o **agente** diz como ele mesmo é chamado ([`Agente::invocacao`]): `claude --session-id ...
 //!   --settings ... "<prompt>"`;
-//! - o **envelope** ([`Envelope`]) embrulha essa chamada: [`AiMemory`] sobe o agente como
+//! - a **memória** ([`Memoria`]) embrulha essa chamada: [`AiMemory`] sobe o agente como
 //!   `ai-memory run --new <workstream> claude ...`, para a sessão entrar na memória de longo
-//!   prazo; [`Direto`] roda o agente como está. Trocar o agente não mexe no envelope, e vice-versa.
+//!   prazo; [`SemMemoria`] roda o agente como está. Trocar o agente não mexe na memória, e
+//!   vice-versa. Ela é opcional: nada do domínio pode depender de haver uma.
 //!
 //! [`escreve_partida`] junta os dois num script, que o `Hospedeiro` (o tmux) roda. O script existe
 //! para dar para ler depois, exatamente, o que foi lançado quando algo der errado.
@@ -184,9 +185,12 @@ pub trait Agente: Send + Sync + 'static {
     fn tokens_da_sessao(&self, session_id: &str) -> Option<SessionTokens>;
 }
 
-/// O que embrulha a chamada do agente antes de rodar.
-pub trait Envelope: Send + Sync + 'static {
-    /// Nome curto, o mesmo do config (`"ai-memory"`, `"nenhum"`).
+/// A memória de longo prazo das sessões, que embrulha a chamada do agente antes de rodar.
+///
+/// Opcional ([`SemMemoria`] não faz nada): o que ela oferece a sessão ganha quando existe, e o
+/// resto do daemon funciona igual sem ela.
+pub trait Memoria: Send + Sync + 'static {
+    /// Nome curto, o mesmo do config (`"ai-memory"`, `"nenhuma"`).
     fn nome(&self) -> &'static str;
 
     /// A linha de comando final, a partir da do agente.
@@ -197,11 +201,11 @@ pub trait Envelope: Send + Sync + 'static {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AiMemory;
 
-/// O agente roda como está.
+/// Sem memória de longo prazo: o agente roda como está.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct Direto;
+pub struct SemMemoria;
 
-impl Envelope for AiMemory {
+impl Memoria for AiMemory {
     fn nome(&self) -> &'static str {
         "ai-memory"
     }
@@ -218,9 +222,9 @@ impl Envelope for AiMemory {
     }
 }
 
-impl Envelope for Direto {
+impl Memoria for SemMemoria {
     fn nome(&self) -> &'static str {
-        "nenhum"
+        "nenhuma"
     }
 
     fn embrulha(&self, session_id: &str, argv: Vec<String>) -> Vec<String> {
@@ -246,10 +250,10 @@ pub fn workstream(session_id: &str) -> String {
 /// Os agentes que existem, pelo nome que o config (`[agente] tipo`) e o `setup --agent` usam.
 pub const AGENTES: &[&str] = &["claude-code"];
 
-/// Os envelopes que existem, pelo nome de `[agente] envelope` e do `setup --envelope`.
-pub const ENVELOPES: &[&str] = &["ai-memory", "nenhum"];
+/// As memórias que existem, pelo nome de `[agente] memoria` e do `setup --memoria`.
+pub const MEMORIAS: &[&str] = &["ai-memory", "nenhuma"];
 
-/// O agente e o envelope que o config pede. Nome desconhecido é erro na partida do daemon.
+/// O agente e a memória que o config pede. Nome desconhecido é erro na partida do daemon.
 pub fn da_config(config: &Config) -> Result<Pecas> {
     let cfg = &config.agente;
     let agente: Arc<dyn Agente> = match cfg.tipo.as_str() {
@@ -265,21 +269,22 @@ pub fn da_config(config: &Config) -> Result<Pecas> {
             AGENTES.join(", ")
         ),
     };
-    let envelope: Arc<dyn Envelope> = match cfg.envelope.as_str() {
+    let memoria: Arc<dyn Memoria> = match cfg.memoria.as_str() {
         "ai-memory" => Arc::new(AiMemory),
-        "nenhum" => Arc::new(Direto),
+        // `nenhum` é o nome de quando isto se chamava envelope, e está em configs instalados.
+        "nenhuma" | "nenhum" => Arc::new(SemMemoria),
         outro => anyhow::bail!(
-            "envelope desconhecido: {outro:?} (disponíveis: {})",
-            ENVELOPES.join(", ")
+            "memória desconhecida: {outro:?} (disponíveis: {})",
+            MEMORIAS.join(", ")
         ),
     };
-    Ok(Pecas { agente, envelope })
+    Ok(Pecas { agente, memoria })
 }
 
 /// O par escolhido pelo config.
 pub struct Pecas {
     pub agente: Arc<dyn Agente>,
-    pub envelope: Arc<dyn Envelope>,
+    pub memoria: Arc<dyn Memoria>,
 }
 
 /// Escreve o script de partida em `dir` e devolve o que o hospedeiro precisa para rodá-lo.
@@ -294,7 +299,7 @@ pub struct Pecas {
 pub fn escreve_partida(
     dir: &Path,
     session_id: &str,
-    envelope: &dyn Envelope,
+    memoria: &dyn Memoria,
     invocacao: Invocacao,
 ) -> Result<Partida> {
     std::fs::create_dir_all(dir).with_context(|| format!("criando {}", dir.display()))?;
@@ -305,8 +310,8 @@ pub fn escreve_partida(
             .with_context(|| format!("escrevendo {}", prompt_arquivo.display()))?;
     }
 
-    let argv = envelope.embrulha(session_id, invocacao.argv);
-    // A linha de comando em si (envelope, agente e flags) fica junta, de um jeito legível de
+    let argv = memoria.embrulha(session_id, invocacao.argv);
+    // A linha de comando em si (memória, agente e flags) fica junta, de um jeito legível de
     // ler inteira; só o prompt, que é sempre o argumento mais longo, ganha linha própria.
     let mut comando: String = argv
         .iter()

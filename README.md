@@ -79,7 +79,7 @@ voz também precisa do `ffmpeg`; o motor em si o setup instala.
 O setup escolhe uma implementação para cada peça. Os padrões são as que existem hoje:
 
 ```bash
-lukadispatch setup --frontend telegram --agent claude-code --session tmux --envelope ai-memory
+lukadispatch setup --frontend telegram --agent claude-code --session tmux --memoria ai-memory
 ```
 
 Com `--session herdr`, cada sessão vira uma aba no workspace do projeto, na sessão padrão do

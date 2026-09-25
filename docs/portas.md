@@ -7,7 +7,7 @@ O daemon fala com o mundo por traits. Cada uma tem implementações prontas, esc
 |---|---|---|---|
 | chat | `frontend::Frontend` | `telegram`, `nulo` (offline), `memoria` (testes) | `frontend = "telegram"` |
 | agente de código | `agente::Agente` | `claude-code` | `[agente] tipo = "claude-code"` |
-| envelope do agente | `agente::Envelope` | `ai-memory`, `nenhum` | `[agente] envelope = "ai-memory"` |
+| memória de longo prazo (opcional) | `agente::Memoria` | `ai-memory`, `nenhuma` | `[agente] memoria = "ai-memory"` |
 | voz para texto | `transcritor::Transcritor` | `processo` (qualquer programa local) | `[transcricao] motor = "processo"` |
 | arquivo grande | `divisor::Divisor` | `video` (ffmpeg), `7z`, `rar` | `[arquivos] divisor = "7z"`, `cortar_video = true` |
 | onde a sessão roda | `sessions::Hospedeiro` | `tmux`, `herdr` | `hospedeiro = "tmux"`, `[herdr] sessao` |
@@ -18,7 +18,7 @@ Elas são montadas em `main.rs` e chegam ao `App` num `Portas`:
 let app = App::new(cfg, store, Portas {
     frontend,     // Arc<dyn Frontend>
     agente,       // Arc<dyn Agente>
-    envelope,     // Arc<dyn Envelope>
+    memoria,      // Arc<dyn Memoria>
     transcritor,  // Option<Arc<dyn Transcritor>>, None = transcrição desligada
     divisores,    // Divisores, a cadeia ordenada
     hospedeiro,   // Arc<dyn Hospedeiro>
@@ -33,7 +33,7 @@ está em [decisoes/0002](decisoes/0002-portas-e-adaptadores.md).
 `lukadispatch setup` escolhe uma implementação por porta, com os mesmos nomes do config:
 
 ```text
-lukadispatch setup --frontend telegram --agent claude-code --session tmux --envelope ai-memory
+lukadispatch setup --frontend telegram --agent claude-code --session tmux --memoria ai-memory
 ```
 
 Cada implementação traz o próprio passo de setup, a trait `Peca` em
@@ -42,9 +42,9 @@ o que faltar e escreve no rascunho do config e do `.env`; `ativa`, opcional, rod
 gravar (é onde o Claude Code instala os hooks). Uma implementação nova se registra em dois
 lugares, do mesmo jeito:
 
-1. no `da_config` da porta (e na lista de nomes dela: `AGENTES`, `ENVELOPES`, `HOSPEDEIROS`), para
+1. no `da_config` da porta (e na lista de nomes dela: `AGENTES`, `MEMORIAS`, `HOSPEDEIROS`), para
    o daemon subir com ela;
-2. no registro da porta em `setup/pecas.rs` (`frontend`, `agente`, `hospedeiro`, `envelope`), para
+2. no registro da porta em `setup/pecas.rs` (`frontend`, `agente`, `hospedeiro`, `memoria`), para
    o setup saber configurá-la.
 
 O passo do Telegram é o modelo para um frontend: a API fica atrás de uma trait (`ApiDoBot`), e o
@@ -145,14 +145,15 @@ do `MsgId` (por exemplo `"<jid>|<id>"`). O domínio nunca olha dentro.
 A sessão não roda o agente direto. São três peças numa partida, cada uma trocável sozinha:
 
 ```
-ai-memory run --new lukadispatch-0123abcd-1790000000   ← Envelope (AiMemory)
+ai-memory run --new lukadispatch-0123abcd-1790000000   ← Memoria (AiMemory)
   claude --session-id <id> --settings <...> "<prompt>"  ← Agente (ClaudeCode::invocacao)
 num tmux ld-<projeto>-<id>, ou aba do herdr            ← Hospedeiro (Tmux, Herdr)
 ```
 
-**Trocar só o envelope** é config: `[agente] envelope = "nenhum"` roda o agente sem o
-`ai-memory`. Outro embrulho (um contêiner, `nice`, `systemd-run`) é uma implementação de
-`Envelope`, que recebe a linha de comando do agente e devolve a final.
+**Trocar só a memória** é config: `[agente] memoria = "nenhuma"` roda o agente sem o
+`ai-memory`. Outra memória de longo prazo é uma implementação de `Memoria`, que recebe a linha
+de comando do agente e devolve a final. Ela é opcional: nada fora da implementação pode depender
+de haver uma. (A chave e a trait se chamavam `envelope`; o config antigo ainda carrega.)
 
 **Trocar o agente** é implementar `Agente`:
 
@@ -258,7 +259,7 @@ grande falha com um erro que diz qual divisor faltou.
 ## Hospedeiro: trocar o tmux
 
 **Onde:** `crates/ld-daemon/src/sessions/`, trait `Hospedeiro`. Ele recebe o script de partida
-pronto (montado pelo agente e pelo envelope) e só o roda.
+pronto (montado pelo agente e pela memória) e só o roda.
 
 O tmux (`mod.rs`) foi o primeiro porque deixa a sessão anexável no PC
 (`tmux attach -t ld-<projeto>-<id>`) e sobrevive a restart do daemon. O herdr (`herdr.rs`) é o

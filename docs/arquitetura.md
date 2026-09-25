@@ -32,7 +32,7 @@ binário de hook a carrega a cada chamada de ferramenta do Claude.
   (socket)       │  hub   panel   status   arquivos             │
                  └──┬───────────┬───────────┬────────────┬──────┘
        trait        │ Agente    │Transcritor│ Divisor    │ Hospedeiro
-                    │ +Envelope │           │            │
+                    │ +Memoria  │           │            │
                  ┌──▼────────┐┌─▼────────┐┌─▼─────────┐┌─▼────────┐
                  │ claude-   ││ processo ││ video, 7z,││ tmux     │
                  │ code;     ││ (whisper)││ rar       ││          │
@@ -52,7 +52,7 @@ módulo do domínio escolhe implementação; ele recebe.
 
 **Uma partida de sessão** mostra as portas colaborando sem que uma saiba da outra: o domínio
 monta um `PedidoDePartida` (projeto, modelo, modo de permissão e a `DescricaoDoChat` tirada do
-frontend); o `Agente` diz como o Claude Code é chamado e escreve o prompt; o `Envelope` embrulha
+frontend); o `Agente` diz como o Claude Code é chamado e escreve o prompt; a `Memoria` embrulha
 isso em `ai-memory run --new <workstream>`; `agente::escreve_partida` grava o script; e o
 `Hospedeiro` roda o script num tmux ou numa aba do herdr ([decisoes/0012](decisoes/0012-agente-e-envelope.md)).
 
