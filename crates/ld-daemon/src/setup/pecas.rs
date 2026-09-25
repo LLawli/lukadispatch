@@ -229,12 +229,20 @@ impl Peca for Herdr {
                  Instale pelo gerenciador de pacotes da sua distro.",
             );
         }
-        match r.atual.herdr.sessao.as_deref().filter(|s| !s.is_empty()) {
-            Some(s) => tela.diz(&format!("As sessões sobem na sessão \"{s}\" do herdr.")),
-            None => tela.diz(
-                "As sessões sobem na sessão padrão do herdr, ao lado das suas. Para separá-las, \
-                 ponha sessao = \"nome\" em [herdr] no config.",
+        match r.atual.herdr.sessao.as_deref().map(str::trim) {
+            Some("default") => tela.diz(
+                "As sessões sobem na sessão padrão do herdr, ao lado das suas, porque o config \
+                 pede sessao = \"default\" em [herdr].",
             ),
+            Some(s) if !s.is_empty() => {
+                tela.diz(&format!("As sessões sobem na sessão \"{s}\" do herdr."))
+            }
+            _ => tela.diz(&format!(
+                "As sessões sobem numa sessão própria do herdr, \"{}\", separada das suas. \
+                 Para vê-las: herdr --session {}",
+                crate::sessions::SESSAO_DO_BOT,
+                crate::sessions::SESSAO_DO_BOT
+            )),
         }
         r.poe(None, "hospedeiro", "herdr");
         Ok(())

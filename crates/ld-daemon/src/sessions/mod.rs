@@ -15,7 +15,7 @@ use tokio::process::Command;
 use crate::agente::Partida;
 
 mod herdr;
-pub use herdr::Herdr;
+pub use herdr::{Herdr, SESSAO_DO_BOT};
 
 #[derive(Debug)]
 pub struct Launched {

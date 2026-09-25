@@ -105,8 +105,9 @@ impl Default for Config {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Herdr {
-    /// A sessão nomeada do herdr onde as sessões do bot sobem. Sem valor, é a sessão padrão (a
-    /// do `herdr` sem argumentos), e as sessões do bot aparecem ao lado das suas.
+    /// A sessão nomeada do herdr onde as sessões do bot sobem. Sem valor, é uma própria,
+    /// `lukadispatch`, separada das suas; `"default"` põe as do bot na padrão (a do `herdr` sem
+    /// argumentos), ao lado das suas.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sessao: Option<String>,
 }
@@ -472,7 +473,7 @@ mod tests {
         assert_eq!(c.hospedeiro, "tmux");
         assert_eq!(
             c.herdr.sessao, None,
-            "sem sessão nomeada, é a padrão do herdr"
+            "sem sessão no config, o hospedeiro escolhe a própria do bot"
         );
 
         let dir = tempfile::tempdir().unwrap();

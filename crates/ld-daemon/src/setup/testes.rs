@@ -81,7 +81,7 @@ async fn passo_do_herdr_grava_o_hospedeiro_e_avisa_o_que_falta() {
     res.unwrap();
     assert!(tela.contains("herdr: ok"), "{tela}");
     assert!(tela.contains("falta o script"), "{tela}");
-    assert!(tela.contains("sessão padrão do herdr"), "{tela}");
+    assert!(tela.contains("sessão própria do herdr"), "{tela}");
     let cfg: Config = toml::from_str(&r.config_texto()).unwrap();
     assert_eq!(cfg.hospedeiro, "herdr");
     crate::sessions::da_config(&cfg).unwrap();

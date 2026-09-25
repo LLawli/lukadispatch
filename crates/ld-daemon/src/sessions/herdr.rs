@@ -41,9 +41,14 @@ const PRAZO_DE_CONFERIR: Duration = Duration::from_secs(1);
 /// O `sun_path` de um socket unix no Linux: 108 bytes, contando o NUL do fim.
 const SUN_PATH: usize = 108;
 
+/// A sessão do herdr onde as sessões do bot sobem quando o config não diz outra. Própria, e não
+/// a padrão: na padrão estão as suas, e um `server stop` ou restart dela derrubaria as duas.
+pub const SESSAO_DO_BOT: &str = "lukadispatch";
+
 #[derive(Debug, Clone)]
 pub struct Herdr {
-    /// Sessão nomeada do herdr. `None` é a padrão.
+    /// Sessão nomeada do herdr. `None` é a padrão do herdr, que só se escolhe pedindo
+    /// `default` no config.
     sessao: Option<String>,
     /// `XDG_CONFIG_HOME` imposto ao servidor que o daemon sobe. `None` fora dos testes: o daemon
     /// acha o socket onde o herdr do usuário o põe, pelo mesmo ambiente.
@@ -100,8 +105,13 @@ impl Herdr {
         Self::com(sessao, None, paths::state_dir().join("herdr-servidor.log"))
     }
 
+    /// `sessao` é a do config: vazia é [`SESSAO_DO_BOT`], e `default` é a padrão do herdr.
     fn com(sessao: Option<String>, config_home: Option<PathBuf>, log: PathBuf) -> Self {
-        let sessao = sessao.filter(|s| !s.trim().is_empty());
+        let sessao = sessao
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| SESSAO_DO_BOT.to_string());
+        let sessao = (sessao != "default").then_some(sessao);
         let dir = match &config_home {
             Some(c) => c.join("herdr"),
             None => dir_do_herdr(
@@ -657,19 +667,32 @@ mod tests {
     fn anexar_aponta_o_terminal_e_a_sessao_nomeada() {
         let h = "ld-proj-abcd@term_65c4@4242:987654";
         assert_eq!(
-            Herdr::new(None).como_anexar(h),
-            "herdr terminal attach term_65c4"
-        );
-        assert_eq!(
             Herdr::new(Some("bot".into())).como_anexar(h),
             "herdr --session bot terminal attach term_65c4"
         );
-        assert_eq!(Herdr::new(None).descreve(h), "herdr: ld-proj-abcd");
+        assert_eq!(
+            Herdr::new(Some("default".into())).como_anexar(h),
+            "herdr terminal attach term_65c4"
+        );
+        assert_eq!(
+            Herdr::new(Some("default".into())).descreve(h),
+            "herdr: ld-proj-abcd"
+        );
     }
 
     #[test]
-    fn sessao_vazia_no_config_e_a_padrao() {
-        assert!(Herdr::new(Some("  ".into())).flag_sessao().is_empty());
+    fn sem_sessao_no_config_o_bot_sobe_na_propria_e_nao_na_padrao() {
+        for vazia in [None, Some("  ".to_string())] {
+            assert_eq!(
+                Herdr::new(vazia).flag_sessao(),
+                ["--session", SESSAO_DO_BOT],
+                "a padrão é a das suas sessões"
+            );
+        }
+        assert!(
+            Herdr::new(Some("default".into())).flag_sessao().is_empty(),
+            "a padrão do herdr só se pede pelo nome"
+        );
     }
 
     #[test]

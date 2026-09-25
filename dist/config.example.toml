@@ -33,7 +33,7 @@ depth = 1
 # hospedeiro = "tmux"             # ou "herdr"; o setup escolhe o tmux se houver, senão o herdr
 #
 # [herdr]
-# sessao = "bot"                  # sessão nomeada do herdr; sem isto, a padrão, ao lado das suas
+# sessao = "lukadispatch"         # sessão do herdr; esta é a padrão; "default" põe ao lado das suas
 #
 # [agente]
 # tipo = "claude-code"

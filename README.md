@@ -82,12 +82,12 @@ O setup escolhe uma implementação para cada peça. Os padrões são as que exi
 lukadispatch setup --frontend telegram --agent claude-code --session tmux --memoria ai-memory
 ```
 
-Com `--session herdr`, cada sessão vira uma aba no workspace do projeto, na sessão padrão do
-herdr (ao lado das suas) ou na que `[herdr] sessao` pedir no config. Se o servidor do herdr
-reiniciar, o daemon relança cada sessão no mesmo tópico, com a conversa inteira; num
-`herdr update --handoff` ela nem cai. Depois de um reboot, é o daemon que sobe o servidor do
-herdr quando há sessão para retomar, e na sessão padrão o herdr religa junto os agentes que
-você tinha abertos. Com `[herdr] sessao`, isso fica restrito ao bot.
+Com `--session herdr`, cada sessão vira uma aba no workspace do projeto, numa sessão própria do
+herdr, `lukadispatch` (veja com `herdr --session lukadispatch`), separada das suas. Outra sessão
+se pede em `[herdr] sessao` no config, e `"default"` põe as do bot ao lado das suas. Se o
+servidor do herdr reiniciar, o daemon relança cada sessão no mesmo tópico, com a conversa
+inteira; num `herdr update --handoff` ela nem cai. Depois de um reboot, é o daemon que sobe o
+servidor do herdr quando há sessão para retomar.
 
 Outras entram como implementação nova de cada porta ([`docs/portas.md`](docs/portas.md)), e o
 setup passa a oferecê-las pelo nome. Todas as opções do config, comentadas, estão no
