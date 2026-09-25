@@ -109,7 +109,8 @@ Medido no herdr 0.8.2.
 
 - **A CLI não sobe servidor.** `herdr workspace list` sem servidor falha com
   `server_not_running`, ao contrário do `tmux new-session`, que sobe o dele. O hospedeiro sobe
-  `herdr [--session X] server` antes de lançar, e nunca ao só conferir.
+  `herdr [--session X] server` antes de lançar e ao procurar o lugar de uma sessão cujo processo
+  morreu (é o restore que o devolve), e nunca ao conferir uma sessão viva.
 - **Pane que roda um comando some quando ele sai**, e a aba e o workspace vão junto se ficarem
   vazios. O motivo de uma morte ao subir só sobra no log do `script`.
 - **Restart do servidor não reroda o comando do pane.** O pane volta como shell, com o mesmo
@@ -121,22 +122,28 @@ Medido no herdr 0.8.2.
   reconciliação regrava o terminal novo de uma sessão viva, que é o que o `terminal attach`
   pede. Depois de um handoff, o pane importado vira shell quando o comando sai, em vez de
   fechar.
-- **Com a integração do Claude Code instalada, o herdr religa o Claude do bot sozinho.** Ele o
-  faz assim que o servidor sobe, sem cliente anexado: o hook da integração roda dentro da sessão
-  do bot (o pane herda `HERDR_ENV` e `HERDR_PANE_ID`) e registra o pane como agente oficial
-  (`agent_session.source = herdr:claude`). O religado é só `claude --resume <id>`, sob um
-  `bash`: sem o `script` (a saída não vai para o log), sem `LD_SESSION` e sem o `--settings` do
-  bot. O modelo e o modo de permissão voltam pelo transcript; os hooks do bot não voltam, então
-  o `Monitor` não é rearmado e o tópico fala sozinho. É a issue #1.
+- **Com a integração do Claude Code instalada, o herdr religaria o Claude do bot sozinho.** Ele
+  o faz assim que o servidor sobe, sem cliente anexado, em todo pane que a integração registrou
+  como agente oficial (`agent_session.source = herdr:claude`). O religado é só
+  `claude --resume <id>`, sob um `bash`: sem o `script`, sem `LD_SESSION` e sem o `--settings`
+  do bot, então sem os hooks dele e sem o `Monitor`. Por isso o pane do bot roda
+  `unset HERDR_ENV HERDR_PANE_ID` antes da partida: o hook da integração
+  (`herdr-agent-state.sh`) sai sem reportar quando falta um deles, e o pane volta como um `bash`
+  parado, que o daemon fecha para relançar a sessão do jeito dele. Tirar pelo `env` do
+  `layout.apply` não funciona: o herdr aplica a identidade do pane por cima.
+- **Parar o servidor dispara o hook `SessionEnd` com o motivo `other`** em cada Claude dos panes.
+  Encerrar a sessão ali apagaria o tópico antes de o restore devolver o lugar dela, então o
+  daemon só agenda uma reconciliação para dali a 5 s, que decide entre relançar e encerrar.
 - **Servidor subido de dentro de uma sessão do Claude Code herda `CLAUDE_CODE_CHILD_SESSION`**,
   e todo Claude aberto nos panes dele roda com "Transcript saving is off": o `--resume` depois
   não tem o que retomar. Vale para o herdr e para o tmux. O servidor que o daemon sobe já nasce
   sem essas marcas (`MARCAS_DO_CLAUDE_CODE` em `sessions/mod.rs`); em experimento à mão, suba o
   servidor com `env -i` e só o essencial (`HOME`, `USER`, `PATH`, `SHELL`, `TERM`, `LANG`,
   `XDG_RUNTIME_DIR`).
-- **O `herdr agent` não reconhece o Claude Code das sessões do bot**: o processo em primeiro
-  plano do pane é o `script`. O estado (idle, working) só pode vir da integração do Claude
-  Code, que reporta pelo `HERDR_PANE_ID` herdado através do `script`.
+- **O `herdr agent` não reconhece o Claude Code das sessões do bot**: o `script` o põe em sessão
+  e pty próprios, fora do grupo de processos que o herdr examina, e o estado do pane fica
+  `unknown`. A integração do Claude Code (versão 8) não mudaria isso: ela só reporta o id da
+  sessão, no `SessionStart`.
 - **`HERDR_SOCKET_PATH` no ambiente vence a sessão padrão.** Um daemon iniciado de dentro de um
   pane herda o socket da sessão daquele pane. O hospedeiro calcula o socket pelo layout do
   herdr e ignora a variável, e passa `--session` explícito ao subir o servidor.

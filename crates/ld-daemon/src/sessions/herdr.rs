@@ -404,6 +404,12 @@ impl Hospedeiro for Herdr {
         // O `$$` do shell que o `script` abre é o processo que vira o agente: cada `exec` dali
         // em diante troca o programa e mantém o pid. É por ele que o daemon sabe se a sessão
         // vive.
+        //
+        // Sem `HERDR_ENV` e `HERDR_PANE_ID`, a integração do Claude Code do herdr não registra
+        // este pane como agente, e um restart do servidor não religa o Claude aqui sozinho: o
+        // religado seria só `claude --resume`, sem os hooks do bot. Quem relança é o daemon
+        // ([`Situacao::Restaurada`]). O herdr não os deixa tirar pelo `env` do `layout.apply`,
+        // que ele aplica antes da identidade do pane.
         let arquivo_pid = partida.log.with_file_name("processo.pid");
         let _ = std::fs::remove_file(&arquivo_pid);
         let mut pedido = json!({
@@ -415,7 +421,8 @@ impl Hospedeiro for Herdr {
                 "cwd": projeto.path,
                 "command": [
                     "script", "-q", "-f", "-a", "-e",
-                    "-c", r#"echo $$ > "$LD_PID"; exec bash "$LD_PARTIDA""#,
+                    "-c",
+                    r#"unset HERDR_ENV HERDR_PANE_ID; echo $$ > "$LD_PID"; exec bash "$LD_PARTIDA""#,
                     partida.log,
                 ],
                 "env": {
@@ -488,10 +495,21 @@ impl Hospedeiro for Herdr {
         }
     }
 
+    /// Com o processo morto, sobe o servidor se ele estiver fora do ar: é o restore dele que
+    /// devolve o lugar da sessão, e depois de um reboot ninguém mais o sobe. Só aqui, e não no
+    /// [`Hospedeiro::vive`]: conferir uma sessão viva não pode ligar servidor.
     async fn situacao(&self, nome: &str) -> Situacao {
         let h = Hospedagem::le(nome);
         if !self.vive(nome).await {
-            return Situacao::Morta;
+            if let Err(e) = self.garante_servidor().await {
+                tracing::warn!(erro = %format!("{e:#}"), "não consegui subir o herdr para procurar a sessão");
+                return Situacao::Morta;
+            }
+            return if self.paineis_do_rotulo(h.rotulo).await.is_empty() {
+                Situacao::Morta
+            } else {
+                Situacao::Restaurada
+            };
         }
         if h.processo.is_none() {
             return Situacao::Viva;
@@ -878,6 +896,60 @@ mod testes_hospedeiro {
 
         h.mata(&nova).await.unwrap();
         assert!(!h.vive(&nova).await, "a sessão sobreviveu ao mata");
+    }
+
+    #[tokio::test]
+    async fn restart_do_servidor_devolve_o_lugar_da_sessao_sem_o_agente() {
+        if !tem_herdr() {
+            return;
+        }
+        let sessao = SessaoDeTeste::nova("restart");
+        let h = sessao.herdr();
+        let dir = tempfile::tempdir().unwrap();
+        let (partida, projeto) = partida_com(
+            r#"echo "herdr_env=[${HERDR_ENV:-}] pane=[${HERDR_PANE_ID:-}]"; exec sleep 300"#,
+            dir.path(),
+            "7e57a000-restart",
+        );
+        let l = h.lanca(&partida, &projeto).await.unwrap();
+        // É o que impede a integração do Claude Code de registrar o pane, e o herdr de religar
+        // o agente sozinho no restore.
+        let log = std::fs::read_to_string(&partida.log).unwrap();
+        assert!(log.contains("herdr_env=[] pane=[]"), "{log}");
+
+        let parou = sessao
+            .cli()
+            .args(["--session", &sessao.nome, "server", "stop"])
+            .output()
+            .unwrap();
+        assert!(parou.status.success(), "{parou:?}");
+        for _ in 0..50 {
+            if !h.vive(&l.hospedagem).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            !h.vive(&l.hospedagem).await,
+            "a sessão sobreviveu ao restart"
+        );
+
+        // Com o processo morto e o servidor fora do ar, é a situação que sobe o servidor, e o
+        // restore dele devolve o pane com o mesmo rótulo.
+        assert_eq!(h.situacao(&l.hospedagem).await, Situacao::Restaurada);
+        assert!(h.de_pe().await);
+        assert!(
+            h.nossas()
+                .await
+                .contains(&"ld-teste-hospedeiro-7e57".into())
+        );
+
+        h.mata(&l.hospedagem).await.unwrap();
+        assert_eq!(h.situacao(&l.hospedagem).await, Situacao::Morta);
+        assert!(
+            h.nossas().await.is_empty(),
+            "o lugar restaurado ficou para trás"
+        );
     }
 
     #[tokio::test]

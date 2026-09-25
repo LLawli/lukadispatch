@@ -226,6 +226,10 @@ pub enum Situacao {
     /// De pé, mas o hospedeiro passou a achá-la por outra hospedagem, que é a que vem aqui. O
     /// herdr troca o terminal de todo pane num live handoff, com o processo intacto.
     Mudou(String),
+    /// O processo morreu, mas o hospedeiro reiniciou e guardou o lugar da sessão: o herdr
+    /// restaura o pane dela, com o mesmo rótulo, como um shell parado. Quem chama decide se a
+    /// relança ali; senão, o lugar é lixo a matar.
+    Restaurada,
     /// Não existe mais.
     Morta,
 }

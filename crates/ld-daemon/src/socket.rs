@@ -200,11 +200,12 @@ async fn responde(app: &Arc<App>, req: Request) -> Response {
             Err(e) => erro(e),
         },
 
-        Request::SessionEnd { session_id, .. } => match app.end_session_por_hook(&session_id).await
-        {
-            Ok(()) => Response::Ok,
-            Err(e) => erro(e),
-        },
+        Request::SessionEnd { session_id, reason } => {
+            match app.end_session_por_hook(&session_id, &reason).await {
+                Ok(()) => Response::Ok,
+                Err(e) => erro(e),
+            }
+        }
 
         Request::Inject { session_id, text } => match app.inject(&session_id, &text) {
             Ok(true) => Response::Ok,

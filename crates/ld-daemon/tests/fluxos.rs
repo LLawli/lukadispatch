@@ -68,6 +68,10 @@ struct HospedeiroFalso {
     vivas: Mutex<HashSet<String>>,
     /// Hospedagem que continua viva com outro nome, como o terminal num live handoff do herdr.
     mudou: Mutex<HashMap<String, String>>,
+    /// Hospedagem cujo processo morreu e cujo lugar o hospedeiro devolveu ao reiniciar.
+    restauradas: Mutex<HashSet<String>>,
+    /// Recusa os próximos lançamentos, como um hospedeiro que não consegue subir a sessão.
+    recusa: Mutex<bool>,
     lancadas: Mutex<u32>,
     partidas: Mutex<Vec<Partida>>,
     /// `mata:<nome>` e `lanca:<id>`, na ordem em que aconteceram.
@@ -94,6 +98,9 @@ impl HospedeiroFalso {
 #[async_trait]
 impl Hospedeiro for HospedeiroFalso {
     async fn lanca(&self, partida: &Partida, projeto: &Project) -> Result<Launched> {
+        if *self.recusa.lock().unwrap() {
+            anyhow::bail!("o hospedeiro recusou");
+        }
         *self.lancadas.lock().unwrap() += 1;
         self.eventos
             .lock()
@@ -121,6 +128,9 @@ impl Hospedeiro for HospedeiroFalso {
         if let Some(nova) = self.mudou.lock().unwrap().get(nome) {
             return Situacao::Mudou(nova.clone());
         }
+        if self.restauradas.lock().unwrap().contains(nome) {
+            return Situacao::Restaurada;
+        }
         if self.vive(nome).await {
             Situacao::Viva
         } else {
@@ -134,6 +144,7 @@ impl Hospedeiro for HospedeiroFalso {
             .lock()
             .unwrap()
             .retain(|h| h != nome && rotulo(h) != nome);
+        self.restauradas.lock().unwrap().remove(nome);
         Ok(())
     }
     async fn nossas(&self) -> Vec<String> {
@@ -360,7 +371,8 @@ async fn cena_com(limites: Limites) -> Cena {
         },
     )
     .com_raiz_arquivos(raiz.path().join("arquivos"))
-    .com_raiz_sessoes(raiz.path().join("sessoes"));
+    .com_raiz_sessoes(raiz.path().join("sessoes"))
+    .com_espera_depois_do_fim(Duration::from_millis(50));
 
     Cena {
         app: Arc::new(app),
@@ -538,6 +550,110 @@ async fn reconciliacao_encerra_sessao_cujo_hospedeiro_morreu() {
     let c = cena().await;
     c.hospedeiro.mata(TMUX).await.unwrap();
     assert_eq!(c.app.reconcile().await.unwrap(), 1);
+    assert!(c.app.store.get(SESSAO).unwrap().unwrap().ended_at.is_some());
+    assert!(
+        c.fe.chamadas()
+            .contains(&Chamada::ApagaCanal(c.canal.clone()))
+    );
+}
+
+/// O hospedeiro reiniciou: o processo da sessão morreu, e o lugar dela voltou sem ele.
+fn restart_do_hospedeiro(c: &Cena) {
+    c.hospedeiro.vivas.lock().unwrap().remove(TMUX);
+    c.hospedeiro.restauradas.lock().unwrap().insert(TMUX.into());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reconciliacao_relanca_no_mesmo_canal_a_sessao_que_o_hospedeiro_restaurou() {
+    let c = cena().await;
+    // Caiu no meio de um turno: o turno se perdeu, e a guarda do /model não vale aqui.
+    c.app.store.set_status(SESSAO, "pensando").unwrap();
+    restart_do_hospedeiro(&c);
+
+    assert_eq!(c.app.reconcile().await.unwrap(), 0);
+
+    let s = c.app.store.get(SESSAO).unwrap().unwrap();
+    assert!(s.ended_at.is_none(), "a sessão restaurada foi encerrada");
+    assert_eq!(s.canal_id.as_deref(), Some(c.canal.as_str()));
+    assert_eq!(s.hospedagem.as_deref(), Some("ld-proj-s1@1"));
+    assert_eq!(
+        *c.hospedeiro.eventos.lock().unwrap(),
+        [format!("mata:{TMUX}"), format!("lanca:{SESSAO}")],
+        "o lugar restaurado tem de fechar antes de a sessão subir de novo"
+    );
+    let (script, _) = c.hospedeiro.ultima_partida();
+    assert!(
+        script.contains(&format!("'--continua' '{SESSAO}'")),
+        "{script}"
+    );
+    assert!(
+        !c.fe
+            .chamadas()
+            .contains(&Chamada::ApagaCanal(c.canal.clone()))
+    );
+    assert!(
+        c.fe.chamadas().iter().any(|ch| matches!(ch,
+            Chamada::Envia { canal: Some(k), rico, .. } if *k == c.canal && rico.contains("caiu junto"))),
+        "o canal não soube por que a sessão voltou: {:?}",
+        c.fe.textos()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sessao_restaurada_que_nao_volta_encerra_e_avisa_no_principal() {
+    let c = cena().await;
+    restart_do_hospedeiro(&c);
+    *c.hospedeiro.recusa.lock().unwrap() = true;
+
+    assert_eq!(c.app.reconcile().await.unwrap(), 1);
+
+    assert!(c.app.store.get(SESSAO).unwrap().unwrap().ended_at.is_some());
+    assert!(
+        c.fe.chamadas()
+            .contains(&Chamada::ApagaCanal(c.canal.clone()))
+    );
+    assert!(
+        c.fe.chamadas().iter().any(|ch| matches!(ch,
+            Chamada::Envia { canal: None, rico, .. } if rico.contains("o hospedeiro recusou"))),
+        "o motivo não chegou ao canal principal: {:?}",
+        c.fe.textos()
+    );
+    // Uma tentativa só: a próxima volta não relança de novo.
+    *c.hospedeiro.recusa.lock().unwrap() = false;
+    c.app.reconcile().await.unwrap();
+    assert_eq!(*c.hospedeiro.lancadas.lock().unwrap(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn processo_do_bot_que_acaba_por_fora_nao_encerra_antes_da_reconciliacao() {
+    let c = cena().await;
+    restart_do_hospedeiro(&c);
+    // O Claude Code manda `other` quando o processo morre por fora, como num restart do herdr.
+    c.app.end_session_por_hook(SESSAO, "other").await.unwrap();
+    assert!(
+        !c.fe
+            .chamadas()
+            .contains(&Chamada::ApagaCanal(c.canal.clone())),
+        "o canal foi apagado antes de a reconciliação decidir"
+    );
+
+    // A reconciliação agendada relança a sessão restaurada.
+    let hospedeiro = c.hospedeiro.clone();
+    espera(
+        "a reconciliação agendada relançar a sessão",
+        move || (*hospedeiro.lancadas.lock().unwrap() == 1).then_some(()),
+    )
+    .await;
+    assert!(c.app.store.get(SESSAO).unwrap().unwrap().ended_at.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fim_pedido_por_voce_encerra_na_hora() {
+    let c = cena().await;
+    c.app
+        .end_session_por_hook(SESSAO, "prompt_input_exit")
+        .await
+        .unwrap();
     assert!(c.app.store.get(SESSAO).unwrap().unwrap().ended_at.is_some());
     assert!(
         c.fe.chamadas()

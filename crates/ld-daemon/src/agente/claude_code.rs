@@ -165,7 +165,8 @@ Como funciona daqui em diante:
     )
 }
 
-/// O que a sessão lê quando volta por `--resume` (troca de modelo ou de esforço).
+/// O que a sessão lê quando volta por `--resume` (troca de modelo, esforço ou modo, ou o restart
+/// do hospedeiro que a derrubou).
 ///
 /// Curto de propósito: o contexto todo já está de volta com ela, e a única coisa que se perdeu
 /// no caminho foi o Monitor, que morre junto com o processo anterior.
@@ -179,8 +180,9 @@ fn rearm_prompt(cli: &str, session_id: &str, retomada: bool, chat: &DescricaoDoC
             onde = chat.onde
         )
     } else {
-        "A sua sessão foi reiniciada pelo lukadispatch (troca de modelo ou de esforço). O \
-         contexto continua o mesmo; o que se perdeu foi o canal de conversa com o seu usuário."
+        "A sua sessão foi reiniciada pelo lukadispatch (troca de modelo, esforço ou modo, ou o \
+         terminal que a hospeda reiniciou). O contexto continua o mesmo; o que se perdeu foi o \
+         canal de conversa com o seu usuário, e o que estava em andamento quando ela caiu."
             .to_string()
     };
     format!(
