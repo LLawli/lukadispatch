@@ -251,6 +251,17 @@ impl Memoria for AiMemory {
             || (saida.contains("409") && saida.to_lowercase().contains("workstream"))
     }
 
+    fn segura_a_partida(&self, partida: &PartidaDaMemoria<'_>) -> Duration {
+        // Com o workstream da branch, o `ai-memory run` espera até 5 s por uma trava ocupada antes
+        // de desistir com 409, e isso tem de caber na espera do hospedeiro. Workstream inédito
+        // não tem trava a esperar.
+        if partida.worktree.is_some() && !partida.isolada {
+            Duration::from_secs(7)
+        } else {
+            Duration::ZERO
+        }
+    }
+
     fn a_parar(&self, pid: u32) -> Vec<u32> {
         // O `ai-memory run` só solta o workstream quando o agente dele sai: matar o próprio
         // `ai-memory` deixa a trava presa por até 90 s.

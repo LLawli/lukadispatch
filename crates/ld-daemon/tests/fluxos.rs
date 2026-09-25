@@ -1431,6 +1431,13 @@ impl ld_daemon::agente::Memoria for MemoriaFalsa {
     fn ocupada(&self, saida: &str) -> bool {
         saida.contains("workstream is already active")
     }
+    fn segura_a_partida(&self, p: &PartidaDaMemoria<'_>) -> Duration {
+        if p.worktree.is_some() {
+            Duration::from_secs(7)
+        } else {
+            Duration::ZERO
+        }
+    }
 }
 
 /// Uma cena com a memória falsa e um projeto numa worktree da branch `feat`.
@@ -1480,6 +1487,17 @@ async fn sessao_em_worktree_tem_canal_com_a_branch_e_a_memoria_sabe_dela() {
     );
     let (_, prompt) = c.hospedeiro.ultima_partida();
     assert!(prompt.contains("INSTRUÇÃO DA BRANCH feat"), "{prompt}");
+    assert_eq!(
+        c.hospedeiro
+            .partidas
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .espera_ao_subir,
+        Duration::from_secs(7),
+        "o hospedeiro espera o que a memória pode segurar a partida"
+    );
 }
 
 #[tokio::test(start_paused = true)]

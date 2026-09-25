@@ -286,3 +286,22 @@ async fn lista_de_workstreams_aceita_pelo_ai_memory_de_verdade() {
     let dir = tempfile::tempdir().unwrap();
     assert!(!workstream_existe(dir.path(), "nao-existe").await.unwrap());
 }
+
+#[test]
+fn so_o_workstream_da_branch_segura_a_partida() {
+    let w = wt("/wt/api/feat", "feat");
+    let cwd = Path::new("/wt/api/feat");
+    assert_eq!(
+        AiMemory.segura_a_partida(&partida(cwd, Some(&w), false)),
+        Duration::from_secs(7),
+        "tem de caber a espera de 5 s do ai-memory por uma trava ocupada"
+    );
+    assert_eq!(
+        AiMemory.segura_a_partida(&partida(cwd, Some(&w), true)),
+        Duration::ZERO
+    );
+    assert_eq!(
+        AiMemory.segura_a_partida(&partida(cwd, None, false)),
+        Duration::ZERO
+    );
+}

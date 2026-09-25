@@ -474,7 +474,7 @@ impl Hospedeiro for Herdr {
         // Mesmo motivo do tmux: morrer logo depois de subir é o caso comum de erro, e é o que
         // passaria por "deu certo". O pid chega nesse meio tempo: o shell o escreve antes de
         // qualquer outra coisa.
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        tokio::time::sleep(partida.espera_ao_subir).await;
         let processo = std::fs::read_to_string(&arquivo_pid)
             .ok()
             .and_then(|pid| pid.trim().parse().ok())
@@ -830,6 +830,7 @@ mod testes_hospedeiro {
             session_id: id.into(),
             script,
             log: dir.join("pane.log"),
+            espera_ao_subir: crate::agente::ESPERA_AO_SUBIR,
         };
         let projeto = Project {
             name: "teste-hospedeiro".into(),

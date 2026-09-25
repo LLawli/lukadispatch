@@ -308,7 +308,7 @@ impl App {
             };
             let invocacao = self.agente.invocacao(&pedido, p.session_id, dir)?;
             let argv = self.memoria.embrulha(&memoria, invocacao.argv).await?;
-            let partida = crate::agente::escreve_partida(
+            let mut partida = crate::agente::escreve_partida(
                 dir,
                 p.session_id,
                 Invocacao {
@@ -316,6 +316,9 @@ impl App {
                     prompt: invocacao.prompt,
                 },
             )?;
+            partida.espera_ao_subir = partida
+                .espera_ao_subir
+                .max(self.memoria.segura_a_partida(&memoria));
             // O espelho do painel é só desta tentativa: o erro de uma anterior não pode decidir
             // por esta.
             let _ = std::fs::remove_file(&partida.log);

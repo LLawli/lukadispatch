@@ -107,7 +107,14 @@ pub struct Partida {
     /// Onde o hospedeiro espelha a saída da sessão: sem isso, uma sessão que morre ao subir não
     /// deixa pista nenhuma.
     pub log: PathBuf,
+    /// Quanto o hospedeiro espera, depois de subir, antes de dizer que a sessão está de pé.
+    /// Morrer logo depois de subir é o caso comum de erro, e passaria por "deu certo".
+    pub espera_ao_subir: std::time::Duration,
 }
+
+/// O que o hospedeiro espera ao subir quando ninguém pede mais: o bastante para um erro de
+/// linha de comando ou de pasta aparecer.
+pub const ESPERA_AO_SUBIR: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Um modo de permissão que o agente aceita.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,6 +263,14 @@ pub trait Memoria: Send + Sync + 'static {
         false
     }
 
+    /// Por quanto tempo a memória pode segurar a partida antes de o agente nascer ou de ela
+    /// desistir. O hospedeiro espera pelo menos isso para dizer que a sessão subiu: antes, uma
+    /// partida que ainda vai morrer por [`Memoria::ocupada`] parece viva.
+    fn segura_a_partida(&self, partida: &PartidaDaMemoria<'_>) -> std::time::Duration {
+        let _ = partida;
+        std::time::Duration::ZERO
+    }
+
     /// Para parar a sessão com calma, que processo recebe o sinal: o agente, e não o que o
     /// embrulha, para quem embrulha terminar o trabalho dele. `pid` é o processo do painel.
     fn a_parar(&self, pid: u32) -> Vec<u32> {
@@ -377,6 +392,7 @@ exec {comando}
         session_id: session_id.to_string(),
         script,
         log: dir.join("pane.log"),
+        espera_ao_subir: ESPERA_AO_SUBIR,
     })
 }
 

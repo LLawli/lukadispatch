@@ -145,7 +145,7 @@ pub async fn launch(partida: &Partida, projeto: &Project) -> Result<Launched> {
 
     // Morrer logo depois de subir é o caso comum de erro (workstream ocupado, diálogo de
     // confiança, projeto inexistente), e é justamente o que passaria por "deu certo".
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    tokio::time::sleep(partida.espera_ao_subir).await;
     if !has_session(&tmux).await {
         bail!("a sessão morreu ao subir: {}", primeiro_erro(&partida.log));
     }
@@ -462,6 +462,7 @@ mod testes_hospedeiro {
             session_id: id.into(),
             script,
             log: dir.join("pane.log"),
+            espera_ao_subir: crate::agente::ESPERA_AO_SUBIR,
         };
         let projeto = Project {
             name: "teste-hospedeiro".into(),
