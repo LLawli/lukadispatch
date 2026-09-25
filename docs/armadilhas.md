@@ -130,7 +130,16 @@ Medido no herdr 0.8.2.
   plano do pane é o `script`. O estado (idle, working) só pode vir da integração do Claude
   Code, que reporta pelo `HERDR_PANE_ID` herdado através do `script`.
 - **`HERDR_SOCKET_PATH` no ambiente vence a sessão padrão.** Um daemon iniciado de dentro de um
-  pane herda o socket da sessão daquele pane; o hospedeiro sempre resolve o socket pela lista de
-  sessões e passa `--session` explícito.
+  pane herda o socket da sessão daquele pane. O hospedeiro calcula o socket pelo layout do
+  herdr e ignora a variável, e passa `--session` explícito ao subir o servidor.
+- **O socket mora no diretório de config, não no de runtime:** `$XDG_CONFIG_HOME/herdr` (ou
+  `~/.config/herdr`), com a sessão nomeada em `sessions/<nome>/herdr.sock`. Com um
+  `XDG_CONFIG_HOME` fundo o caminho passa de 107 bytes e o servidor não sobe; o hospedeiro
+  recusa antes, dizendo o caminho.
+- **O nome de sessão tem até 64 bytes, só `[A-Za-z0-9._-]`.** Fora disso a CLI recusa na hora.
+  O motivo vem na linha `error:`, e a última linha da saída é só a dica de uso.
+- **Socket que aceita conexão não prova servidor de pé.** Um servidor travado aceita (o kernel
+  enfileira) e nunca responde. Conferir é mandar `ping` com prazo curto.
 - **Experimente numa sessão nomeada** (`herdr --session teste server`), nunca na padrão: é a do
-  usuário, com os panes dele.
+  usuário, com os panes dele. Os testes do hospedeiro vão além e sobem o servidor com um
+  `XDG_CONFIG_HOME` próprio, sem tocar no `~/.config/herdr`.
