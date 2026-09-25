@@ -47,7 +47,7 @@ lugar errado.
 | `divisor::video`, `sete_z`, `rar` | as três formas de partir: trechos de vídeo por tempo, volumes de 7z, volumes de RAR |
 | `agente` (mod.rs) | as traits `Agente` e `Envelope`, a `DescricaoDoChat` que o domínio passa ao agente, e o script de partida neutro (`escreve_partida`), que junta envelope e invocação |
 | `agente::claude_code` | tudo que é Claude Code: flags da linha de comando, prompts de partida e de re-arme, `bot-settings.json` com os ganchos, confiança de pasta, catálogo de modelos, modos de permissão, leitura do transcript e do uso da conta |
-| `sessions` | a trait `Hospedeiro` e o `Tmux`: rodar o script de partida num terminal de verdade, saber se está vivo, matar, listar |
+| `sessions` | a trait `Hospedeiro`, o `Tmux` e o `Herdr`: rodar o script de partida num terminal de verdade, saber se está vivo, matar, listar, dizer como anexar |
 
 A direção das dependências é uma só: o domínio depende das traits; os adaptadores dependem das
 traits; nenhum adaptador depende do domínio, e o domínio não importa nenhum adaptador (só o

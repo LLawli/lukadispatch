@@ -8,7 +8,7 @@ uma peça sem reescrever o resto.
 |---|---|
 | [arquitetura.md](arquitetura.md) | entender o todo: os binários, as camadas e o caminho de uma mensagem |
 | [responsabilidades.md](responsabilidades.md) | saber onde mora uma coisa, e o que cada módulo se recusa a fazer |
-| [portas.md](portas.md) | trocar o Telegram, o agente de código, o motor de voz, o divisor de arquivos ou o tmux |
+| [portas.md](portas.md) | trocar o Telegram, o agente de código, o motor de voz, o divisor de arquivos ou o hospedeiro (tmux, herdr) |
 | [decisoes/](decisoes/) | saber por que algo é como é, e o que faria a decisão mudar |
 | [armadilhas.md](armadilhas.md) | não redescobrir do jeito difícil o que já foi medido |
 | [contribuir.md](contribuir.md) | compilar, rodar sem bot, passar nos portões, fazer deploy e soltar uma versão |

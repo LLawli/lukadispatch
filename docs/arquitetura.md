@@ -54,7 +54,7 @@ módulo do domínio escolhe implementação; ele recebe.
 monta um `PedidoDePartida` (projeto, modelo, modo de permissão e a `DescricaoDoChat` tirada do
 frontend); o `Agente` diz como o Claude Code é chamado e escreve o prompt; o `Envelope` embrulha
 isso em `ai-memory run --new <workstream>`; `agente::escreve_partida` grava o script; e o
-`Hospedeiro` roda o script num tmux ([decisoes/0012](decisoes/0012-agente-e-envelope.md)).
+`Hospedeiro` roda o script num tmux ou numa aba do herdr ([decisoes/0012](decisoes/0012-agente-e-envelope.md)).
 
 ## O caminho de uma mensagem
 
