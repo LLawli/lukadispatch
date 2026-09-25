@@ -102,7 +102,10 @@ impl Hospedeiro for HospedeiroFalso {
             "o hospedeiro recebeu script que não existe"
         );
         self.partidas.lock().unwrap().push(partida.clone());
-        let hospedagem = format!("ld-{}-{}", projeto.name, partida.session_id);
+        // Cada lançamento ganha uma hospedagem nova, como o terminal do herdr: quem relança
+        // tem de gravar a nova, senão a reconciliação procura pela velha.
+        let n = *self.lancadas.lock().unwrap();
+        let hospedagem = format!("ld-{}-{}@{n}", projeto.name, partida.session_id);
         self.vivas.lock().unwrap().insert(hospedagem.clone());
         Ok(Launched {
             session_id: partida.session_id.clone(),
@@ -1098,6 +1101,16 @@ async fn trocar_esforco_relanca_continuando_a_mesma_sessao() {
         [format!("mata:{TMUX}"), format!("lanca:{SESSAO}")],
         "o processo velho tem de morrer antes do novo subir"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn relancar_grava_a_hospedagem_nova_e_a_reconciliacao_nao_encerra() {
+    let c = cena().await;
+    c.trata(c.mensagem("63", "/effort muito", None)).await;
+    let s = c.app.store.get(SESSAO).unwrap().unwrap();
+    assert_eq!(s.hospedagem.as_deref(), Some("ld-proj-s1@1"));
+    assert_eq!(c.app.reconcile().await.unwrap(), 0);
+    assert!(c.app.store.get(SESSAO).unwrap().unwrap().ended_at.is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -496,6 +496,7 @@ impl App {
             })
             .await?;
 
+        self.store.set_hospedagem(session_id, &lancada.hospedagem)?;
         self.store
             .set_model(session_id, model_final.as_deref(), effort_final.as_deref())?;
         self.store.set_status(session_id, "iniciando")?;

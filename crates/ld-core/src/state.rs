@@ -349,6 +349,16 @@ impl Store {
         Ok(())
     }
 
+    /// Grava onde a sessão roda agora. Muda a cada relançamento em hospedeiros cujo nome não sai
+    /// só do id (o herdr), e a reconciliação procura a sessão pelo que está aqui.
+    pub fn set_hospedagem(&self, session_id: &str, hospedagem: &str) -> Result<()> {
+        self.conn().execute(
+            "UPDATE sessions SET hospedagem = ?2, updated_at = ?3 WHERE session_id = ?1",
+            params![session_id, hospedagem, agora()],
+        )?;
+        Ok(())
+    }
+
     pub fn set_permission_mode(&self, session_id: &str, modo: &str) -> Result<()> {
         self.conn().execute(
             "UPDATE sessions SET permission_mode = ?2, updated_at = ?3 WHERE session_id = ?1",
