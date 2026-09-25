@@ -1880,3 +1880,36 @@ async fn new_project_cria_o_repositorio_e_abre_a_sessao_nele() {
     );
     assert!(c.sessao_em(&pasta).is_some());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn o_cli_abre_na_branch_sem_perguntar_e_recusa_a_principal() {
+    let (c, repo) = cena_git().await;
+    let p = Project {
+        name: "repo".into(),
+        path: repo.to_string_lossy().into_owned(),
+        permission_mode: None,
+        model: None,
+        effort: None,
+    };
+    let e = ld_daemon::novo::abre_na_branch(&c.app, p.clone(), "master", false)
+        .await
+        .unwrap_err();
+    assert!(format!("{e:#}").contains("principal"), "{e:#}");
+
+    ld_daemon::novo::abre_na_branch(&c.app, p.clone(), "cli", false)
+        .await
+        .unwrap();
+    let w = c
+        .app
+        .store
+        .worktree_da_branch(&p.path, "cli")
+        .unwrap()
+        .unwrap();
+    assert!(c.sessao_em(Path::new(&w.caminho)).is_some());
+    assert!(
+        ld_daemon::novo::abre_na_branch(&c.app, p, "cli", false)
+            .await
+            .is_err(),
+        "a branch com sessão aberta não ganha outra"
+    );
+}

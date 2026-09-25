@@ -681,6 +681,64 @@ pub async fn escolhe_retomada(app: &Arc<App>, p: Project) -> anyhow::Result<()> 
     .await
 }
 
+/// `lukadispatch new <projeto> --branch <b>`: o mesmo que `/new <projeto> <b>`, sem perguntar
+/// nada. A branch principal é recusada (não há a quem perguntar o nome da nova), e a que não
+/// existe nasce dela.
+pub async fn abre_na_branch(
+    app: &Arc<App>,
+    p: Project,
+    branch: &str,
+    continuar: bool,
+) -> anyhow::Result<()> {
+    let raiz = PathBuf::from(&p.path);
+    if !worktree::tem_commit(&raiz).await {
+        anyhow::bail!("{} não é um repositório git com commit", p.name);
+    }
+    let principal = worktree::principal(&raiz).await;
+    if principal.as_deref() == Some(branch) {
+        anyhow::bail!(
+            "{branch} é a branch principal, e ela não abre direto: passe o nome de uma branch nova"
+        );
+    }
+    if let Some(w) = app.store.worktree_da_branch(&p.path, branch)?
+        && app.store.live_by_cwd(&w.caminho, "")?.is_some()
+    {
+        anyhow::bail!("já há uma sessão aberta em {branch}");
+    }
+    let base = if worktree::existe_branch(&raiz, branch).await {
+        None
+    } else {
+        if !worktree::nome_valido(&raiz, branch).await {
+            anyhow::bail!("{branch} não serve para nome de branch");
+        }
+        principal
+    };
+    let w = garante_worktree(app, &p, branch, base.as_deref()).await?;
+    let retomar = continuar
+        .then(|| app.agente.ultima_sessao(&w.caminho))
+        .flatten()
+        .filter(|a| {
+            app.store
+                .get(&a.session_id)
+                .ok()
+                .flatten()
+                .is_none_or(|s| s.ended_at.is_some())
+        })
+        .map(|a| a.session_id);
+    let na_worktree = Project {
+        path: w.caminho.clone(),
+        ..p
+    };
+    app.create_session(
+        &na_worktree,
+        na_worktree.model.as_deref(),
+        na_worktree.effort.as_deref(),
+        retomar.as_deref(),
+    )
+    .await?;
+    Ok(())
+}
+
 /// Um nome livre para branch nova: `ld/<data>-<hora>`, com sufixo se já existir.
 async fn nome_gerado(raiz: &Path) -> String {
     let agora =

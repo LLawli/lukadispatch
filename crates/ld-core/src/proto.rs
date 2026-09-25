@@ -98,6 +98,10 @@ pub enum Request {
         /// Continuar a última conversa daquele projeto em vez de começar do zero.
         #[serde(default)]
         resume_last: bool,
+        /// Abrir na worktree desta branch, criando a branch a partir da principal se ela não
+        /// existir. Sem ela, a sessão abre na pasta do projeto.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
     },
     Kill {
         session_id: String,

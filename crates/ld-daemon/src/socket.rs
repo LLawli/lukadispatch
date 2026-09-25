@@ -254,6 +254,7 @@ async fn responde(app: &Arc<App>, req: Request) -> Response {
         Request::NewSession {
             project,
             resume_last,
+            branch,
         } => {
             let achado = app
                 .cfg
@@ -261,6 +262,13 @@ async fn responde(app: &Arc<App>, req: Request) -> Response {
                 .into_iter()
                 .find(|p| p.name == project || p.path == project);
             match achado {
+                Some(p) if branch.is_some() => {
+                    let branch = branch.unwrap_or_default();
+                    match crate::novo::abre_na_branch(app, p, &branch, resume_last).await {
+                        Ok(()) => Response::Ok,
+                        Err(e) => erro(e),
+                    }
+                }
                 Some(p) => {
                     // A última conversa daquele diretório, quando houver e quando não estiver
                     // aberta em outro lugar.
