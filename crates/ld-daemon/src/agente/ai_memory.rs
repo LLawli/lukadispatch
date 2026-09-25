@@ -442,16 +442,21 @@ fn resultado_da_ferramenta(ferramenta: &str, r: &Value) -> Result<Value> {
 /// Os workstreams deste checkout têm um com este nome?
 async fn workstream_existe(cwd: &Path, nome: &str) -> Result<bool> {
     let saida = Command::new(PROGRAMA)
-        .args(["workstreams", "--json", "--limit", "500"])
+        // 100 é o teto que o ai-memory aceita; acima disso ele recusa o comando inteiro. Um
+        // checkout é uma branch, e ela não chega perto de 100 workstreams.
+        .args(["workstreams", "--json", "--limit", "100"])
         .current_dir(cwd)
         .output()
         .await
         .context("chamando ai-memory workstreams")?;
     if !saida.status.success() {
-        bail!(
-            "ai-memory workstreams: {}",
-            String::from_utf8_lossy(&saida.stderr).trim()
-        );
+        let erro = String::from_utf8_lossy(&saida.stderr);
+        // Projeto que o ai-memory ainda não viu não tem workstream: é a primeira sessão dele, e
+        // ele responde 404 em vez de lista vazia.
+        if erro.contains("not found in workspace") {
+            return Ok(false);
+        }
+        bail!("ai-memory workstreams: {}", erro.trim());
     }
     let lista: Value = serde_json::from_slice(&saida.stdout)
         .context("ai-memory workstreams respondeu fora de JSON")?;

@@ -277,3 +277,12 @@ async fn ponte_tira_e_devolve_handoffs_no_ai_memory_de_verdade() {
         .output()
         .await;
 }
+
+/// A lista de workstreams contra o ai-memory de verdade: o comando que o daemon monta tem de ser
+/// aceito por ele (um `--limit` fora da faixa derrubava a lista inteira).
+#[tokio::test]
+#[ignore = "chama o ai-memory desta máquina"]
+async fn lista_de_workstreams_aceita_pelo_ai_memory_de_verdade() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(!workstream_existe(dir.path(), "nao-existe").await.unwrap());
+}
