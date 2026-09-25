@@ -1,4 +1,5 @@
-//! Estado persistente: sessões, fila de mensagens e um par chave-valor para o painel.
+//! Estado persistente: sessões, fila de mensagens, as worktrees que o bot abriu e um par
+//! chave-valor para o painel.
 //!
 //! É SQLite porque o daemon reinicia (atualização, reboot, `systemctl restart`) e o vínculo
 //! sessão <-> tópico não pode morrer junto: um tópico órfão no Telegram é lixo que só dá para
@@ -23,6 +24,24 @@ pub struct Guardada {
     pub from: String,
     pub at: i64,
     pub files: Vec<String>,
+}
+
+/// Uma git worktree que o bot abriu para uma branch de um projeto.
+///
+/// O git já sabe quais worktrees existem; o que só o bot sabe é quais são dele, de que projeto
+/// (pelo nome que o seletor mostra) e quando foram usadas por último, que é a ordem do `/new`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Worktree {
+    /// Onde a worktree mora. É o cwd das sessões dela, e por isso não muda nunca: o `--resume`
+    /// do agente acha a conversa pelo cwd.
+    pub caminho: String,
+    /// Nome do projeto raiz, o do seletor.
+    pub projeto: String,
+    /// Caminho do repositório principal.
+    pub raiz: String,
+    pub branch: String,
+    pub criada_em: i64,
+    pub usada_em: i64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -100,6 +119,16 @@ CREATE TABLE IF NOT EXISTS queue (
 );
 CREATE INDEX IF NOT EXISTS queue_por_sessao ON queue(session_id, id);
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS worktrees (
+    caminho   TEXT PRIMARY KEY,
+    projeto   TEXT NOT NULL,
+    raiz      TEXT NOT NULL,
+    branch    TEXT NOT NULL,
+    criada_em INTEGER NOT NULL,
+    usada_em  INTEGER NOT NULL
+);
+-- O git não deixa a mesma branch em duas worktrees; o banco repete a regra.
+CREATE UNIQUE INDEX IF NOT EXISTS worktrees_por_branch ON worktrees(raiz, branch);
 "#;
 
 /// Colunas acrescentadas depois que bancos já existiam por aí.
@@ -524,6 +553,60 @@ impl Store {
         Ok(achou.is_some())
     }
 
+    /// Grava a worktree, ou marca que ela foi usada agora se já existia.
+    pub fn registra_worktree(&self, w: &Worktree) -> Result<()> {
+        let agora = agora();
+        self.conn().execute(
+            "INSERT INTO worktrees (caminho, projeto, raiz, branch, criada_em, usada_em)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+             ON CONFLICT(caminho) DO UPDATE SET usada_em = ?5",
+            params![w.caminho, w.projeto, w.raiz, w.branch, agora],
+        )?;
+        Ok(())
+    }
+
+    /// A worktree de uma branch do repositório `raiz`.
+    pub fn worktree_da_branch(&self, raiz: &str, branch: &str) -> Result<Option<Worktree>> {
+        let c = self.conn();
+        Ok(c.query_row(
+            "SELECT caminho, projeto, raiz, branch, criada_em, usada_em
+             FROM worktrees WHERE raiz = ?1 AND branch = ?2",
+            params![raiz, branch],
+            linha_para_worktree,
+        )
+        .optional()?)
+    }
+
+    /// A worktree que mora neste caminho: é como uma sessão, pelo cwd, sabe que roda numa.
+    pub fn worktree_em(&self, caminho: &str) -> Result<Option<Worktree>> {
+        let c = self.conn();
+        Ok(c.query_row(
+            "SELECT caminho, projeto, raiz, branch, criada_em, usada_em
+             FROM worktrees WHERE caminho = ?1",
+            [caminho],
+            linha_para_worktree,
+        )
+        .optional()?)
+    }
+
+    /// As worktrees de um repositório, a usada mais recentemente primeiro.
+    pub fn worktrees_de(&self, raiz: &str) -> Result<Vec<Worktree>> {
+        let c = self.conn();
+        let mut stmt = c.prepare(
+            "SELECT caminho, projeto, raiz, branch, criada_em, usada_em
+             FROM worktrees WHERE raiz = ?1 ORDER BY usada_em DESC, branch",
+        )?;
+        let linhas = stmt.query_map([raiz], linha_para_worktree)?;
+        Ok(linhas.flatten().collect())
+    }
+
+    /// Esquece a worktree. Chamado depois de ela sair do disco, ou quando o disco já não a tem.
+    pub fn esquece_worktree(&self, caminho: &str) -> Result<()> {
+        self.conn()
+            .execute("DELETE FROM worktrees WHERE caminho = ?1", [caminho])?;
+        Ok(())
+    }
+
     pub fn kv_get(&self, key: &str) -> Result<Option<String>> {
         let c = self.conn();
         Ok(
@@ -572,6 +655,17 @@ fn linha_para_sessao(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
         permission_mode: row.get(10)?,
         created_at: row.get(11)?,
         ended_at: row.get(12)?,
+    })
+}
+
+fn linha_para_worktree(row: &rusqlite::Row<'_>) -> rusqlite::Result<Worktree> {
+    Ok(Worktree {
+        caminho: row.get(0)?,
+        projeto: row.get(1)?,
+        raiz: row.get(2)?,
+        branch: row.get(3)?,
+        criada_em: row.get(4)?,
+        usada_em: row.get(5)?,
     })
 }
 
@@ -822,3 +916,7 @@ mod tests {
 #[cfg(test)]
 #[path = "state_canal_testes.rs"]
 mod canal_testes;
+
+#[cfg(test)]
+#[path = "state_worktree_testes.rs"]
+mod worktree_testes;
