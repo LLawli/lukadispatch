@@ -46,6 +46,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-targets --locked
 
+  # A release sai com daemon, CLI e proxy estáticos (musl). Uma dependência nova que puxe
+  # OpenSSL ou linke a glibc quebraria isso só na hora de soltar a versão; aqui quebra no PR.
+  musl:
+    name: build estático (musl)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          cargo build --release --locked --target x86_64-unknown-linux-musl -p ld-daemon -p ld-cli -p ld-mcp
+          for b in lukadispatchd lukadispatch lukadispatch-mcp; do
+            file -b "target/x86_64-unknown-linux-musl/release/$b" | grep -q static \
+              || { echo "::error::$b não saiu estático"; exit 1; }
+          done
+
   audit:
     name: cargo audit
     runs-on: ubuntu-24.04
