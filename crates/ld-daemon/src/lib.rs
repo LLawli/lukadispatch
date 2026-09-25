@@ -19,3 +19,4 @@ pub mod setup;
 pub mod socket;
 pub mod status;
 pub mod transcritor;
+pub mod worktree;
