@@ -14,7 +14,8 @@ versão para as notas do GitHub Release, então escreva para quem vai decidir se
 - O `/new` pergunta a pasta, o projeto e a branch, e se continua a conversa anterior daquela
   branch. A branch principal nunca abre direto: escolhê-la pede o nome de uma branch nova, digitado
   ou gerado. Branch que já tem sessão aberta aponta o canal dela.
-- `/new <projeto> <branch>` abre direto na branch, criando-a se não existir.
+- `/new <projeto> <branch>` abre direto na branch, criando-a se não existir. No terminal, o mesmo
+  é `lukadispatch new <projeto> --branch <branch>`.
 - `/new new-project` cria um projeto numa das suas pastas (com `git init` e um commit vazio, sem
   assinatura) e abre a sessão nele.
 - `/kill` numa sessão de worktree pergunta se mantém a worktree para continuar depois ou apaga
