@@ -159,6 +159,10 @@ fn as_instrucoes_so_existem_em_worktree_e_trocam_o_handoff_pela_pagina() {
 fn reconhece_o_workstream_preso_pelo_que_o_painel_mostrou() {
     assert!(AiMemory.ocupada("Error: opening managed workstream\nCaused by: 409"));
     assert!(AiMemory.ocupada("workstream is already active: feat-login"));
+    // O que o espelho do tmux guarda de verdade: o fim da saída se perde quando o painel fecha.
+    assert!(AiMemory.ocupada(
+        "ai-memory: another launcher owns this workstream; waiting briefly in case it is finalizing"
+    ));
     assert!(!AiMemory.ocupada("Error: connection refused"));
     assert!(!SemMemoriaDeTeste.ocupada("workstream is already active"));
 }

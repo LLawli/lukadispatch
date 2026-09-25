@@ -247,7 +247,11 @@ impl Memoria for AiMemory {
     }
 
     fn ocupada(&self, saida: &str) -> bool {
-        saida.contains("workstream is already active")
+        // O erro final (o 409) costuma não chegar ao espelho do tmux: o painel fecha antes de a
+        // última saída ser lida. O que chega é o aviso de quando ele começa a esperar a trava, e
+        // a sessão que morreu depois dele morreu esperando.
+        saida.contains("another launcher owns this workstream")
+            || saida.contains("workstream is already active")
             || (saida.contains("409") && saida.to_lowercase().contains("workstream"))
     }
 
