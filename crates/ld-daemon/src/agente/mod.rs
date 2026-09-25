@@ -119,7 +119,8 @@ pub trait Agente: Send + Sync + 'static {
 
     /// Deixa a máquina pronta na partida do daemon: os ganchos que o agente carrega nas
     /// sessões do bot, apontando para o `lukadispatch`. Reescrito a cada partida, para
-    /// atualizar o lukadispatch atualizar os ganchos das próximas sessões.
+    /// atualizar o lukadispatch atualizar os ganchos das próximas sessões. Os ganchos que o
+    /// usuário instalou na máquina inteira são conferidos também, mas nunca instalados aqui.
     fn prepara(&self) -> Result<()>;
 
     /// Antes de abrir sessão numa pasta: tira do caminho o que travaria a partida esperando uma

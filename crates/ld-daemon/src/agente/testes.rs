@@ -441,6 +441,53 @@ fn prepara_escreve_os_ganchos_apontando_para_o_cli() {
 }
 
 #[test]
+fn prepara_troca_o_binario_que_sumiu_na_telemetria_global() {
+    // O `install --global` grava o caminho do binário uma vez. Sem a partida conferir, um
+    // caminho que o upgrade apagou deixa todos os hooks da máquina falhando em silêncio.
+    let raiz = tempfile::tempdir().unwrap();
+    let global = raiz.path().join("claude").join("settings.json");
+    std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+    let mut s = serde_json::json!({ "theme": "dark" });
+    ld_core::hooks::merge_into(
+        &mut s,
+        &ld_core::hooks::telemetry_hooks("/nao/existe/Cellar/lukadispatch/0.2.0/bin/lukadispatch"),
+    );
+    std::fs::write(&global, s.to_string()).unwrap();
+
+    claude(raiz.path()).prepara().unwrap();
+
+    let texto = std::fs::read_to_string(&global).unwrap();
+    assert!(!texto.contains("/nao/existe"), "{texto}");
+    let depois: serde_json::Value = serde_json::from_str(&texto).unwrap();
+    assert!(ld_core::hooks::instalados(
+        &depois,
+        &ld_core::hooks::telemetry_hooks("/opt/ld/lukadispatch")
+    ));
+    assert_eq!(depois["theme"], "dark");
+}
+
+#[test]
+fn prepara_nao_instala_telemetria_que_ninguem_pediu() {
+    let raiz = tempfile::tempdir().unwrap();
+    claude(raiz.path()).prepara().unwrap();
+    assert!(!raiz.path().join("claude").join("settings.json").exists());
+}
+
+#[test]
+fn prepara_sobe_mesmo_com_o_settings_global_ilegivel() {
+    // O settings global é do usuário. Quebrado, ele é problema a avisar, não motivo para o
+    // daemon não subir, e nunca algo a sobrescrever.
+    let raiz = tempfile::tempdir().unwrap();
+    let global = raiz.path().join("claude").join("settings.json");
+    std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+    std::fs::write(&global, "{ quebrado").unwrap();
+
+    claude(raiz.path()).prepara().unwrap();
+
+    assert_eq!(std::fs::read_to_string(&global).unwrap(), "{ quebrado");
+}
+
+#[test]
 fn confia_marca_a_pasta_no_claude_json() {
     let raiz = tempfile::tempdir().unwrap();
     std::fs::write(raiz.path().join("claude.json"), "{}").unwrap();

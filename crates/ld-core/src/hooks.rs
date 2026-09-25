@@ -179,6 +179,117 @@ pub fn instalados(settings: &Value, nossos: &Value) -> bool {
     &depois == settings
 }
 
+/// O que a partida do daemon fez com a telemetria no settings do Claude Code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reconciliacao {
+    /// Nenhum hook nosso no settings. A telemetria da máquina inteira é opt-in
+    /// (`install --global`), e a partida não instala o que ninguém pediu.
+    NaoInstalada,
+    /// Já estava como o `install --global` deixaria.
+    EmDia,
+    /// Os hooks chamam outro `lukadispatch`, que existe e roda: outra instalação, ou um daemon
+    /// de build de desenvolvimento conferindo a do brew. Trocar seria sequestrar a instalação
+    /// que o usuário escolheu.
+    OutraInstalacao(String),
+    /// Regravada com o binário e os hooks desta versão; o anterior ficou no `.bak`.
+    Regravada,
+}
+
+/// Deixa a telemetria do settings do Claude Code como esta versão a instalaria, se ela já
+/// estiver instalada.
+///
+/// O `install --global` grava o caminho do binário uma vez, e nada mais o regrava: nem o
+/// `brew upgrade`, que apaga a pasta da versão anterior, nem o `install.sh`. Um caminho que
+/// sumiu deixa todos os hooks da máquina falhando em silêncio, porque são `async`. A partida do
+/// daemon é o ponto por onde toda atualização passa, então é aqui que se confere.
+pub fn reconcilia_telemetria(
+    caminho: &std::path::Path,
+    cli: &str,
+) -> anyhow::Result<Reconciliacao> {
+    use anyhow::Context;
+
+    let mut settings = le_settings(caminho)?;
+    let binarios = binarios_nossos(&settings);
+    if binarios.is_empty() {
+        return Ok(Reconciliacao::NaoInstalada);
+    }
+    let nossos = telemetry_hooks(cli);
+    if instalados(&settings, &nossos) {
+        return Ok(Reconciliacao::EmDia);
+    }
+    if let Some(outro) = binarios.into_iter().find(|b| b != cli && executavel(b)) {
+        return Ok(Reconciliacao::OutraInstalacao(outro));
+    }
+    merge_into(&mut settings, &nossos);
+    grava_settings(caminho, &settings)
+        .with_context(|| format!("regravando {}", caminho.display()))?;
+    Ok(Reconciliacao::Regravada)
+}
+
+/// Os binários que os nossos hooks chamam, sem repetição.
+fn binarios_nossos(settings: &Value) -> std::collections::BTreeSet<String> {
+    settings
+        .get("hooks")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|eventos| eventos.values())
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(|grupo| grupo.get("hooks").and_then(Value::as_array))
+        .flatten()
+        .filter(|h| e_nosso(h))
+        .filter_map(|h| h.get("command").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect()
+}
+
+/// O comando roda? Nome sem barra é procurado no `PATH`, como o Claude Code faria.
+fn executavel(comando: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let roda = |p: &std::path::Path| {
+        std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    };
+    if comando.contains('/') {
+        return roda(std::path::Path::new(comando));
+    }
+    std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|d| roda(&d.join(comando))))
+}
+
+/// Grava um settings do Claude Code com backup do que estava lá.
+///
+/// O settings é arquivo do usuário, com coisas que não são nossas. Se um bug nosso o corromper,
+/// o `.bak` é a diferença entre "restaura" e "reconfigura tudo de novo". A troca é por rename,
+/// porque o Claude Code também grava nesse arquivo e não pode ler um meio escrito, e o arquivo
+/// novo herda o modo do antigo: o do Claude Code é 0600, e o rename deixaria o do umask.
+pub fn grava_settings(caminho: &std::path::Path, v: &Value) -> std::io::Result<()> {
+    let pai = caminho
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    std::fs::create_dir_all(pai)?;
+    let modo = std::fs::metadata(caminho).ok().map(|m| m.permissions());
+    if modo.is_some() {
+        let _ = std::fs::copy(caminho, caminho.with_extension("json.bak"));
+    }
+    let temporario = caminho.with_extension("json.lukadispatch-novo");
+    let troca = || -> std::io::Result<()> {
+        std::fs::write(
+            &temporario,
+            format!("{}\n", serde_json::to_string_pretty(v)?),
+        )?;
+        if let Some(modo) = modo {
+            std::fs::set_permissions(&temporario, modo)?;
+        }
+        std::fs::rename(&temporario, caminho)
+    };
+    let r = troca();
+    if r.is_err() {
+        let _ = std::fs::remove_file(&temporario);
+    }
+    r
+}
+
 /// Lê um settings do Claude Code. Ausente é `{}`; presente e ilegível é erro.
 ///
 /// Nunca trate o ilegível como vazio: quem chama grava o resultado de volta, e o arquivo do
@@ -442,5 +553,165 @@ mod tests {
         assert!(s["hooks"]["SessionStart"].is_array());
         strip(&mut s);
         assert_eq!(s, json!({}), "e volta a ficar vazio");
+    }
+
+    // ------------------------------------------------------------ reconciliação na partida
+
+    /// Um `lukadispatch` de mentira que existe e é executável.
+    fn binario(dir: &std::path::Path, nome: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let pasta = dir.join(nome);
+        std::fs::create_dir_all(&pasta).unwrap();
+        let bin = pasta.join("lukadispatch");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin.to_string_lossy().into_owned()
+    }
+
+    /// Settings do usuário com a telemetria instalada por `cli`, gravado com modo 0600, como o
+    /// Claude Code grava o dele.
+    fn settings_com_telemetria(dir: &std::path::Path, cli: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let mut s = settings_do_usuario();
+        merge_into(&mut s, &telemetry_hooks(cli));
+        let caminho = dir.join("settings.json");
+        std::fs::write(&caminho, serde_json::to_string_pretty(&s).unwrap()).unwrap();
+        std::fs::set_permissions(&caminho, std::fs::Permissions::from_mode(0o600)).unwrap();
+        caminho
+    }
+
+    fn comandos_nossos(caminho: &std::path::Path) -> Vec<String> {
+        let s = le_settings(caminho).unwrap();
+        binarios_nossos(&s).into_iter().collect()
+    }
+
+    #[test]
+    fn sem_hook_nosso_a_partida_nao_instala_nada() {
+        // A telemetria da máquina inteira é opt-in: quem nunca rodou `install --global`, ou
+        // rodou `uninstall`, não pode ganhar hook por ter reiniciado o daemon.
+        let dir = tempfile::tempdir().unwrap();
+        let cli = binario(dir.path(), "atual");
+        let caminho = dir.path().join("settings.json");
+        let texto = serde_json::to_string_pretty(&settings_do_usuario()).unwrap();
+        std::fs::write(&caminho, &texto).unwrap();
+
+        assert_eq!(
+            reconcilia_telemetria(&caminho, &cli).unwrap(),
+            Reconciliacao::NaoInstalada
+        );
+        assert_eq!(std::fs::read_to_string(&caminho).unwrap(), texto);
+
+        let ausente = dir.path().join("nao-existe.json");
+        assert_eq!(
+            reconcilia_telemetria(&ausente, &cli).unwrap(),
+            Reconciliacao::NaoInstalada
+        );
+        assert!(!ausente.exists(), "settings ausente não pode ser criado");
+    }
+
+    #[test]
+    fn binario_que_sumiu_e_trocado_pelo_desta_versao() {
+        // O caso real: a 0.2.0 gravou o caminho da pasta da versão no Cellar, e o upgrade
+        // seguinte apagou a pasta. Todos os hooks da máquina falhavam em silêncio (são async).
+        let dir = tempfile::tempdir().unwrap();
+        let cli = binario(dir.path(), "atual");
+        let velho = "/nao/existe/Cellar/lukadispatch/0.2.0/bin/lukadispatch";
+        let caminho = settings_com_telemetria(dir.path(), velho);
+        let antes = std::fs::read_to_string(&caminho).unwrap();
+
+        assert_eq!(
+            reconcilia_telemetria(&caminho, &cli).unwrap(),
+            Reconciliacao::Regravada
+        );
+
+        assert_eq!(comandos_nossos(&caminho), vec![cli.clone()]);
+        let depois = le_settings(&caminho).unwrap();
+        assert!(instalados(&depois, &telemetry_hooks(&cli)));
+        assert_eq!(depois["permissions"]["defaultMode"], "auto");
+        let do_usuario = depois["hooks"]["PostToolUse"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|g| g["hooks"].as_array().unwrap())
+            .filter(|h| h["command"] == "/home/luka/.claude/bin/xclaudeusage")
+            .count();
+        assert_eq!(do_usuario, 1, "o hook do usuário continua lá, uma vez só");
+
+        let bak = dir.path().join("settings.json.bak");
+        assert_eq!(std::fs::read_to_string(&bak).unwrap(), antes);
+
+        use std::os::unix::fs::PermissionsExt;
+        let modo = std::fs::metadata(&caminho).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            modo, 0o600,
+            "o settings do Claude Code não pode ficar legível a todos"
+        );
+    }
+
+    #[test]
+    fn em_dia_nao_regrava_nem_faz_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = binario(dir.path(), "atual");
+        let caminho = settings_com_telemetria(dir.path(), &cli);
+        let antes = std::fs::read_to_string(&caminho).unwrap();
+
+        assert_eq!(
+            reconcilia_telemetria(&caminho, &cli).unwrap(),
+            Reconciliacao::EmDia
+        );
+        assert_eq!(std::fs::read_to_string(&caminho).unwrap(), antes);
+        assert!(!dir.path().join("settings.json.bak").exists());
+    }
+
+    #[test]
+    fn outra_instalacao_que_funciona_fica_como_esta() {
+        // Um daemon de build de desenvolvimento (target/debug) não pode sequestrar os hooks da
+        // instalação do brew, que existe e roda.
+        let dir = tempfile::tempdir().unwrap();
+        let instalado = binario(dir.path(), "brew");
+        let dev = binario(dir.path(), "target-debug");
+        let caminho = settings_com_telemetria(dir.path(), &instalado);
+        let antes = std::fs::read_to_string(&caminho).unwrap();
+
+        assert_eq!(
+            reconcilia_telemetria(&caminho, &dev).unwrap(),
+            Reconciliacao::OutraInstalacao(instalado)
+        );
+        assert_eq!(std::fs::read_to_string(&caminho).unwrap(), antes);
+    }
+
+    #[test]
+    fn mesmo_binario_com_conjunto_antigo_ganha_os_hooks_novos() {
+        // Uma versão nova que passa a ouvir um evento (o `PostModelSwitch` entrou assim) tem de
+        // chegar às máquinas que já tinham a telemetria.
+        let dir = tempfile::tempdir().unwrap();
+        let cli = binario(dir.path(), "atual");
+        let caminho = settings_com_telemetria(dir.path(), &cli);
+        let mut s = le_settings(&caminho).unwrap();
+        s["hooks"]
+            .as_object_mut()
+            .unwrap()
+            .remove("PostModelSwitch");
+        std::fs::write(&caminho, serde_json::to_string_pretty(&s).unwrap()).unwrap();
+
+        assert_eq!(
+            reconcilia_telemetria(&caminho, &cli).unwrap(),
+            Reconciliacao::Regravada
+        );
+        assert!(le_settings(&caminho).unwrap()["hooks"]["PostModelSwitch"].is_array());
+    }
+
+    #[test]
+    fn settings_ilegivel_e_erro_e_fica_intocado() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = binario(dir.path(), "atual");
+        let caminho = dir.path().join("settings.json");
+        std::fs::write(&caminho, "{\"hooks\": {},}").unwrap();
+
+        assert!(reconcilia_telemetria(&caminho, &cli).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&caminho).unwrap(),
+            "{\"hooks\": {},}"
+        );
     }
 }
