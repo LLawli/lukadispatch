@@ -111,12 +111,17 @@ pub struct App {
     /// Padrão `paths::state_dir().join("sessions")`; um teste troca por um tempdir com
     /// [`App::com_raiz_sessoes`]. Cada sessão vive em `raiz_sessoes/<id>/`.
     pub raiz_sessoes: PathBuf,
+    /// Raiz de todas as worktrees das sessões. Padrão [`crate::worktree::base`]; um teste troca
+    /// por um tempdir com [`App::com_raiz_worktrees`].
+    pub raiz_worktrees: PathBuf,
     pub hub: Hub,
     pub status: StatusBoard,
     pub cards: Cards,
     /// Transcrições esperando seu aval antes de virarem mensagem para a sessão.
     pub confirmacoes: crate::confirmacao::Confirmacoes,
     pub panel: Panel,
+    /// As escolhas em aberto do `/new` e do `/kill`.
+    pub novo: crate::novo::Estado,
     /// Último aviso de ociosidade ("Claude is waiting for your input") por sessão.
     ///
     /// Ele é útil quando chega, e vira lixo assim que você responde: some na próxima mensagem
@@ -172,11 +177,13 @@ impl App {
             hospedeiro: portas.hospedeiro,
             raiz_arquivos: paths::arquivos_base(),
             raiz_sessoes: paths::state_dir().join("sessions"),
+            raiz_worktrees: crate::worktree::base(),
             hub: Hub::new(),
             status: StatusBoard::new(),
             cards: Cards::new(),
             confirmacoes: Default::default(),
             panel,
+            novo: Default::default(),
             avisos: Arc::new(Mutex::new(HashMap::new())),
             relancando: Mutex::new(HashMap::new()),
             reconciliando: tokio::sync::Mutex::new(()),
@@ -196,6 +203,12 @@ impl App {
     /// Troca a espera entre o fim de um processo por fora e a reconciliação que ele agenda.
     pub fn com_espera_depois_do_fim(mut self, espera: std::time::Duration) -> Self {
         self.espera_depois_do_fim = espera;
+        self
+    }
+
+    /// Troca a raiz das worktrees por outra (um tempdir de teste, tipicamente).
+    pub fn com_raiz_worktrees(mut self, raiz: PathBuf) -> Self {
+        self.raiz_worktrees = raiz;
         self
     }
 

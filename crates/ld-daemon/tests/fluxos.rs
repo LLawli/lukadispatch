@@ -344,10 +344,14 @@ fn luka() -> Autor {
 }
 
 async fn cena_com(limites: Limites) -> Cena {
-    cena_montada(limites, Arc::new(SemMemoria)).await
+    cena_montada(limites, Arc::new(SemMemoria), |_, _| {}).await
 }
 
-async fn cena_montada(limites: Limites, memoria: Arc<dyn ld_daemon::agente::Memoria>) -> Cena {
+async fn cena_montada(
+    limites: Limites,
+    memoria: Arc<dyn ld_daemon::agente::Memoria>,
+    ajusta: impl FnOnce(&mut Config, &Path),
+) -> Cena {
     let fe = Memoria::com_limites(limites);
     let canal = fe.cria_canal("proj").await.unwrap();
     fe.limpa_registro();
@@ -390,6 +394,8 @@ async fn cena_montada(limites: Limites, memoria: Arc<dyn ld_daemon::agente::Memo
         },
         ..Config::default()
     };
+    let mut cfg = cfg;
+    ajusta(&mut cfg, raiz.path());
     let app = App::new(
         cfg,
         store,
@@ -405,7 +411,8 @@ async fn cena_montada(limites: Limites, memoria: Arc<dyn ld_daemon::agente::Memo
     .com_raiz_arquivos(raiz.path().join("arquivos"))
     .com_raiz_sessoes(raiz.path().join("sessoes"))
     .com_espera_depois_do_fim(Duration::from_millis(50))
-    .com_espera_da_memoria(Duration::from_secs(100));
+    .com_espera_da_memoria(Duration::from_secs(100))
+    .com_raiz_worktrees(raiz.path().join("wt"));
 
     Cena {
         app: Arc::new(app),
@@ -1429,7 +1436,7 @@ impl ld_daemon::agente::Memoria for MemoriaFalsa {
 /// Uma cena com a memória falsa e um projeto numa worktree da branch `feat`.
 async fn cena_de_worktree() -> (Cena, Arc<MemoriaFalsa>, Project) {
     let memoria = Arc::new(MemoriaFalsa::default());
-    let c = cena_montada(Limites::default(), memoria.clone()).await;
+    let c = cena_montada(Limites::default(), memoria.clone(), |_, _| {}).await;
     let caminho = c.raiz.path().join("wt/outro/feat");
     std::fs::create_dir_all(&caminho).unwrap();
     let caminho = caminho.to_string_lossy().into_owned();
@@ -1585,4 +1592,291 @@ async fn relancar_pede_ao_processo_que_saia_antes_de_derrubar_o_painel() {
             .any(|e| e.starts_with("mata:")),
         "o hospedeiro ainda derruba o painel depois"
     );
+}
+
+// ------------------------------------------------------------------ /new com worktree
+
+/// Uma cena com um repositório git de verdade, `repo`, fixado no config, e uma raiz de projetos
+/// vazia (`projetos/`) para o `/new new-project`.
+async fn cena_git() -> (Cena, PathBuf) {
+    // O commit inicial do projeto novo precisa de identidade, e a máquina de CI não tem uma.
+    // SAFETY: todo teste que lê estas variáveis quer o mesmo valor.
+    unsafe {
+        for (k, v) in [
+            ("GIT_AUTHOR_NAME", "Teste"),
+            ("GIT_AUTHOR_EMAIL", "teste@exemplo"),
+            ("GIT_COMMITTER_NAME", "Teste"),
+            ("GIT_COMMITTER_EMAIL", "teste@exemplo"),
+        ] {
+            std::env::set_var(k, v);
+        }
+    }
+    let mut repo = PathBuf::new();
+    let c = cena_montada(Limites::default(), Arc::new(SemMemoria), |cfg, raiz| {
+        repo = raiz.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            &["init", "--quiet", "--initial-branch=master"][..],
+            &["config", "commit.gpgsign", "false"],
+            &["commit", "--quiet", "--allow-empty", "-m", "um"],
+        ] {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        }
+        std::fs::create_dir_all(raiz.join("projetos")).unwrap();
+        cfg.projects = vec![Project {
+            name: "repo".into(),
+            path: repo.to_string_lossy().into_owned(),
+            permission_mode: None,
+            model: None,
+            effort: None,
+        }];
+        cfg.scan.roots = vec![raiz.join("projetos").to_string_lossy().into_owned()];
+    })
+    .await;
+    (c, repo)
+}
+
+impl Cena {
+    async fn no_principal(&self, texto: &str) {
+        self.trata(Evento::Mensagem {
+            autor: luka(),
+            canal: None,
+            msg: MsgId::new(format!("p-{}", self.fe.chamadas().len())),
+            texto: texto.into(),
+            responde_a: None,
+            anexos: vec![],
+        })
+        .await;
+    }
+
+    /// Toca o botão cujo rótulo contém `rotulo`, na última mensagem que o trouxe.
+    async fn toca(&self, rotulo: &str) {
+        let (msg, dado) = self
+            .fe
+            .chamadas()
+            .into_iter()
+            .rev()
+            .find_map(|c| match c {
+                Chamada::Envia { botoes, msg, .. } => botoes
+                    .into_iter()
+                    .find(|b| b.rotulo.contains(rotulo))
+                    .map(|b| (msg, b.dado)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("nenhum botão com {rotulo:?}: {:?}", self.fe.textos()));
+        self.trata(Evento::Toque {
+            autor: luka(),
+            canal: None,
+            msg: Some(msg),
+            dado,
+        })
+        .await;
+    }
+
+    fn falou(&self, trecho: &str) -> bool {
+        self.fe.textos().iter().any(|t| t.contains(trecho))
+    }
+
+    /// A sessão viva que roda em `cwd`.
+    fn sessao_em(&self, cwd: &Path) -> Option<Session> {
+        self.app
+            .store
+            .live()
+            .unwrap()
+            .into_iter()
+            .find(|s| Path::new(&s.cwd) == cwd)
+    }
+}
+
+fn existe_branch(repo: &Path, nome: &str) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{nome}"),
+        ])
+        .status()
+        .unwrap()
+        .success()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn new_com_branch_que_nao_existe_cria_a_worktree_e_abre_nela() {
+    let (c, repo) = cena_git().await;
+    c.no_principal("/new repo feat").await;
+
+    let w = c
+        .app
+        .store
+        .worktree_da_branch(&repo.to_string_lossy(), "feat")
+        .unwrap()
+        .expect("a worktree não foi registrada");
+    assert!(Path::new(&w.caminho).join(".git").is_file());
+    assert!(existe_branch(&repo, "feat"));
+    assert!(
+        c.sessao_em(Path::new(&w.caminho)).is_some(),
+        "{:?}",
+        c.fe.textos()
+    );
+    assert!(c.fe.chamadas().iter().any(|ch| matches!(ch,
+        Chamada::CriaCanal { nome, .. } if nome == "repo · feat")));
+
+    // A mesma branch de novo não abre outra sessão: aponta a que existe.
+    c.no_principal("/new repo feat").await;
+    assert_eq!(*c.hospedeiro.lancadas.lock().unwrap(), 1);
+    assert!(c.falou("Já há uma sessão aberta"), "{:?}", c.fe.textos());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_principal_nunca_abre_direto_e_o_nome_digitado_vira_a_branch() {
+    let (c, repo) = cena_git().await;
+    c.no_principal("/new repo master").await;
+    assert!(c.falou("nome da branch nova"), "{:?}", c.fe.textos());
+    assert_eq!(*c.hospedeiro.lancadas.lock().unwrap(), 0);
+
+    c.no_principal("com espaço").await;
+    assert!(c.falou("não serve para nome de branch"));
+    c.no_principal("fix/x").await;
+
+    let w = c
+        .app
+        .store
+        .worktree_da_branch(&repo.to_string_lossy(), "fix/x")
+        .unwrap()
+        .expect("a branch nova não virou worktree");
+    assert!(c.sessao_em(Path::new(&w.caminho)).is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn o_seletor_leva_da_pasta_a_branch() {
+    let (c, repo) = cena_git().await;
+    c.no_principal("/new").await;
+    // Só a pasta dos fixados tem projeto: ela é pulada, e o seletor já mostra os projetos.
+    c.toca("repo").await;
+    c.toca("Nova branch a partir de master").await;
+    c.toca("Gerar um nome").await;
+    let w = c.app.store.worktrees_de(&repo.to_string_lossy()).unwrap();
+    assert_eq!(w.len(), 1);
+    assert!(w[0].branch.starts_with("ld/"), "{}", w[0].branch);
+    assert!(c.sessao_em(Path::new(&w[0].caminho)).is_some());
+}
+
+/// Abre `feat` e devolve a worktree e o canal da sessão.
+async fn abre_feat(c: &Cena, repo: &Path) -> (Worktree, Canal) {
+    c.no_principal("/new repo feat").await;
+    let w = c
+        .app
+        .store
+        .worktree_da_branch(&repo.to_string_lossy(), "feat")
+        .unwrap()
+        .unwrap();
+    let s = c.sessao_em(Path::new(&w.caminho)).unwrap();
+    (w, Canal::new(s.canal_id.unwrap()))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn kill_em_worktree_limpa_pergunta_e_apaga_tudo() {
+    let (c, repo) = cena_git().await;
+    let (w, canal) = abre_feat(&c, &repo).await;
+    c.trata(Evento::Mensagem {
+        autor: luka(),
+        canal: Some(canal),
+        msg: MsgId::new("k1"),
+        texto: "/kill".into(),
+        responde_a: None,
+        anexos: vec![],
+    })
+    .await;
+    assert!(
+        c.sessao_em(Path::new(&w.caminho)).is_some(),
+        "pergunta antes de fechar"
+    );
+
+    c.toca("apagar worktree e branch").await;
+    assert!(c.sessao_em(Path::new(&w.caminho)).is_none());
+    assert!(!Path::new(&w.caminho).exists());
+    assert!(!existe_branch(&repo, "feat"));
+    assert!(c.app.store.worktree_em(&w.caminho).unwrap().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn trabalho_nao_salvo_pede_confirmacao_antes_de_apagar() {
+    let (c, repo) = cena_git().await;
+    let (w, canal) = abre_feat(&c, &repo).await;
+    std::fs::write(Path::new(&w.caminho).join("rascunho.txt"), "x").unwrap();
+    c.trata(Evento::Mensagem {
+        autor: luka(),
+        canal: Some(canal),
+        msg: MsgId::new("k1"),
+        texto: "/kill".into(),
+        responde_a: None,
+        anexos: vec![],
+    })
+    .await;
+    c.toca("apagar worktree e branch").await;
+    assert!(
+        c.falou("1 arquivo(s) mudado(s) sem commit"),
+        "{:?}",
+        c.fe.textos()
+    );
+    assert!(Path::new(&w.caminho).exists(), "ainda não apagou");
+
+    c.toca("Apagar mesmo assim").await;
+    assert!(!Path::new(&w.caminho).exists());
+    assert!(!existe_branch(&repo, "feat"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn manter_fecha_a_sessao_e_a_worktree_volta_no_new() {
+    let (c, repo) = cena_git().await;
+    let (w, canal) = abre_feat(&c, &repo).await;
+    c.trata(Evento::Mensagem {
+        autor: luka(),
+        canal: Some(canal),
+        msg: MsgId::new("k1"),
+        texto: "/kill".into(),
+        responde_a: None,
+        anexos: vec![],
+    })
+    .await;
+    c.toca("manter a worktree").await;
+    assert!(c.sessao_em(Path::new(&w.caminho)).is_none());
+    assert!(Path::new(&w.caminho).exists());
+
+    // Reabrir cai na mesma pasta: é por ela que o agente acha a conversa anterior.
+    c.no_principal("/new repo feat").await;
+    assert!(c.sessao_em(Path::new(&w.caminho)).is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn new_project_cria_o_repositorio_e_abre_a_sessao_nele() {
+    let (c, _) = cena_git().await;
+    c.no_principal("/new new-project").await;
+    c.toca("projetos").await;
+    c.no_principal("novo-app").await;
+
+    let pasta = c.raiz.path().join("projetos/novo-app");
+    assert!(pasta.join(".git").is_dir(), "{:?}", c.fe.textos());
+    assert!(
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&pasta)
+            .args(["rev-parse", "--verify", "HEAD"])
+            .output()
+            .unwrap()
+            .status
+            .success(),
+        "nasce com commit, senão não sai worktree dele"
+    );
+    assert!(c.sessao_em(&pasta).is_some());
 }

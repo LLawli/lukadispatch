@@ -12,6 +12,7 @@ pub mod confirmacao;
 pub mod divisor;
 pub mod frontend;
 pub mod hub;
+pub mod novo;
 pub mod panel;
 pub mod roteador;
 pub mod sessions;

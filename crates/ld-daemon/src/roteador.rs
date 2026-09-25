@@ -68,14 +68,9 @@ pub async fn trata(app: Arc<App>, ev: Evento) -> anyhow::Result<()> {
         Evento::Toque {
             canal, msg, dado, ..
         } => {
-            // Toque com dado `n:` no canal principal já cumpriu o papel ao ser tocado: some na
-            // hora. O card de pergunta e o de permissão NÃO entram aqui: quem os apaga é o
-            // `cleanup_ask`, e só depois que a resposta chega ao Claude.
-            if let Some(m) = &msg
-                && dado.starts_with("n:")
-            {
-                app.frontend.apaga(m).await;
-            }
+            // O teclado do /new some ao ser tocado, e quem o apaga é o `novo`. O card de pergunta
+            // e o de permissão também não somem aqui: quem os apaga é o `cleanup_ask`, e só depois
+            // que a resposta chega ao Claude.
             botao(&app, &dado, canal.as_ref(), msg.as_ref()).await
         }
     }
@@ -152,9 +147,8 @@ async fn em_canal(
                     .await;
                 return Ok(());
             };
-            // O canal some junto, então não adianta avisar aqui dentro.
-            app.end_session(&s.session_id, true).await?;
-            Ok(())
+            // Numa worktree, pergunta o que fazer com ela; senão fecha, e o canal some junto.
+            crate::novo::kill(app, &s, Some(canal)).await
         }
         "/ls" | "/sessoes" => {
             let _ = app
@@ -607,52 +601,13 @@ async fn no_principal(app: &Arc<App>, texto: &str) -> anyhow::Result<()> {
 
     match comando {
         "/new" | "/nova" => {
-            let projetos = app.cfg.projects_available();
-            if projetos.is_empty() {
-                crate::frontend::responde_efemero(
-                    &app.frontend,
-                    None,
-                    "Nenhum projeto encontrado. Verifique <code>[scan] roots</code> ou adicione um <code>[[projects]]</code> no config.toml.",
-                    TTL_RESPOSTA,
-                )
-                .await;
-                return Ok(());
+            if resto.is_empty() {
+                return crate::novo::inicio(app).await;
             }
-            // Com argumento, abre direto; sem, mostra o seletor. Palavra que for nome de
-            // modelo ou nível de esforço sai do nome do projeto e vira flag.
-            if !resto.is_empty() {
-                let (alvo, model, effort) = separa_flags(app.agente.as_ref(), &resto);
-                let (model, effort) = (model.as_deref(), effort.as_deref());
-                match achar(&projetos, &alvo) {
-                    Some(p) => return escolhe_retomada(app, &p, model, effort).await,
-                    None => {
-                        let _ = app
-                            .frontend
-                            .envia(
-                                None,
-                                &format!("Não achei o projeto <b>{}</b>.", escapa(&alvo)),
-                                &[],
-                                None,
-                            )
-                            .await;
-                        return Ok(());
-                    }
-                }
-            }
-            let botoes: Vec<Botao> = projetos
-                .iter()
-                .take(40)
-                .enumerate()
-                .map(|(i, p)| Botao::new(p.name.clone(), format!("n:{i}")))
-                .collect();
-            if let Ok(id) = app
-                .frontend
-                .envia(None, "Abrir sessão em qual projeto?", &botoes, None)
-                .await
-            {
-                crate::frontend::efemera(app.frontend.clone(), id, TTL_TECLADO);
-            }
-            Ok(())
+            // Palavra que for nome de modelo ou nível de esforço sai do nome e vira flag.
+            let (alvo, model, effort) = separa_flags(app.agente.as_ref(), &resto);
+            let palavras: Vec<&str> = alvo.split_whitespace().collect();
+            crate::novo::direto(app, &palavras, model, effort).await
         }
         "/ls" | "/sessoes" => {
             // No canal principal a lista já é o painel: em vez de mandar uma cópia que viraria
@@ -672,20 +627,12 @@ async fn no_principal(app: &Arc<App>, texto: &str) -> anyhow::Result<()> {
                 return Ok(());
             };
             let achada = app
-                .summaries()?
+                .store
+                .live()?
                 .into_iter()
                 .find(|s| s.session_id.starts_with(alvo));
             match achada {
-                Some(s) => {
-                    app.end_session(&s.session_id, true).await?;
-                    crate::frontend::responde_efemero(
-                        &app.frontend,
-                        None,
-                        &format!("Fechei <b>{}</b>.", escapa(&s.project)),
-                        TTL_RESPOSTA,
-                    )
-                    .await;
-                }
+                Some(s) => crate::novo::kill(app, &s, None).await?,
                 None => {
                     crate::frontend::responde_efemero(
                         &app.frontend,
@@ -703,18 +650,21 @@ async fn no_principal(app: &Arc<App>, texto: &str) -> anyhow::Result<()> {
                 &app.frontend,
                 None,
                 "<b>lukadispatch</b>\n\n\
-                 /new: abre uma sessão (mostra os projetos)\n\
-                 /new &lt;projeto&gt; [opus|sonnet|fable] [high|max]: abre direto\n\
+                 /new: abre uma sessão (pasta, projeto, branch)\n\
+                 /new &lt;projeto&gt; [branch] [opus|sonnet|fable] [high|max]: abre direto; branch que não existe é criada\n\
+                 /new new-project: cria um projeto e abre a sessão nele\n\
                  /ls: lista as sessões vivas\n\
                  /kill &lt;id&gt;: fecha uma sessão\n\n\
-                 Cada sessão vira um canal. Fale com ela lá dentro; /kill no canal fecha e apaga.\n\
+                 Cada sessão vira um canal, e cada branch roda na worktree dela. Fale com a sessão lá dentro; /kill no canal fecha (e pergunta o que fazer com a worktree).\n\
                  Dentro do canal: /model, /effort e /mode reiniciam a sessão com o contexto inteiro.",
                 TTL_TECLADO,
             )
             .await;
             Ok(())
         }
-        // Texto solto no canal principal: ele não é lugar de conversa, e some junto com o aviso.
+        // Texto solto no canal principal: a resposta a uma pergunta do /new, ou nada. O canal
+        // não é lugar de conversa, e o texto some junto com o aviso.
+        _ if !comando.starts_with('/') && crate::novo::texto(app, texto).await? => Ok(()),
         _ => {
             crate::frontend::responde_efemero(
                 &app.frontend,
@@ -771,44 +721,9 @@ async fn botao(
         return r;
     }
 
-    if let Some(idx) = dado.strip_prefix("n:") {
-        // O dado do botão é índice, e não caminho: o teto de bytes de um `dado` não deixaria
-        // caber caminho de projeto.
-        let projetos = app.cfg.projects_available();
-        let Some(p) = idx.parse::<usize>().ok().and_then(|i| projetos.get(i)) else {
-            let _ = app
-                .frontend
-                .envia(None, "Essa lista já mudou. Mande /new de novo.", &[], None)
-                .await;
-            return Ok(());
-        };
-        if let Some(msg) = msg {
-            app.frontend.apaga(msg).await;
-        }
-        return escolhe_retomada(app, p, None, None).await;
-    }
-
-    // Segunda etapa do /new: continuar a conversa anterior, ou começar do zero.
-    if let Some(resto) = dado.strip_prefix("c:") {
-        let (idx, sessao) = resto.split_once(':').unwrap_or((resto, ""));
-        let projetos = app.cfg.projects_available();
-        let Some(p) = idx.parse::<usize>().ok().and_then(|i| projetos.get(i)) else {
-            return Ok(());
-        };
-        if let Some(msg) = msg {
-            app.frontend.apaga(msg).await;
-        }
-        return abrir(app, p, None, None, Some(sessao)).await;
-    }
-    if let Some(idx) = dado.strip_prefix("z:") {
-        let projetos = app.cfg.projects_available();
-        let Some(p) = idx.parse::<usize>().ok().and_then(|i| projetos.get(i)) else {
-            return Ok(());
-        };
-        if let Some(msg) = msg {
-            app.frontend.apaga(msg).await;
-        }
-        return abrir(app, p, None, None, None).await;
+    // Etapas do /new e a pergunta do /kill.
+    if let Some(n) = dado.strip_prefix("e:") {
+        return crate::novo::toque(app, n, canal, msg).await;
     }
     // Card de pergunta ou de permissão.
     if dado.starts_with("a:") || dado.starts_with("p:") {
@@ -925,60 +840,7 @@ async fn troca(
     Ok(())
 }
 
-/// Pergunta se a sessão continua a conversa anterior daquele projeto ou começa do zero.
-///
-/// Só pergunta quando há o que continuar, e quando a conversa anterior não está aberta em outro
-/// lugar: retomar uma sessão que já está rodando geraria duas cópias da mesma conversa.
-async fn escolhe_retomada(
-    app: &Arc<App>,
-    p: &Project,
-    model: Option<&str>,
-    effort: Option<&str>,
-) -> anyhow::Result<()> {
-    let anterior = app.agente.ultima_sessao(&p.path);
-    let idx = app
-        .cfg
-        .projects_available()
-        .iter()
-        .position(|x| x.path == p.path);
-
-    match (anterior, idx) {
-        (Some(a), Some(idx))
-            if app
-                .store
-                .get(&a.session_id)
-                .ok()
-                .flatten()
-                .is_none_or(|s| s.ended_at.is_some()) =>
-        {
-            let botoes = vec![
-                Botao::new(
-                    format!("▶️ Continuar ({})", ha_quanto(a.quando)),
-                    format!("c:{idx}:{}", a.session_id),
-                ),
-                Botao::new("🆕 Começar do zero", format!("z:{idx}")),
-            ];
-            let _ = app
-                .frontend
-                .envia(
-                    None,
-                    &format!(
-                        "<b>{}</b> tem conversa anterior:\n<i>{}</i>",
-                        escapa(&p.name),
-                        escapa(&a.resumo)
-                    ),
-                    &botoes,
-                    None,
-                )
-                .await;
-            Ok(())
-        }
-        // Sem histórico (ou com a conversa anterior já aberta): não há escolha a fazer.
-        _ => abrir(app, p, model, effort, None).await,
-    }
-}
-
-fn ha_quanto(epoch: i64) -> String {
+pub(crate) fn ha_quanto(epoch: i64) -> String {
     let agora = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -993,7 +855,7 @@ fn ha_quanto(epoch: i64) -> String {
     format!("há {}d", s / 86400)
 }
 
-async fn abrir(
+pub(crate) async fn abrir(
     app: &Arc<App>,
     p: &Project,
     model: Option<&str>,
@@ -1046,7 +908,7 @@ fn separa_flags(
     (nome.join(" "), model, effort)
 }
 
-fn achar(projetos: &[Project], alvo: &str) -> Option<Project> {
+pub(crate) fn achar(projetos: &[Project], alvo: &str) -> Option<Project> {
     let alvo_baixo = alvo.to_lowercase();
     projetos
         .iter()
