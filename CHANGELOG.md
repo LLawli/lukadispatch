@@ -6,6 +6,14 @@ versão para as notas do GitHub Release, então escreva para quem vai decidir se
 
 ## [Unreleased]
 
+### Mudado
+
+- `brew install` e `brew upgrade` não compilam mais nada: a fórmula instala o mesmo tarball da
+  release que o `install.sh` e o mise usam.
+- Daemon, CLI e proxy MCP saem estáticos (musl) e rodam em qualquer Linux. Antes exigiam glibc
+  2.39, e não abriam, por exemplo, no Ubuntu 22.04 que a imagem oficial do Homebrew usa. Só a
+  janela de pergunta do PC continua usando a gtk4 do sistema.
+
 ## [0.2.2] - 2026-09-24
 
 ### Corrigido

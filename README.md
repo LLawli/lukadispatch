@@ -57,7 +57,7 @@ config no lugar, com backup. Rodar o `install.sh` de novo atualiza.
 Outros caminhos de instalação (depois de qualquer um deles, `lukadispatch setup`):
 
 ```bash
-brew install LLawli/tap/lukadispatch                 # Homebrew no Linux (compila do fonte)
+brew install LLawli/tap/lukadispatch                 # Homebrew no Linux
 mise use -g github:LLawli/lukadispatch               # mise
 cargo install --locked --git https://github.com/LLawli/lukadispatch ld-daemon ld-cli ld-ask ld-mcp
 ```
@@ -66,7 +66,8 @@ Ou baixe o `lukadispatch-linux-<arq>.tar.gz` da [página de releases](https://gi
 e rode o `install.sh --de .` que vem dentro dele.
 
 **Precisa ter:** [Claude Code](https://docs.claude.com/en/docs/claude-code) 2.1.274 ou mais
-novo, `tmux`, e gtk4 e libadwaita 1.5+ para a janela de pergunta no PC. O
+novo e `tmux`. O daemon e o CLI são estáticos e rodam em qualquer Linux; a janela de pergunta no
+PC usa a gtk4 e a libadwaita 1.5+ do sistema, e sem elas a pergunta segue só pelo chat. O
 [ai-memory](https://github.com/akitaonrails/ai-memory) é opcional: sem ele, o setup oferece rodar
 as sessões direto. Para dividir arquivos grandes: `7z` (ou `rar`) e `ffmpeg`. A transcrição de
 voz também precisa do `ffmpeg`; o motor em si o setup instala.
