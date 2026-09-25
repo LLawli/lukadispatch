@@ -23,8 +23,10 @@ pub struct Config {
     /// passa por cima disto e usa o frontend nulo.
     pub frontend: String,
     /// Onde cada sessão roda. Cada valor corresponde a uma implementação da trait `Hospedeiro`
-    /// do daemon; hoje existe `"tmux"`.
+    /// do daemon; hoje existem `"tmux"` e `"herdr"`.
     pub hospedeiro: String,
+    /// Opções do hospedeiro herdr, lidas só quando `hospedeiro = "herdr"`.
+    pub herdr: Herdr,
     /// Qual agente de código roda nas sessões, e dentro de que envelope.
     pub agente: Agente,
     pub telegram: Telegram,
@@ -71,6 +73,7 @@ impl Default for Config {
         Self {
             frontend: "telegram".into(),
             hospedeiro: "tmux".into(),
+            herdr: Herdr::default(),
             agente: Agente::default(),
             telegram: Telegram::default(),
             scan: Scan::default(),
@@ -97,6 +100,15 @@ impl Default for Config {
             usuario: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Herdr {
+    /// A sessão nomeada do herdr onde as sessões do bot sobem. Sem valor, é a sessão padrão (a
+    /// do `herdr` sem argumentos), e as sessões do bot aparecem ao lado das suas.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sessao: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -454,6 +466,11 @@ mod tests {
         assert_eq!(c.transcricao.motor, "processo");
         assert_eq!(c.arquivos.divisor, "7z");
         assert!(c.arquivos.cortar_video);
+        assert_eq!(c.hospedeiro, "tmux");
+        assert_eq!(
+            c.herdr.sessao, None,
+            "sem sessão nomeada, é a padrão do herdr"
+        );
 
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("config.toml");
@@ -461,6 +478,10 @@ mod tests {
             &p,
             r#"
 frontend = "whatsapp"
+hospedeiro = "herdr"
+
+[herdr]
+sessao = "bot"
 
 [agente]
 envelope = "nenhum"
@@ -485,6 +506,8 @@ cortar_video = false
         assert!(c.transcricao.ativa, "a chave que faltou mantém o padrão");
         assert_eq!(c.arquivos.divisor, "rar");
         assert!(!c.arquivos.cortar_video);
+        assert_eq!(c.hospedeiro, "herdr");
+        assert_eq!(c.herdr.sessao.as_deref(), Some("bot"));
     }
 
     #[test]

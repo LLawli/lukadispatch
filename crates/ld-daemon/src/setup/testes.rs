@@ -512,7 +512,7 @@ async fn a_conversa_inteira_termina_num_config_que_o_daemon_aceita() {
 
     // O que o daemon faz na partida com este config.
     crate::agente::da_config(&cfg).unwrap();
-    crate::sessions::da_config(&cfg.hospedeiro).unwrap();
+    crate::sessions::da_config(&cfg).unwrap();
     crate::transcritor::da_config(&cfg.transcricao).unwrap();
     crate::divisor::Divisores::da_config(&cfg.arquivos).unwrap();
 }

@@ -70,7 +70,7 @@ async fn main() -> Result<()> {
     );
 
     let divisores = Divisores::da_config(&cfg.arquivos)?;
-    let hospedeiro = sessions::da_config(&cfg.hospedeiro)?;
+    let hospedeiro = sessions::da_config(&cfg)?;
     info!(divisores = ?divisores.nomes(), "divisores configurados");
 
     info!(
