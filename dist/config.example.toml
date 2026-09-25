@@ -30,6 +30,10 @@ depth = 1
 
 # Peças trocáveis. Os valores abaixo são os padrões; docs/portas.md explica cada uma.
 # frontend = "telegram"
+# hospedeiro = "tmux"             # ou "herdr"; o setup escolhe o tmux se houver, senão o herdr
+#
+# [herdr]
+# sessao = "bot"                  # sessão nomeada do herdr; sem isto, a padrão, ao lado das suas
 #
 # [agente]
 # tipo = "claude-code"

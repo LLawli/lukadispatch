@@ -46,7 +46,18 @@ pub fn agente(nome: &str) -> Result<Box<dyn Peca>> {
 pub fn hospedeiro(nome: &str) -> Result<Box<dyn Peca>> {
     match nome {
         "tmux" => Ok(Box::new(Tmux)),
+        "herdr" => Ok(Box::new(Herdr)),
         outro => desconhecido("--session", outro, crate::sessions::HOSPEDEIROS),
+    }
+}
+
+/// O hospedeiro de um config novo, sem `--session`: o tmux se houver, senão o herdr. Só um dos
+/// dois é necessário. Sem nenhum, fica o tmux, e o passo dele avisa que falta um dos dois.
+pub fn hospedeiro_da_maquina(tem_programa: &dyn Fn(&str) -> bool) -> &'static str {
+    if !tem_programa("tmux") && tem_programa("herdr") {
+        "herdr"
+    } else {
+        "tmux"
     }
 }
 
@@ -183,12 +194,49 @@ impl Peca for Tmux {
         if !(r.tem_programa)("tmux") {
             tela.diz(
                 "Aviso: o tmux não está no PATH, e cada sessão roda dentro de um. Instale pelo \
-                 gerenciador de pacotes da sua distro.",
+                 gerenciador de pacotes da sua distro, ou use o herdr (setup --session herdr).",
             );
         } else {
             tela.diz("tmux: ok.");
         }
         r.poe(None, "hospedeiro", "tmux");
+        Ok(())
+    }
+}
+
+struct Herdr;
+
+#[async_trait(?Send)]
+impl Peca for Herdr {
+    fn nome(&self) -> &'static str {
+        "herdr"
+    }
+
+    async fn configura(&self, tela: &mut Tela<'_>, r: &mut Rascunho) -> Result<()> {
+        if !(r.tem_programa)("herdr") {
+            tela.diz(
+                "Aviso: o herdr não está no PATH, e cada sessão roda dentro dele. Instale por \
+                 https://herdr.dev, ou use o tmux (setup --session tmux).",
+            );
+        } else {
+            tela.diz("herdr: ok.");
+        }
+        // É o `script` que dá ao agente um terminal dentro do pane e guarda a saída da sessão,
+        // que é onde aparece o motivo de uma sessão que morre ao subir.
+        if !(r.tem_programa)("script") {
+            tela.diz(
+                "Aviso: falta o script (do util-linux), que o herdr usa para rodar cada sessão. \
+                 Instale pelo gerenciador de pacotes da sua distro.",
+            );
+        }
+        match r.atual.herdr.sessao.as_deref().filter(|s| !s.is_empty()) {
+            Some(s) => tela.diz(&format!("As sessões sobem na sessão \"{s}\" do herdr.")),
+            None => tela.diz(
+                "As sessões sobem na sessão padrão do herdr, ao lado das suas. Para separá-las, \
+                 ponha sessao = \"nome\" em [herdr] no config.",
+            ),
+        }
+        r.poe(None, "hospedeiro", "herdr");
         Ok(())
     }
 }
