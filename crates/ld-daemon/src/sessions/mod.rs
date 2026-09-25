@@ -316,7 +316,9 @@ impl Hospedeiro for Tmux {
                 "display-message",
                 "-p",
                 "-t",
-                &format!("={nome}"),
+                // `=nome` casa o nome exato, mas só vira alvo de pane com o `:` no fim: sem ele
+                // o tmux responde vazio, e com código de saída 0.
+                &format!("={nome}:"),
                 "#{pane_pid}",
             ])
             .output()
@@ -469,6 +471,22 @@ mod testes_hospedeiro {
             effort: None,
         };
         (partida, projeto)
+    }
+
+    #[tokio::test]
+    async fn tmux_diz_o_processo_que_o_script_virou() {
+        if !tem_tmux() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (partida, projeto) = partida_com("exec sleep 60", dir.path(), "e5f6a7b8-pid");
+        let h = Tmux;
+        let l = h.lanca(&partida, &projeto).await.unwrap();
+        let pid = h.pid(&l.hospedagem).await.expect("o tmux não disse o pid");
+        let cmdline = std::fs::read_to_string(format!("/proc/{pid}/cmdline")).unwrap();
+        h.mata(&l.hospedagem).await.unwrap();
+        assert!(cmdline.starts_with("sleep"), "{cmdline:?}");
+        assert!(h.pid("ld-nao-existe-0000").await.is_none());
     }
 
     #[tokio::test]
