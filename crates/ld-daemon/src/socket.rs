@@ -114,7 +114,74 @@ async fn atende(app: Arc<App>, stream: UnixStream) -> Result<()> {
     Ok(())
 }
 
+/// Menos que isto não vale como prefixo: um "a" casaria com a primeira sessão que começasse
+/// assim, e o `kill` a mataria.
+const PREFIXO_MINIMO: usize = 4;
+
+/// O id completo da sessão que o CLI pediu.
+///
+/// Quem chega aqui é você no terminal, que digita o começo do id que o `ls` mostrou. Sem isto,
+/// o `send` guardava a mensagem sob um id que não existe e o `kill` respondia sucesso sem matar
+/// nada. Os hooks mandam sempre o id inteiro e não passam por aqui.
+fn sessao_do_cli(app: &App, id: &str) -> Result<String, Response> {
+    let falha = |message: String| Response::Error { message };
+    let ids = app.store.ids_por_prefixo(id).map_err(erro)?;
+    match ids.as_slice() {
+        [unico] if unico == id || id.chars().count() >= PREFIXO_MINIMO => Ok(unico.clone()),
+        [_] => Err(falha(format!(
+            "id curto demais: {id} (use pelo menos {PREFIXO_MINIMO} caracteres)"
+        ))),
+        [] => Err(falha(format!("sessão desconhecida: {id}"))),
+        varios => Err(falha(format!(
+            "{id} serve para mais de uma sessão ({}); use mais caracteres",
+            varios
+                .iter()
+                .map(|s| s.chars().take(8).collect::<String>())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
+}
+
 async fn responde(app: &Arc<App>, req: Request) -> Response {
+    // Os pedidos do CLI chegam com o id que você digitou; daqui para baixo ele é o completo.
+    let req = match req {
+        Request::Inject { session_id, text } => match sessao_do_cli(app, &session_id) {
+            Ok(session_id) => Request::Inject { session_id, text },
+            Err(r) => return r,
+        },
+        Request::Kill { session_id } => match sessao_do_cli(app, &session_id) {
+            Ok(session_id) => Request::Kill { session_id },
+            Err(r) => return r,
+        },
+        Request::Relaunch {
+            session_id,
+            model,
+            effort,
+        } => match sessao_do_cli(app, &session_id) {
+            Ok(session_id) => Request::Relaunch {
+                session_id,
+                model,
+                effort,
+            },
+            Err(r) => return r,
+        },
+        Request::SendFile {
+            session_id,
+            path,
+            caption,
+            como_arquivo,
+        } => match sessao_do_cli(app, &session_id) {
+            Ok(session_id) => Request::SendFile {
+                session_id,
+                path,
+                caption,
+                como_arquivo,
+            },
+            Err(r) => return r,
+        },
+        outro => outro,
+    };
     match req {
         Request::Ping => Response::Pong,
 

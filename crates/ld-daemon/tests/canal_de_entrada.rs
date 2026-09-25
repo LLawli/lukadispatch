@@ -283,3 +283,108 @@ async fn queda_do_listener_e_notada() {
     }
     panic!("o daemon não percebeu que o listener caiu");
 }
+
+/// Um pedido de uma linha e a resposta dele, como o CLI faz.
+async fn pergunta_ao_daemon(dir: &std::path::Path, req: &Request) -> Response {
+    let mut stream = UnixStream::connect(dir.join("ld.sock")).await.unwrap();
+    pede(&mut stream, req).await;
+    let mut linhas = BufReader::new(stream).lines();
+    serde_json::from_str(&linhas.next_line().await.unwrap().unwrap()).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn o_id_curto_do_ls_serve_para_mandar_e_para_matar() {
+    // O `ls` mostra os 8 primeiros caracteres do id, e é isso que você digita. Antes, o `send`
+    // guardava a mensagem sob um id inexistente ("sem monitor armado") e o `kill` respondia
+    // sucesso sem matar nada.
+    let dir = tempfile::tempdir().unwrap();
+    let app = sobe_daemon(dir.path()).await;
+    let id = "379a86dc-afb4-4b22-bc65-53045b4921dc";
+    app.store
+        .upsert(&Session {
+            session_id: id.into(),
+            // Sem hospedagem nem canal: o kill não tem tmux para matar nem tópico para apagar.
+            hospedagem: None,
+            canal_id: None,
+            ..sessao_de_teste()
+        })
+        .unwrap();
+
+    let mut stream = UnixStream::connect(dir.path().join("ld.sock"))
+        .await
+        .unwrap();
+    pede(
+        &mut stream,
+        &Request::Listen {
+            session_id: id.into(),
+        },
+    )
+    .await;
+    for _ in 0..50 {
+        if app.hub.has_listener(id) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(app.hub.has_listener(id));
+    let (leitura, _escrita) = stream.into_split();
+    let mut linhas = BufReader::new(leitura).lines();
+
+    let r = pergunta_ao_daemon(
+        dir.path(),
+        &Request::Inject {
+            session_id: "379a86dc".into(),
+            text: "quanto é 2+2?".into(),
+        },
+    )
+    .await;
+    assert!(matches!(r, Response::Ok), "{r:?}");
+    let chegou: Response =
+        serde_json::from_str(&linhas.next_line().await.unwrap().unwrap()).unwrap();
+    assert!(
+        matches!(&chegou, Response::Message { text, .. } if text == "quanto é 2+2?"),
+        "{chegou:?}"
+    );
+    assert!(
+        app.store.drain("379a86dc").unwrap().is_empty(),
+        "nada pode ficar na fila de um id que não existe"
+    );
+
+    // Id que não é de sessão nenhuma é erro, não sucesso calado.
+    let r = pergunta_ao_daemon(
+        dir.path(),
+        &Request::Kill {
+            session_id: "ffff0000".into(),
+        },
+    )
+    .await;
+    assert!(
+        matches!(&r, Response::Error { message } if message.contains("desconhecida")),
+        "{r:?}"
+    );
+
+    // Curto demais não vale, nem quando só uma sessão começa assim.
+    let r = pergunta_ao_daemon(
+        dir.path(),
+        &Request::Kill {
+            session_id: "37".into(),
+        },
+    )
+    .await;
+    assert!(
+        matches!(&r, Response::Error { message } if message.contains("curto")),
+        "{r:?}"
+    );
+    assert!(app.store.get(id).unwrap().unwrap().ended_at.is_none());
+
+    // E o kill pelo id curto mata mesmo.
+    let r = pergunta_ao_daemon(
+        dir.path(),
+        &Request::Kill {
+            session_id: "379a86dc".into(),
+        },
+    )
+    .await;
+    assert!(matches!(r, Response::Ok), "{r:?}");
+    assert!(app.store.get(id).unwrap().unwrap().ended_at.is_some());
+}

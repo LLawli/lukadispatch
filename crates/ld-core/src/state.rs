@@ -388,6 +388,34 @@ impl Store {
         Ok(linhas.flatten().collect())
     }
 
+    /// As sessões que um id digitado pode querer dizer.
+    ///
+    /// O `lukadispatch ls` mostra só o começo do id, e é esse começo que você digita depois no
+    /// `send` e no `kill`. O id exato vale sempre, encerrada ou não. Um prefixo só casa com
+    /// sessão viva: mandar mensagem ou matar uma sessão morta pelo começo do id nunca é o que
+    /// se quis. Mais de um resultado é ambiguidade, e quem chama decide o que dizer.
+    pub fn ids_por_prefixo(&self, id: &str) -> Result<Vec<String>> {
+        let c = self.conn();
+        let exato: Option<String> = c
+            .query_row(
+                "SELECT session_id FROM sessions WHERE session_id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(e) = exato {
+            return Ok(vec![e]);
+        }
+        // `substr` e não `LIKE`: o id vem do usuário, e `%` ou `_` nele virariam curinga.
+        let mut stmt = c.prepare(
+            "SELECT session_id FROM sessions
+             WHERE ended_at IS NULL AND substr(session_id, 1, length(?1)) = ?1
+             ORDER BY created_at DESC",
+        )?;
+        let linhas = stmt.query_map([id], |r| r.get::<_, String>(0))?;
+        Ok(linhas.flatten().collect())
+    }
+
     pub fn enqueue(&self, session_id: &str, texto: &str, de: &str, files: &[String]) -> Result<()> {
         // Lista vazia vira NULL em vez de "[]": o caso comum é mensagem sem anexo, e assim a
         // coluna nova não muda nada para quem só manda texto.
@@ -564,6 +592,34 @@ mod tests {
             created_at: 0,
             ended_at: None,
         }
+    }
+
+    #[test]
+    fn prefixo_do_id_acha_so_a_sessao_viva() {
+        let st = Store::open_memory().unwrap();
+        st.upsert(&sessao("379a86dc-afb4-viva")).unwrap();
+        st.upsert(&sessao("d428b688-5-morta")).unwrap();
+        st.end("d428b688-5-morta").unwrap();
+        st.upsert(&sessao("abcd0000-um")).unwrap();
+        st.upsert(&sessao("abcd1111-dois")).unwrap();
+
+        // O que o `ls` mostra resolve para o id inteiro.
+        assert_eq!(
+            st.ids_por_prefixo("379a86dc").unwrap(),
+            ["379a86dc-afb4-viva"]
+        );
+        // O id exato vale mesmo encerrado; o prefixo, não.
+        assert_eq!(
+            st.ids_por_prefixo("d428b688-5-morta").unwrap(),
+            ["d428b688-5-morta"]
+        );
+        assert!(st.ids_por_prefixo("d428b688").unwrap().is_empty());
+        // Ambíguo volta os dois, e quem chama decide.
+        assert_eq!(st.ids_por_prefixo("abcd").unwrap().len(), 2);
+        assert!(st.ids_por_prefixo("ffff").unwrap().is_empty());
+        // O id vem do usuário: curinga de LIKE não pode casar com tudo.
+        assert!(st.ids_por_prefixo("%").unwrap().is_empty());
+        assert!(st.ids_por_prefixo("____").unwrap().is_empty());
     }
 
     #[test]

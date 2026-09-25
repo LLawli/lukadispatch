@@ -36,6 +36,9 @@ lukadispatch
   install [--global]        escreve os hooks; --global acrescenta a telemetria ao settings do
                             Claude Code, para as suas sessões de terminal entrarem no painel
   uninstall                 remove os hooks do settings do Claude Code
+
+<id> pode ser o começo que o `ls` mostra (4 caracteres ou mais), se só uma sessão viva
+começar assim.
 ";
 
 fn main() -> ExitCode {
