@@ -22,7 +22,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::process::Command;
 
-use super::{Hospedeiro, Launched, nome_da_sessao, primeiro_erro, sem_segredos};
+use super::{Hospedeiro, Launched, limpa_ambiente, nome_da_sessao, primeiro_erro};
 use crate::agente::Partida;
 
 /// Quem assina os metadados que o daemon põe no pane (o título).
@@ -168,7 +168,7 @@ impl Herdr {
             .map(std::process::Stdio::from)
             .unwrap_or_else(|_| std::process::Stdio::null());
         let mut comando = Command::new("herdr");
-        sem_segredos(&mut comando)
+        limpa_ambiente(&mut comando)
             .args(self.flag_sessao())
             .arg("server")
             .env_remove("HERDR_SOCKET_PATH")

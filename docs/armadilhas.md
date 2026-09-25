@@ -124,8 +124,10 @@ Medido no herdr 0.8.2.
   o `Monitor` não é rearmado e o tópico fala sozinho. É a issue #1.
 - **Servidor subido de dentro de uma sessão do Claude Code herda `CLAUDE_CODE_CHILD_SESSION`**,
   e todo Claude aberto nos panes dele roda com "Transcript saving is off": o `--resume` depois
-  não tem o que retomar. Vale para o herdr e para o tmux. Em experimento, suba o servidor sem as
-  variáveis `CLAUDE*` e `CLAUDECODE`.
+  não tem o que retomar. Vale para o herdr e para o tmux. O servidor que o daemon sobe já nasce
+  sem essas marcas (`MARCAS_DO_CLAUDE_CODE` em `sessions/mod.rs`); em experimento à mão, suba o
+  servidor com `env -i` e só o essencial (`HOME`, `USER`, `PATH`, `SHELL`, `TERM`, `LANG`,
+  `XDG_RUNTIME_DIR`).
 - **O `herdr agent` não reconhece o Claude Code das sessões do bot**: o processo em primeiro
   plano do pane é o `script`. O estado (idle, working) só pode vir da integração do Claude
   Code, que reporta pelo `HERDR_PANE_ID` herdado através do `script`.

@@ -45,13 +45,41 @@ pub fn nome_da_sessao(projeto: &str, session_id: &str) -> String {
     format!("ld-{slug}-{}", &session_id[..4])
 }
 
+/// As variáveis com que o Claude Code marca os processos que nascem dentro de uma sessão dele.
+///
+/// Um daemon iniciado de dentro de um Claude (em desenvolvimento, tipicamente) as herda, e um
+/// Claude que nasce com elas se toma por filho de outra sessão: roda com "Transcript saving is
+/// off", e aí o `--resume` do próximo relançamento não tem o que retomar. A lista é explícita,
+/// e não o prefixo `CLAUDE_CODE_`, porque o mesmo prefixo tem configuração que precisa passar
+/// (`CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`).
+const MARCAS_DO_CLAUDE_CODE: &[&str] = &[
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_BRIDGE_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_SSE_PORT",
+    "CLAUDE_PID",
+    "CLAUDE_EFFORT",
+];
+
 /// Tira do comando o que o daemon tem no ambiente e não pode chegar ao hospedeiro.
 ///
 /// O servidor do tmux ou do herdr, quando é o daemon que o sobe, copia o ambiente dele, e todo
 /// pane que nascer ali herda. Sob o systemd, esse ambiente tem o token do bot (o `.env` da
-/// unit): sem isto ele iria parar em cada shell do servidor, inclusive nos seus.
-pub(super) fn sem_segredos(cmd: &mut Command) -> &mut Command {
-    cmd.env_remove(TOKEN_TELEGRAM)
+/// unit): sem isto ele iria parar em cada shell do servidor, inclusive nos seus. E as
+/// [`MARCAS_DO_CLAUDE_CODE`] de um daemon iniciado de dentro de um Claude desligariam os
+/// transcripts de toda sessão que nascesse no servidor.
+pub(super) fn limpa_ambiente(cmd: &mut Command) -> &mut Command {
+    cmd.env_remove(TOKEN_TELEGRAM);
+    for marca in MARCAS_DO_CLAUDE_CODE {
+        cmd.env_remove(marca);
+    }
+    cmd
 }
 
 /// Sobe a sessão. Devolve erro sem deixar lixo se o tmux não vingar.
@@ -66,7 +94,7 @@ pub async fn launch(partida: &Partida, projeto: &Project) -> Result<Launched> {
     let _ = std::fs::remove_file(&liberado);
     const INVOLUCRO: &str = r#"i=0; while [ ! -e "$1" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i+1)); done; exec bash "$0""#;
 
-    let saida = sem_segredos(&mut Command::new("tmux"))
+    let saida = limpa_ambiente(&mut Command::new("tmux"))
         .args([
             "new-session",
             "-d",
@@ -317,16 +345,38 @@ mod tests {
         assert!(primeiro_erro(&log).contains("opening managed workstream"));
     }
 
+    /// As variáveis que o comando tira do ambiente que herdou.
+    fn tiradas(cmd: &Command) -> Vec<String> {
+        cmd.as_std()
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect()
+    }
+
     #[test]
     fn o_token_do_bot_nao_passa_para_o_hospedeiro() {
         let mut cmd = Command::new("tmux");
-        sem_segredos(&mut cmd);
+        limpa_ambiente(&mut cmd);
         assert!(
-            cmd.as_std()
-                .get_envs()
-                .any(|(k, v)| k == TOKEN_TELEGRAM && v.is_none()),
+            tiradas(&cmd).contains(&TOKEN_TELEGRAM.to_string()),
             "o token tem de sair do ambiente do servidor"
         );
+    }
+
+    #[test]
+    fn as_marcas_de_sessao_do_claude_code_nao_passam_e_a_configuracao_passa() {
+        let mut cmd = Command::new("tmux");
+        limpa_ambiente(&mut cmd);
+        let tiradas = tiradas(&cmd);
+        for marca in [
+            "CLAUDECODE",
+            "CLAUDE_CODE_CHILD_SESSION",
+            "CLAUDE_CODE_SESSION_ID",
+        ] {
+            assert!(tiradas.contains(&marca.to_string()), "{marca} passou");
+        }
+        assert!(!tiradas.contains(&"CLAUDE_CODE_OAUTH_TOKEN".to_string()));
     }
 
     #[test]
