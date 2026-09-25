@@ -156,13 +156,13 @@ impl Herdr {
             if let Ok(Some(status)) = servidor.try_wait() {
                 bail!(
                     "o servidor do herdr ({nome}) saiu ao subir ({status}): {}",
-                    ultima_linha(log)
+                    motivo_no_log(log)
                 );
             }
         }
         bail!(
             "o servidor do herdr ({nome}) não subiu em 5 s: {}",
-            ultima_linha(log)
+            motivo_no_log(log)
         )
     }
 
@@ -236,17 +236,23 @@ async fn chama(socket: &Path, metodo: &str, params: Value) -> Result<Value> {
     Ok(v["result"].clone())
 }
 
-/// A última linha não vazia de um arquivo de log, ou um aviso de que ele não diz nada.
-fn ultima_linha(log: &Path) -> String {
-    std::fs::read_to_string(log)
-        .ok()
-        .and_then(|t| {
-            t.lines()
-                .rev()
-                .map(str::trim)
-                .find(|l| !l.is_empty())
-                .map(str::to_string)
-        })
+/// O motivo no log do servidor: a última linha de erro, ou a última não vazia, ou um aviso de
+/// que ele não diz nada.
+///
+/// A última linha sozinha não serve: quando a CLI do herdr recusa (nome de sessão inválido), ela
+/// fecha com `run 'herdr --help' for usage`, e o motivo está na linha `error:` de antes.
+fn motivo_no_log(log: &Path) -> String {
+    let texto = std::fs::read_to_string(log).unwrap_or_default();
+    let linhas: Vec<&str> = texto
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    linhas
+        .iter()
+        .rev()
+        .find(|l| l.to_ascii_lowercase().starts_with("error"))
+        .or(linhas.last())
         .map(|l| l.chars().take(300).collect())
         .unwrap_or_else(|| format!("sem mensagem ({})", log.display()))
 }
@@ -407,6 +413,34 @@ mod tests {
     #[test]
     fn sessao_vazia_no_config_e_a_padrao() {
         assert!(Herdr::new(Some("  ".into())).flag_sessao().is_empty());
+    }
+
+    #[test]
+    fn o_motivo_e_a_linha_de_erro_e_nao_a_dica_de_uso() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("servidor.log");
+        // O que o herdr 0.8.2 escreve ao recusar um nome de sessão.
+        std::fs::write(
+            &log,
+            "error: session name may only contain ASCII letters, numbers, '.', '_' and '-'\n\
+             run 'herdr --help' for usage\n",
+        )
+        .unwrap();
+        assert!(
+            motivo_no_log(&log).starts_with("error: session name"),
+            "{}",
+            motivo_no_log(&log)
+        );
+
+        std::fs::write(&log, "subindo\nsocket busy at /x\n\n").unwrap();
+        assert_eq!(
+            motivo_no_log(&log),
+            "socket busy at /x",
+            "sem linha de erro, a última"
+        );
+
+        std::fs::write(&log, "").unwrap();
+        assert!(motivo_no_log(&log).starts_with("sem mensagem"));
     }
 }
 
@@ -571,8 +605,8 @@ mod testes_hospedeiro {
         if !tem_herdr() {
             return;
         }
-        // Um nome de sessão longo o bastante estoura o caminho do socket unix (~108 bytes), e o
-        // servidor morre ao subir. O motivo é do herdr, e tem de chegar em quem chamou.
+        // O herdr recusa nome de sessão com mais de 64 bytes, e o servidor morre ao subir. O
+        // motivo é do herdr, e tem de chegar em quem chamou.
         let sessao =
             SessaoDeTeste::com_nome(format!("ldteste-{}-{}", std::process::id(), "x".repeat(90)));
         let dir = tempfile::tempdir().unwrap();
@@ -581,7 +615,7 @@ mod testes_hospedeiro {
         let e = sessao.herdr().lanca(&partida, &projeto).await.unwrap_err();
         let msg = format!("{e:#}");
         assert!(msg.contains("saiu ao subir"), "{msg}");
-        assert!(!msg.contains("sem mensagem"), "o motivo se perdeu: {msg}");
+        assert!(msg.contains("session name"), "o motivo se perdeu: {msg}");
         assert!(
             inicio.elapsed() < Duration::from_secs(4),
             "esperou o prazo inteiro por um servidor que já tinha morrido"
