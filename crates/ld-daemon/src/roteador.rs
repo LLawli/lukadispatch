@@ -938,9 +938,10 @@ fn lista(app: &Arc<App>) -> anyhow::Result<String> {
             .as_deref()
             .map(|m| format!(" · {}", escapa(m)))
             .unwrap_or_default();
+        let worktree = app.store.worktree_em(&x.cwd).ok().flatten();
         s.push_str(&format!(
             "\n{dono} <b>{}</b> · {}{}{}\n<code>{}</code>",
-            escapa(&x.project),
+            escapa(&crate::app::nome_do_canal(&x.project, worktree.as_ref())),
             escapa(&x.status),
             modelo,
             ctx,
