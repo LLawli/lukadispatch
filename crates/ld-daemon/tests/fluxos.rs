@@ -15,7 +15,7 @@
 //! O agente de mentira é a prova de que o domínio não depende do Claude Code: se o `/effort`
 //! mostra os níveis dele, e não os do Claude Code, é porque o roteador pergunta à trait.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -40,7 +40,7 @@ use ld_daemon::frontend::{
 };
 use ld_daemon::hub::Aviso;
 use ld_daemon::roteador;
-use ld_daemon::sessions::{Hospedeiro, Launched};
+use ld_daemon::sessions::{Hospedeiro, Launched, Situacao};
 use ld_daemon::transcritor::{Transcrito, Transcritor};
 use tempfile::TempDir;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -66,6 +66,12 @@ impl Transcritor for TranscritorFalso {
 #[derive(Default)]
 struct HospedeiroFalso {
     vivas: Mutex<HashSet<String>>,
+    /// Hospedagem que continua viva com outro nome, como o terminal num live handoff do herdr.
+    mudou: Mutex<HashMap<String, String>>,
+    /// Hospedagem cujo processo morreu e cujo lugar o hospedeiro devolveu ao reiniciar.
+    restauradas: Mutex<HashSet<String>>,
+    /// Recusa os próximos lançamentos, como um hospedeiro que não consegue subir a sessão.
+    recusa: Mutex<bool>,
     lancadas: Mutex<u32>,
     partidas: Mutex<Vec<Partida>>,
     /// `mata:<nome>` e `lanca:<id>`, na ordem em que aconteceram.
@@ -92,6 +98,9 @@ impl HospedeiroFalso {
 #[async_trait]
 impl Hospedeiro for HospedeiroFalso {
     async fn lanca(&self, partida: &Partida, projeto: &Project) -> Result<Launched> {
+        if *self.recusa.lock().unwrap() {
+            anyhow::bail!("o hospedeiro recusou");
+        }
         *self.lancadas.lock().unwrap() += 1;
         self.eventos
             .lock()
@@ -102,7 +111,10 @@ impl Hospedeiro for HospedeiroFalso {
             "o hospedeiro recebeu script que não existe"
         );
         self.partidas.lock().unwrap().push(partida.clone());
-        let hospedagem = format!("ld-{}-{}", projeto.name, partida.session_id);
+        // Cada lançamento ganha uma hospedagem nova, como o terminal do herdr: quem relança
+        // tem de gravar a nova, senão a reconciliação procura pela velha.
+        let n = *self.lancadas.lock().unwrap();
+        let hospedagem = format!("ld-{}-{}@{n}", projeto.name, partida.session_id);
         self.vivas.lock().unwrap().insert(hospedagem.clone());
         Ok(Launched {
             session_id: partida.session_id.clone(),
@@ -112,13 +124,36 @@ impl Hospedeiro for HospedeiroFalso {
     async fn vive(&self, nome: &str) -> bool {
         self.vivas.lock().unwrap().contains(nome)
     }
+    async fn situacao(&self, nome: &str) -> Situacao {
+        if let Some(nova) = self.mudou.lock().unwrap().get(nome) {
+            return Situacao::Mudou(nova.clone());
+        }
+        if self.restauradas.lock().unwrap().contains(nome) {
+            return Situacao::Restaurada;
+        }
+        if self.vive(nome).await {
+            Situacao::Viva
+        } else {
+            Situacao::Morta
+        }
+    }
+    /// Aceita a hospedagem ou só o rótulo, como o contrato pede.
     async fn mata(&self, nome: &str) -> Result<()> {
         self.eventos.lock().unwrap().push(format!("mata:{nome}"));
-        self.vivas.lock().unwrap().remove(nome);
+        self.vivas
+            .lock()
+            .unwrap()
+            .retain(|h| h != nome && rotulo(h) != nome);
+        self.restauradas.lock().unwrap().remove(nome);
         Ok(())
     }
     async fn nossas(&self) -> Vec<String> {
-        self.vivas.lock().unwrap().iter().cloned().collect()
+        self.vivas
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|h| rotulo(h).to_string())
+            .collect()
     }
     fn descreve(&self, nome: &str) -> String {
         format!("falso: {nome}")
@@ -126,6 +161,11 @@ impl Hospedeiro for HospedeiroFalso {
     fn como_anexar(&self, nome: &str) -> String {
         format!("falso-anexa {nome}")
     }
+}
+
+/// O começo da hospedagem, antes do `@`.
+fn rotulo(hospedagem: &str) -> &str {
+    hospedagem.split('@').next().unwrap_or_default()
 }
 
 /// Um agente que não é o Claude Code: outros níveis de esforço, um modo só, outro apelido de
@@ -331,7 +371,8 @@ async fn cena_com(limites: Limites) -> Cena {
         },
     )
     .com_raiz_arquivos(raiz.path().join("arquivos"))
-    .com_raiz_sessoes(raiz.path().join("sessoes"));
+    .com_raiz_sessoes(raiz.path().join("sessoes"))
+    .com_espera_depois_do_fim(Duration::from_millis(50));
 
     Cena {
         app: Arc::new(app),
@@ -513,6 +554,151 @@ async fn reconciliacao_encerra_sessao_cujo_hospedeiro_morreu() {
     assert!(
         c.fe.chamadas()
             .contains(&Chamada::ApagaCanal(c.canal.clone()))
+    );
+}
+
+/// O hospedeiro reiniciou: o processo da sessão morreu, e o lugar dela voltou sem ele.
+fn restart_do_hospedeiro(c: &Cena) {
+    c.hospedeiro.vivas.lock().unwrap().remove(TMUX);
+    c.hospedeiro.restauradas.lock().unwrap().insert(TMUX.into());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reconciliacao_relanca_no_mesmo_canal_a_sessao_que_o_hospedeiro_restaurou() {
+    let c = cena().await;
+    // Caiu no meio de um turno: o turno se perdeu, e a guarda do /model não vale aqui.
+    c.app.store.set_status(SESSAO, "pensando").unwrap();
+    restart_do_hospedeiro(&c);
+
+    assert_eq!(c.app.reconcile().await.unwrap(), 0);
+
+    let s = c.app.store.get(SESSAO).unwrap().unwrap();
+    assert!(s.ended_at.is_none(), "a sessão restaurada foi encerrada");
+    assert_eq!(s.canal_id.as_deref(), Some(c.canal.as_str()));
+    assert_eq!(s.hospedagem.as_deref(), Some("ld-proj-s1@1"));
+    assert_eq!(
+        *c.hospedeiro.eventos.lock().unwrap(),
+        [format!("mata:{TMUX}"), format!("lanca:{SESSAO}")],
+        "o lugar restaurado tem de fechar antes de a sessão subir de novo"
+    );
+    let (script, _) = c.hospedeiro.ultima_partida();
+    assert!(
+        script.contains(&format!("'--continua' '{SESSAO}'")),
+        "{script}"
+    );
+    assert!(
+        !c.fe
+            .chamadas()
+            .contains(&Chamada::ApagaCanal(c.canal.clone()))
+    );
+    assert!(
+        c.fe.chamadas().iter().any(|ch| matches!(ch,
+            Chamada::Envia { canal: Some(k), rico, .. } if *k == c.canal && rico.contains("caiu junto"))),
+        "o canal não soube por que a sessão voltou: {:?}",
+        c.fe.textos()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sessao_restaurada_que_nao_volta_encerra_e_avisa_no_principal() {
+    let c = cena().await;
+    restart_do_hospedeiro(&c);
+    *c.hospedeiro.recusa.lock().unwrap() = true;
+
+    assert_eq!(c.app.reconcile().await.unwrap(), 1);
+
+    assert!(c.app.store.get(SESSAO).unwrap().unwrap().ended_at.is_some());
+    assert!(
+        c.fe.chamadas()
+            .contains(&Chamada::ApagaCanal(c.canal.clone()))
+    );
+    assert!(
+        c.fe.chamadas().iter().any(|ch| matches!(ch,
+            Chamada::Envia { canal: None, rico, .. } if rico.contains("o hospedeiro recusou"))),
+        "o motivo não chegou ao canal principal: {:?}",
+        c.fe.textos()
+    );
+    // Uma tentativa só: a próxima volta não relança de novo.
+    *c.hospedeiro.recusa.lock().unwrap() = false;
+    c.app.reconcile().await.unwrap();
+    assert_eq!(*c.hospedeiro.lancadas.lock().unwrap(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn processo_do_bot_que_acaba_por_fora_nao_encerra_antes_da_reconciliacao() {
+    let c = cena().await;
+    restart_do_hospedeiro(&c);
+    // O Claude Code manda `other` quando o processo morre por fora, como num restart do herdr.
+    c.app.end_session_por_hook(SESSAO, "other").await.unwrap();
+    assert!(
+        !c.fe
+            .chamadas()
+            .contains(&Chamada::ApagaCanal(c.canal.clone())),
+        "o canal foi apagado antes de a reconciliação decidir"
+    );
+
+    // A reconciliação agendada relança a sessão restaurada.
+    let hospedeiro = c.hospedeiro.clone();
+    espera(
+        "a reconciliação agendada relançar a sessão",
+        move || (*hospedeiro.lancadas.lock().unwrap() == 1).then_some(()),
+    )
+    .await;
+    assert!(c.app.store.get(SESSAO).unwrap().unwrap().ended_at.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fim_pedido_por_voce_encerra_na_hora() {
+    let c = cena().await;
+    c.app
+        .end_session_por_hook(SESSAO, "prompt_input_exit")
+        .await
+        .unwrap();
+    assert!(c.app.store.get(SESSAO).unwrap().unwrap().ended_at.is_some());
+    assert!(
+        c.fe.chamadas()
+            .contains(&Chamada::ApagaCanal(c.canal.clone()))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reconciliacao_segue_a_sessao_viva_que_mudou_de_hospedagem() {
+    let c = cena().await;
+    c.hospedeiro
+        .mudou
+        .lock()
+        .unwrap()
+        .insert(TMUX.into(), format!("{TMUX}@novo"));
+    assert_eq!(c.app.reconcile().await.unwrap(), 0);
+    let s = c.app.store.get(SESSAO).unwrap().unwrap();
+    assert!(s.ended_at.is_none(), "a sessão viva foi encerrada");
+    assert_eq!(s.hospedagem.as_deref(), Some(&*format!("{TMUX}@novo")));
+    assert!(
+        !c.fe
+            .chamadas()
+            .contains(&Chamada::ApagaCanal(c.canal.clone()))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reconciliacao_mata_pelo_rotulo_o_que_sobrou_de_sessao_encerrada() {
+    let c = cena().await;
+    c.app
+        .store
+        .set_hospedagem(SESSAO, &format!("{TMUX}@velho"))
+        .unwrap();
+    c.app.store.end(SESSAO).unwrap();
+    // O hospedeiro reiniciou e devolveu o lugar da sessão com outro nome: o rótulo é o mesmo.
+    c.hospedeiro.vivas.lock().unwrap().clear();
+    c.hospedeiro
+        .vivas
+        .lock()
+        .unwrap()
+        .insert(format!("{TMUX}@restaurado"));
+    c.app.reconcile().await.unwrap();
+    assert!(
+        c.hospedeiro.vivas.lock().unwrap().is_empty(),
+        "sobrou o pane de uma sessão encerrada"
     );
 }
 
@@ -1098,6 +1284,16 @@ async fn trocar_esforco_relanca_continuando_a_mesma_sessao() {
         [format!("mata:{TMUX}"), format!("lanca:{SESSAO}")],
         "o processo velho tem de morrer antes do novo subir"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn relancar_grava_a_hospedagem_nova_e_a_reconciliacao_nao_encerra() {
+    let c = cena().await;
+    c.trata(c.mensagem("63", "/effort muito", None)).await;
+    let s = c.app.store.get(SESSAO).unwrap().unwrap();
+    assert_eq!(s.hospedagem.as_deref(), Some("ld-proj-s1@1"));
+    assert_eq!(c.app.reconcile().await.unwrap(), 0);
+    assert!(c.app.store.get(SESSAO).unwrap().unwrap().ended_at.is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]

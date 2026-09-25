@@ -349,6 +349,16 @@ impl Store {
         Ok(())
     }
 
+    /// Grava onde a sessão roda agora. Muda a cada relançamento em hospedeiros cujo nome não sai
+    /// só do id (o herdr), e a reconciliação procura a sessão pelo que está aqui.
+    pub fn set_hospedagem(&self, session_id: &str, hospedagem: &str) -> Result<()> {
+        self.conn().execute(
+            "UPDATE sessions SET hospedagem = ?2, updated_at = ?3 WHERE session_id = ?1",
+            params![session_id, hospedagem, agora()],
+        )?;
+        Ok(())
+    }
+
     pub fn set_permission_mode(&self, session_id: &str, modo: &str) -> Result<()> {
         self.conn().execute(
             "UPDATE sessions SET permission_mode = ?2, updated_at = ?3 WHERE session_id = ?1",
@@ -487,17 +497,27 @@ impl Store {
         Ok(())
     }
 
-    /// `true` quando esta hospedagem é de uma sessão que já foi encerrada.
+    /// `true` quando este rótulo é de uma sessão encerrada e de nenhuma viva.
     ///
     /// Serve para varrer sessão órfã no hospedeiro: um relançamento interrompido no meio pode
     /// deixar o processo vivo com a sessão já morta no banco, e aí ele é lixo que ninguém mais
-    /// alcança.
-    pub fn hospedagem_de_sessao_morta(&self, hospedagem: &str) -> Result<bool> {
+    /// alcança. O rótulo é o começo da hospedagem (ela é o rótulo, ou o rótulo seguido de `@`),
+    /// e é por ele que se compara: o resto (o terminal e o processo, no herdr) muda num restart
+    /// do hospedeiro, e o rótulo é o que o pane restaurado mantém.
+    pub fn rotulo_de_sessao_morta(&self, rotulo: &str) -> Result<bool> {
         let c = self.conn();
         let achou: Option<i64> = c
             .query_row(
-                "SELECT 1 FROM sessions WHERE hospedagem = ?1 AND ended_at IS NOT NULL LIMIT 1",
-                [hospedagem],
+                "SELECT 1 FROM sessions m
+                 WHERE m.ended_at IS NOT NULL
+                   AND (m.hospedagem = ?1 OR substr(m.hospedagem, 1, length(?1) + 1) = ?1 || '@')
+                   AND NOT EXISTS (
+                       SELECT 1 FROM sessions v
+                       WHERE v.ended_at IS NULL
+                         AND (v.hospedagem = ?1
+                              OR substr(v.hospedagem, 1, length(?1) + 1) = ?1 || '@'))
+                 LIMIT 1",
+                [rotulo],
                 |r| r.get(0),
             )
             .optional()?;
@@ -629,6 +649,26 @@ mod tests {
         let s = st.get("s1").unwrap().unwrap();
         assert_eq!(s.canal_id.as_deref(), Some("7"));
         assert!(s.owned_by_bot());
+    }
+
+    #[test]
+    fn rotulo_de_sessao_morta_casa_o_comeco_da_hospedagem() {
+        let st = Store::open_memory().unwrap();
+        let com = |id: &str, hospedagem: &str| Session {
+            hospedagem: Some(hospedagem.into()),
+            ..sessao(id)
+        };
+        st.upsert(&com("morta", "ld-p-abcd@term_1@42:99")).unwrap();
+        st.end("morta").unwrap();
+        assert!(st.rotulo_de_sessao_morta("ld-p-abcd").unwrap());
+        assert!(
+            !st.rotulo_de_sessao_morta("ld-p-ab").unwrap(),
+            "um rótulo que é só o começo de outro não é ele"
+        );
+
+        // O mesmo rótulo numa sessão viva (a retomada da morta, com outro id) não é lixo.
+        st.upsert(&com("viva", "ld-p-abcd@term_2@43:100")).unwrap();
+        assert!(!st.rotulo_de_sessao_morta("ld-p-abcd").unwrap());
     }
 
     #[test]

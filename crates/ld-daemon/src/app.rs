@@ -30,7 +30,7 @@ use crate::frontend::formato::escapa;
 use crate::frontend::{Botao, Canal, Frontend, Midia, MsgId};
 use crate::hub::{Hub, Incoming};
 use crate::panel::Panel;
-use crate::sessions::{self, Hospedeiro};
+use crate::sessions::{self, Hospedeiro, Situacao};
 use crate::status::{Ctx, StatusBoard};
 use crate::transcritor::Transcritor;
 
@@ -127,6 +127,14 @@ pub struct App {
     /// do caminho. A janela é por tempo, e não por evento, porque o hook é `async` e pode chegar
     /// depois de a sessão nova já estar de pé.
     relancando: Mutex<HashMap<String, std::time::Instant>>,
+    /// Uma reconciliação por vez. Além do relógio de um minuto, o fim de um processo por fora
+    /// agenda uma volta, e duas ao mesmo tempo relançariam a mesma sessão duas vezes.
+    reconciliando: tokio::sync::Mutex<()>,
+    /// Quanto a reconciliação espera depois de um processo acabar por fora (ver
+    /// [`App::end_session_por_hook`]). O bastante para um restart do herdr restaurar os panes; o
+    /// `situacao` do hospedeiro sobe o servidor se ele ainda estiver fora do ar. Um teste troca
+    /// com [`App::com_espera_depois_do_fim`].
+    espera_depois_do_fim: std::time::Duration,
     /// Última mensagem entregue a cada sessão pelo frontend, com a hora.
     ///
     /// O hook `UserPromptSubmit` não distingue o que você digitou no PC do que chegou pelo
@@ -162,6 +170,8 @@ impl App {
             panel,
             avisos: Arc::new(Mutex::new(HashMap::new())),
             relancando: Mutex::new(HashMap::new()),
+            reconciliando: tokio::sync::Mutex::new(()),
+            espera_depois_do_fim: std::time::Duration::from_secs(5),
             entregues: Mutex::new(HashMap::new()),
         }
     }
@@ -169,6 +179,12 @@ impl App {
     /// Troca a raiz de arquivos padrão por outra (um tempdir de teste, tipicamente).
     pub fn com_raiz_arquivos(mut self, raiz: PathBuf) -> Self {
         self.raiz_arquivos = raiz;
+        self
+    }
+
+    /// Troca a espera entre o fim de um processo por fora e a reconciliação que ele agenda.
+    pub fn com_espera_depois_do_fim(mut self, espera: std::time::Duration) -> Self {
+        self.espera_depois_do_fim = espera;
         self
     }
 
@@ -321,8 +337,35 @@ impl App {
     }
 
     /// Fim vindo do hook `SessionEnd`, que respeita a janela de relançamento.
-    pub async fn end_session_por_hook(&self, session_id: &str) -> Result<()> {
-        self.encerra(session_id, true, Fim::Hook).await
+    ///
+    /// Com o motivo `other`, que é o que o Claude Code manda quando o processo morre por fora (o
+    /// hospedeiro caiu ou reiniciou, o pane foi fechado), a sessão do bot não encerra aqui: um
+    /// restart do herdr devolve o lugar dela, e quem decide entre relançar e encerrar é a
+    /// reconciliação. Encerrar agora apagaria o canal antes disso. A volta vem daqui a poucos
+    /// segundos, e não na próxima varredura, para o canal não ficar até um
+    /// minuto falando com ninguém. Os outros motivos (`/exit`, `/clear`, logout) são você
+    /// fechando a sessão, e encerram na hora.
+    pub async fn end_session_por_hook(
+        self: &Arc<Self>,
+        session_id: &str,
+        motivo: &str,
+    ) -> Result<()> {
+        let do_bot = self
+            .store
+            .get(session_id)?
+            .is_some_and(|s| s.owned_by_bot() && s.ended_at.is_none());
+        if motivo != "other" || !do_bot {
+            return self.encerra(session_id, true, Fim::Hook).await;
+        }
+        info!(sessao = %session_id, "o processo da sessão acabou por fora; a reconciliação decide");
+        let app = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(app.espera_depois_do_fim).await;
+            if let Err(e) = app.reconcile().await {
+                warn!(erro = %e, "reconciliação falhou");
+            }
+        });
+        Ok(())
     }
 
     async fn encerra(&self, session_id: &str, apagar_canal: bool, quem: Fim) -> Result<()> {
@@ -459,6 +502,37 @@ impl App {
             bail!("a sessão está trabalhando; espere o turno acabar e mande de novo");
         }
 
+        let ficha = self.relanca(&s, model, effort).await?;
+        if let Some(canal) = canal_da_sessao(&s) {
+            let _ = self
+                .frontend
+                .envia(
+                    Some(&canal),
+                    &format!(
+                        "♻️ Sessão reiniciada com o contexto inteiro.\n{}",
+                        escapa(&ficha)
+                    ),
+                    &[],
+                    None,
+                )
+                .await;
+        }
+        self.panel.refresh();
+        info!(sessao = %session_id, modelo = ?model, esforco = ?effort, "sessão relançada");
+        Ok(())
+    }
+
+    /// Mata o processo da sessão, se houver, e a sobe de novo com `--resume`: mesmo id, mesmo
+    /// canal, e o que não foi pedido agora continua valendo. Grava onde ela passou a rodar e
+    /// devolve a ficha dela, para o aviso no canal. Não confere se a sessão está no meio de um
+    /// turno: isso é de quem chama.
+    async fn relanca(
+        &self,
+        s: &Session,
+        model: Option<&str>,
+        effort: Option<&str>,
+    ) -> Result<String> {
+        let session_id = s.session_id.as_str();
         let projeto = Project {
             name: s.project.clone(),
             path: s.cwd.clone(),
@@ -471,7 +545,7 @@ impl App {
             .permission_mode
             .clone()
             .unwrap_or_else(|| self.cfg.permission_mode_for(&s.cwd));
-        // O que não foi pedido agora continua valendo: trocar só o esforço não derruba o modelo.
+        // Trocar só o esforço não derruba o modelo.
         let model_final = model.map(str::to_string).or_else(|| s.model.clone());
         let effort_final = effort.map(str::to_string).or_else(|| s.effort.clone());
 
@@ -496,22 +570,40 @@ impl App {
             })
             .await?;
 
+        self.store.set_hospedagem(session_id, &lancada.hospedagem)?;
         self.store
             .set_model(session_id, model_final.as_deref(), effort_final.as_deref())?;
         self.store.set_status(session_id, "iniciando")?;
-        if let Some(canal) = canal_da_sessao(&s) {
+        Ok(ficha(
+            model_final.as_deref(),
+            effort_final.as_deref(),
+            &modo,
+            &self.hospedeiro.descreve(&lancada.hospedagem),
+        ))
+    }
+
+    /// Relança, no mesmo canal, a sessão que caiu junto com o hospedeiro e cujo lugar ele
+    /// devolveu ao voltar ([`Situacao::Restaurada`]). O turno em andamento se perdeu com o
+    /// processo, então a guarda de "trabalhando" do [`App::relaunch`] não vale aqui.
+    async fn readota(&self, s: &Session) -> Result<()> {
+        let session_id = s.session_id.as_str();
+        // As perguntas abertas eram do processo que morreu: ninguém mais espera a resposta.
+        for ask in self.cards.da_sessao(session_id) {
+            self.cleanup_ask(&ask, None).await;
+        }
+        for ask in self.hub.asks_of(session_id) {
+            self.hub.close_ask(&ask);
+        }
+        let ficha = self.relanca(s, None, None).await?;
+        if let Some(canal) = canal_da_sessao(s) {
             let _ = self
                 .frontend
                 .envia(
                     Some(&canal),
                     &format!(
-                        "♻️ Sessão reiniciada com o contexto inteiro.\n{}",
-                        escapa(&ficha(
-                            model_final.as_deref(),
-                            effort_final.as_deref(),
-                            &modo,
-                            &self.hospedeiro.descreve(&lancada.hospedagem)
-                        ))
+                        "♻️ A sessão caiu junto com o hospedeiro, que reiniciou, e voltou com o \
+                         contexto inteiro. O turno que estava em andamento se perdeu.\n{}",
+                        escapa(&ficha)
                     ),
                     &[],
                     None,
@@ -519,7 +611,6 @@ impl App {
                 .await;
         }
         self.panel.refresh();
-        info!(sessao = %session_id, modelo = ?model_final, esforco = ?effort_final, "sessão relançada");
         Ok(())
     }
 
@@ -588,17 +679,54 @@ impl App {
     /// PC) com o daemon fora do ar, e o lançamento falha depois que o registro já foi gravado.
     /// Sem isto elas ficam no painel para sempre, e o canal delas vira um canal que não responde.
     pub async fn reconcile(&self) -> Result<usize> {
+        let _vez = self.reconciliando.lock().await;
         let mut mortas = 0;
         for s in self.store.live()? {
             let Some(hospedagem) = &s.hospedagem else {
                 continue; // sessão do terminal: quem cuida dela é o hook SessionEnd.
             };
-            if self.hospedeiro.vive(hospedagem).await || self.em_relancamento(&s.session_id) {
+            if self.em_relancamento(&s.session_id) {
                 continue;
             }
-            warn!(sessao = %s.session_id, hospedagem = %hospedagem, "sessão sumiu no hospedeiro; encerrando");
-            self.end_session(&s.session_id, true).await?;
-            mortas += 1;
+            match self.hospedeiro.situacao(hospedagem).await {
+                Situacao::Viva => {}
+                Situacao::Mudou(nova) => {
+                    info!(sessao = %s.session_id, de = %hospedagem, para = %nova, "a sessão continua viva com outra hospedagem");
+                    self.store.set_hospedagem(&s.session_id, &nova)?;
+                }
+                Situacao::Restaurada => match self.readota(&s).await {
+                    Ok(()) => {
+                        info!(sessao = %s.session_id, "sessão relançada no lugar que o hospedeiro restaurou");
+                    }
+                    // Uma tentativa só: a sessão que não volta encerra, em vez de ficar num laço
+                    // de relançar a cada volta. O canal dela vai embora, então o aviso vai no
+                    // principal.
+                    Err(e) => {
+                        warn!(sessao = %s.session_id, erro = %format!("{e:#}"), "não consegui relançar a sessão restaurada; encerrando");
+                        let _ = self
+                            .frontend
+                            .envia(
+                                None,
+                                &format!(
+                                    "⚠️ A sessão de <b>{}</b> caiu junto com o hospedeiro e não \
+                                     consegui trazê-la de volta: {}",
+                                    escapa(&s.project),
+                                    escapa(&format!("{e:#}"))
+                                ),
+                                &[],
+                                None,
+                            )
+                            .await;
+                        self.end_session(&s.session_id, true).await?;
+                        mortas += 1;
+                    }
+                },
+                Situacao::Morta => {
+                    warn!(sessao = %s.session_id, hospedagem = %hospedagem, "sessão sumiu no hospedeiro; encerrando");
+                    self.end_session(&s.session_id, true).await?;
+                    mortas += 1;
+                }
+            }
         }
 
         // Canal de sessão encerrada que sobrou (daemon caiu no meio do fechamento, adaptador
@@ -653,14 +781,10 @@ impl App {
         // O contrário também acontece: o hospedeiro ficou com uma sessão viva já encerrada no
         // banco (um relançamento interrompido no meio, por exemplo). Ninguém mais fala com ela,
         // e o canal dela já foi apagado, então é lixo que só consome memória.
-        for hospedagem in self.hospedeiro.nossas().await {
-            if self
-                .store
-                .hospedagem_de_sessao_morta(&hospedagem)
-                .unwrap_or(false)
-            {
-                warn!(hospedagem = %hospedagem, "sessão órfã de sessão encerrada; matando");
-                let _ = self.hospedeiro.mata(&hospedagem).await;
+        for rotulo in self.hospedeiro.nossas().await {
+            if self.store.rotulo_de_sessao_morta(&rotulo).unwrap_or(false) {
+                warn!(rotulo = %rotulo, "sessão órfã de sessão encerrada; matando");
+                let _ = self.hospedeiro.mata(&rotulo).await;
             }
         }
         Ok(mortas)

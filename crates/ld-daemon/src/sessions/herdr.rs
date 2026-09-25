@@ -5,10 +5,11 @@
 //! de abrir um pane já rodando um comando com ambiente próprio é o método `layout.apply`, que a
 //! CLI não expõe. Pela CLI seria abrir um shell e digitar o comando nele.
 //!
-//! A hospedagem gravada no banco é `rótulo@terminal`: o rótulo (`ld-projeto-abcd`) é o nome que
-//! você acha na aba, e o `terminal_id` é o que identifica o processo. Um restart do servidor do
-//! herdr mata os processos e restaura os panes como shells com o mesmo rótulo e terminal novo;
-//! pelo terminal, o daemon enxerga isso como a sessão que morreu, e não como a mesma viva.
+//! A hospedagem gravada no banco é `rótulo@terminal@pid:início` (ver [`Hospedagem`]). O rótulo
+//! (`ld-projeto-abcd`) é o nome que você acha na aba e o que acha o pane; o terminal é o que o
+//! `terminal attach` pede; o processo é o que diz se a sessão vive. O terminal não serve para
+//! isso: ele muda num restart do servidor, que mata a sessão, e também num live handoff, que a
+//! mantém de pé.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -22,7 +23,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::process::Command;
 
-use super::{Hospedeiro, Launched, nome_da_sessao, primeiro_erro, sem_segredos};
+use super::{Hospedeiro, Launched, Situacao, limpa_ambiente, nome_da_sessao, primeiro_erro};
 use crate::agente::Partida;
 
 /// Quem assina os metadados que o daemon põe no pane (o título).
@@ -168,7 +169,7 @@ impl Herdr {
             .map(std::process::Stdio::from)
             .unwrap_or_else(|_| std::process::Stdio::null());
         let mut comando = Command::new("herdr");
-        sem_segredos(&mut comando)
+        limpa_ambiente(&mut comando)
             .args(self.flag_sessao())
             .arg("server")
             .env_remove("HERDR_SOCKET_PATH")
@@ -216,6 +217,20 @@ impl Herdr {
             .ok()?
             .into_iter()
             .find(|p| p.terminal_id == terminal)
+    }
+
+    /// Os panes com este rótulo. Mais de um só sobra de um relançamento interrompido no meio.
+    /// Sem servidor de pé, nenhum.
+    async fn paineis_do_rotulo(&self, rotulo: &str) -> Vec<Painel> {
+        if rotulo.is_empty() || !self.de_pe().await {
+            return Vec::new();
+        }
+        self.paineis(&self.socket)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|p| p.label.as_deref() == Some(rotulo))
+            .collect()
     }
 
     /// O workspace do projeto: o que já tem o nome dele (inclusive um aberto por você) ou um
@@ -297,9 +312,79 @@ fn motivo_no_log(log: &Path) -> String {
         .unwrap_or_else(|| format!("sem mensagem ({})", log.display()))
 }
 
-/// `rótulo@terminal`, o formato da hospedagem.
-fn parte(hospedagem: &str) -> (&str, &str) {
-    hospedagem.rsplit_once('@').unwrap_or(("", hospedagem))
+/// A hospedagem de uma sessão do herdr: `rótulo@terminal@pid:início`.
+///
+/// Lida de volta do banco, ela aceita também o formato antigo, `rótulo@terminal`, de sessão
+/// lançada antes de o processo ir junto, e o rótulo sozinho, que é o que [`Herdr::nossas`] devolve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Hospedagem<'a> {
+    rotulo: &'a str,
+    terminal: &'a str,
+    /// `None` no formato antigo: aí a sessão vive enquanto o terminal existir, como era.
+    processo: Option<Processo>,
+}
+
+impl<'a> Hospedagem<'a> {
+    fn le(nome: &'a str) -> Self {
+        let mut partes = nome.splitn(3, '@');
+        let rotulo = partes.next().unwrap_or_default();
+        let terminal = partes.next().unwrap_or_default();
+        let processo = partes.next().and_then(|p| {
+            let (pid, inicio) = p.split_once(':')?;
+            Some(Processo {
+                pid: pid.parse().ok()?,
+                inicio: inicio.parse().ok()?,
+            })
+        });
+        Self {
+            rotulo,
+            terminal,
+            processo,
+        }
+    }
+}
+
+impl std::fmt::Display for Hospedagem<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}@{}", self.rotulo, self.terminal)?;
+        if let Some(p) = self.processo {
+            write!(f, "@{}:{}", p.pid, p.inicio)?;
+        }
+        Ok(())
+    }
+}
+
+/// O processo que vira o agente da sessão: o pid e a hora em que ele começou.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Processo {
+    pid: u32,
+    /// Em tiques de relógio desde o boot (campo 22 do `/proc/<pid>/stat`). É o que distingue o
+    /// nosso processo de outro que ganhou o mesmo pid depois, num reboot por exemplo.
+    inicio: u64,
+}
+
+impl Processo {
+    /// O processo com este pid, se ele está vivo.
+    fn de(pid: u32) -> Option<Self> {
+        inicio_do_processo(pid).map(|inicio| Self { pid, inicio })
+    }
+
+    fn vivo(&self) -> bool {
+        inicio_do_processo(self.pid) == Some(self.inicio)
+    }
+}
+
+/// Quando o processo começou, se ele está vivo. Zumbi não conta: já saiu, só falta alguém o
+/// recolher.
+fn inicio_do_processo(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // O nome do comando vem entre parênteses e pode ter espaço: os campos contam depois dele, a
+    // partir do terceiro (o estado).
+    let mut campos = stat.rsplit_once(')')?.1.split_whitespace();
+    if campos.next()? == "Z" {
+        return None;
+    }
+    campos.nth(18)?.parse().ok()
 }
 
 #[async_trait::async_trait]
@@ -313,8 +398,20 @@ impl Hospedeiro for Herdr {
         // O `script` dá ao agente um terminal de verdade (com pipe no stdout o Claude Code vira
         // não interativo) e espelha a saída no log desde o primeiro byte. É o papel do
         // `pipe-pane` no tmux, sem a catraca: lá o espelho só liga depois de a sessão existir, e
-        // aqui ele nasce junto com ela. O caminho do script vai por ambiente para não passar
-        // por aspas de shell.
+        // aqui ele nasce junto com ela. Os caminhos vão por ambiente para não passar por aspas
+        // de shell.
+        //
+        // O `$$` do shell que o `script` abre é o processo que vira o agente: cada `exec` dali
+        // em diante troca o programa e mantém o pid. É por ele que o daemon sabe se a sessão
+        // vive.
+        //
+        // Sem `HERDR_ENV` e `HERDR_PANE_ID`, a integração do Claude Code do herdr não registra
+        // este pane como agente, e um restart do servidor não religa o Claude aqui sozinho: o
+        // religado seria só `claude --resume`, sem os hooks do bot. Quem relança é o daemon
+        // ([`Situacao::Restaurada`]). O herdr não os deixa tirar pelo `env` do `layout.apply`,
+        // que ele aplica antes da identidade do pane.
+        let arquivo_pid = partida.log.with_file_name("processo.pid");
+        let _ = std::fs::remove_file(&arquivo_pid);
         let mut pedido = json!({
             "tab_label": rotulo,
             "focus": false,
@@ -324,13 +421,15 @@ impl Hospedeiro for Herdr {
                 "cwd": projeto.path,
                 "command": [
                     "script", "-q", "-f", "-a", "-e",
-                    "-c", r#"exec bash "$LD_PARTIDA""#,
+                    "-c",
+                    r#"unset HERDR_ENV HERDR_PANE_ID; echo $$ > "$LD_PID"; exec bash "$LD_PARTIDA""#,
                     partida.log,
                 ],
                 "env": {
                     "LD_SESSION": partida.session_id,
                     "LUKADISPATCH_SOCKET": paths::socket(),
                     "LD_PARTIDA": partida.script,
+                    "LD_PID": arquivo_pid,
                 },
             },
         });
@@ -352,7 +451,6 @@ impl Hospedeiro for Herdr {
                 .to_string(),
             Err(_) => bail!("a sessão morreu ao subir: {}", primeiro_erro(&partida.log)),
         };
-        let hospedagem = format!("{rotulo}@{terminal}");
 
         // O título é o nome do tópico, para você saber no herdr qual conversa é qual. É só
         // enfeite: falhar aqui não derruba a sessão.
@@ -364,11 +462,22 @@ impl Hospedeiro for Herdr {
         .await;
 
         // Mesmo motivo do tmux: morrer logo depois de subir é o caso comum de erro, e é o que
-        // passaria por "deu certo".
+        // passaria por "deu certo". O pid chega nesse meio tempo: o shell o escreve antes de
+        // qualquer outra coisa.
         tokio::time::sleep(Duration::from_secs(3)).await;
-        if !self.vive(&hospedagem).await {
+        let processo = std::fs::read_to_string(&arquivo_pid)
+            .ok()
+            .and_then(|pid| pid.trim().parse().ok())
+            .and_then(Processo::de);
+        let Some(processo) = processo else {
             bail!("a sessão morreu ao subir: {}", primeiro_erro(&partida.log));
+        };
+        let hospedagem = Hospedagem {
+            rotulo: &rotulo,
+            terminal: &terminal,
+            processo: Some(processo),
         }
+        .to_string();
 
         Ok(Launched {
             session_id: partida.session_id.clone(),
@@ -376,22 +485,68 @@ impl Hospedeiro for Herdr {
         })
     }
 
+    /// Pelo processo, sem perguntar ao servidor: um servidor lento, ou fora do ar por um
+    /// instante, não mata sessão nenhuma.
     async fn vive(&self, nome: &str) -> bool {
-        self.painel_do_terminal(parte(nome).1).await.is_some()
+        let h = Hospedagem::le(nome);
+        match h.processo {
+            Some(p) => p.vivo(),
+            None => self.painel_do_terminal(h.terminal).await.is_some(),
+        }
     }
 
+    /// Com o processo morto, sobe o servidor se ele estiver fora do ar: é o restore dele que
+    /// devolve o lugar da sessão, e depois de um reboot ninguém mais o sobe. Só aqui, e não no
+    /// [`Hospedeiro::vive`]: conferir uma sessão viva não pode ligar servidor.
+    async fn situacao(&self, nome: &str) -> Situacao {
+        let h = Hospedagem::le(nome);
+        if !self.vive(nome).await {
+            if let Err(e) = self.garante_servidor().await {
+                tracing::warn!(erro = %format!("{e:#}"), "não consegui subir o herdr para procurar a sessão");
+                return Situacao::Morta;
+            }
+            return if self.paineis_do_rotulo(h.rotulo).await.is_empty() {
+                Situacao::Morta
+            } else {
+                Situacao::Restaurada
+            };
+        }
+        if h.processo.is_none() {
+            return Situacao::Viva;
+        }
+        // Viva. Um live handoff troca o terminal de todo pane e mantém o processo, e o terminal
+        // é o que o `terminal attach` pede.
+        let paineis = self.paineis_do_rotulo(h.rotulo).await;
+        match paineis.as_slice() {
+            [p] if p.terminal_id != h.terminal => Situacao::Mudou(
+                Hospedagem {
+                    terminal: &p.terminal_id,
+                    ..h
+                }
+                .to_string(),
+            ),
+            _ => Situacao::Viva,
+        }
+    }
+
+    /// Fecha o pane da sessão. Pelo terminal gravado, se ele ainda existe; senão pelo rótulo,
+    /// porque depois de um restart do servidor o pane é o mesmo e o terminal é outro.
     async fn mata(&self, nome: &str) -> Result<()> {
-        let Some(painel) = self.painel_do_terminal(parte(nome).1).await else {
-            return Ok(());
+        let h = Hospedagem::le(nome);
+        let paineis = self.paineis_do_rotulo(h.rotulo).await;
+        let alvos: Vec<&Painel> = match paineis.iter().find(|p| p.terminal_id == h.terminal) {
+            Some(p) => vec![p],
+            None => paineis.iter().collect(),
         };
-        let fechou = chama(
-            &self.socket,
-            "pane.close",
-            json!({ "pane_id": painel.pane_id }),
-        )
-        .await;
-        if let Err(e) = fechou
-            && self.vive(nome).await
+        let mut falha = None;
+        for p in alvos {
+            if let Err(e) = chama(&self.socket, "pane.close", json!({ "pane_id": p.pane_id })).await
+            {
+                falha = Some(e);
+            }
+        }
+        if let Some(e) = falha
+            && (self.vive(nome).await || !self.paineis_do_rotulo(h.rotulo).await.is_empty())
         {
             return Err(e.context(format!("não consegui matar {nome}")));
         }
@@ -402,28 +557,34 @@ impl Hospedeiro for Herdr {
         if !self.de_pe().await {
             return Vec::new();
         }
-        self.paineis(&self.socket)
+        let mut rotulos: Vec<String> = self
+            .paineis(&self.socket)
             .await
             .unwrap_or_default()
             .into_iter()
-            .filter_map(|p| {
-                let rotulo = p.label.filter(|l| l.starts_with("ld-"))?;
-                Some(format!("{rotulo}@{}", p.terminal_id))
-            })
-            .collect()
+            .filter_map(|p| p.label.filter(|l| l.starts_with("ld-")))
+            .collect();
+        rotulos.sort();
+        rotulos.dedup();
+        rotulos
     }
 
     fn descreve(&self, nome: &str) -> String {
+        let rotulo = Hospedagem::le(nome).rotulo;
         match &self.sessao {
-            Some(s) => format!("herdr ({s}): {}", parte(nome).0),
-            None => format!("herdr: {}", parte(nome).0),
+            Some(s) => format!("herdr ({s}): {rotulo}"),
+            None => format!("herdr: {rotulo}"),
         }
     }
 
     fn como_anexar(&self, nome: &str) -> String {
         let mut cmd = vec!["herdr".to_string()];
         cmd.extend(self.flag_sessao());
-        cmd.extend(["terminal".into(), "attach".into(), parte(nome).1.into()]);
+        cmd.extend([
+            "terminal".into(),
+            "attach".into(),
+            Hospedagem::le(nome).terminal.into(),
+        ]);
         cmd.join(" ")
     }
 }
@@ -433,18 +594,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hospedagem_separa_rotulo_e_terminal() {
+    fn hospedagem_vai_e_volta_pelo_banco() {
+        let h = Hospedagem::le("ld-proj-abcd@term_65c4@4242:987654");
+        assert_eq!(h.rotulo, "ld-proj-abcd");
+        assert_eq!(h.terminal, "term_65c4");
         assert_eq!(
-            parte("ld-proj-abcd@term_65c4"),
-            ("ld-proj-abcd", "term_65c4")
+            h.processo,
+            Some(Processo {
+                pid: 4242,
+                inicio: 987654
+            })
         );
-        // Sem rótulo (não deveria acontecer), o valor inteiro ainda serve de terminal.
-        assert_eq!(parte("term_65c4"), ("", "term_65c4"));
+        assert_eq!(h.to_string(), "ld-proj-abcd@term_65c4@4242:987654");
+
+        // A gravada antes de o processo ir junto, e o rótulo sozinho que o `nossas` devolve.
+        let antiga = Hospedagem::le("ld-proj-abcd@term_65c4");
+        assert_eq!((antiga.terminal, antiga.processo), ("term_65c4", None));
+        let so_rotulo = Hospedagem::le("ld-proj-abcd");
+        assert_eq!((so_rotulo.rotulo, so_rotulo.terminal), ("ld-proj-abcd", ""));
+    }
+
+    #[test]
+    fn processo_vivo_e_o_mesmo_pid_com_o_mesmo_inicio() {
+        let eu = Processo::de(std::process::id()).expect("o próprio processo existe");
+        assert!(eu.vivo());
+        let outro = Processo {
+            inicio: eu.inicio + 1,
+            ..eu
+        };
+        assert!(
+            !outro.vivo(),
+            "pid reaproveitado passou pelo nosso processo"
+        );
+        assert!(Processo::de(u32::MAX).is_none());
+    }
+
+    #[test]
+    fn processo_que_saiu_nao_vive() {
+        let mut filho = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let p = Processo::de(filho.id()).unwrap();
+        assert!(p.vivo());
+        filho.kill().unwrap();
+        // Antes de recolher: zumbi também não é vivo.
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!p.vivo(), "zumbi passou por vivo");
+        filho.wait().unwrap();
+        assert!(!p.vivo());
     }
 
     #[test]
     fn anexar_aponta_o_terminal_e_a_sessao_nomeada() {
-        let h = "ld-proj-abcd@term_65c4";
+        let h = "ld-proj-abcd@term_65c4@4242:987654";
         assert_eq!(
             Herdr::new(None).como_anexar(h),
             "herdr terminal attach term_65c4"
@@ -627,8 +830,22 @@ mod testes_hospedeiro {
             "{}",
             l.hospedagem
         );
+        let processo = Hospedagem::le(&l.hospedagem)
+            .processo
+            .expect("a hospedagem leva o processo");
+        assert!(
+            std::fs::read_to_string(format!("/proc/{}/cmdline", processo.pid))
+                .unwrap()
+                .starts_with("sleep"),
+            "o processo gravado não é o que virou o agente"
+        );
         assert!(h.vive(&l.hospedagem).await);
-        assert!(h.nossas().await.contains(&l.hospedagem));
+        assert_eq!(h.situacao(&l.hospedagem).await, Situacao::Viva);
+        assert!(
+            h.nossas()
+                .await
+                .contains(&"ld-teste-hospedeiro-a1b2".into())
+        );
 
         let log = std::fs::read_to_string(&partida.log).unwrap();
         assert!(log.contains("sessao=a1b2c3d4-vive"), "{log}");
@@ -643,6 +860,95 @@ mod testes_hospedeiro {
         assert!(
             h.mata(&l.hospedagem).await.is_ok(),
             "matar de novo não é erro"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_handoff_mantem_a_sessao_viva_e_troca_o_terminal() {
+        if !tem_herdr() {
+            return;
+        }
+        let sessao = SessaoDeTeste::nova("handoff");
+        let h = sessao.herdr();
+        let dir = tempfile::tempdir().unwrap();
+        let (partida, projeto) = partida_com("exec sleep 60", dir.path(), "4a4d0000-handoff");
+        let l = h.lanca(&partida, &projeto).await.unwrap();
+
+        let saida = sessao
+            .cli()
+            .args(["--session", &sessao.nome, "server", "live-handoff"])
+            .output()
+            .unwrap();
+        assert!(saida.status.success(), "{saida:?}");
+
+        // O processo é o mesmo, e é ele que diz que a sessão vive: o terminal mudou.
+        assert!(h.vive(&l.hospedagem).await, "o handoff matou a sessão");
+        let Situacao::Mudou(nova) = h.situacao(&l.hospedagem).await else {
+            panic!("o terminal não mudou no handoff, ou a sessão sumiu");
+        };
+        let (velha, nova_h) = (Hospedagem::le(&l.hospedagem), Hospedagem::le(&nova));
+        assert_eq!(
+            (nova_h.rotulo, nova_h.processo),
+            (velha.rotulo, velha.processo)
+        );
+        assert_ne!(nova_h.terminal, velha.terminal);
+        assert_eq!(h.situacao(&nova).await, Situacao::Viva);
+
+        h.mata(&nova).await.unwrap();
+        assert!(!h.vive(&nova).await, "a sessão sobreviveu ao mata");
+    }
+
+    #[tokio::test]
+    async fn restart_do_servidor_devolve_o_lugar_da_sessao_sem_o_agente() {
+        if !tem_herdr() {
+            return;
+        }
+        let sessao = SessaoDeTeste::nova("restart");
+        let h = sessao.herdr();
+        let dir = tempfile::tempdir().unwrap();
+        let (partida, projeto) = partida_com(
+            r#"echo "herdr_env=[${HERDR_ENV:-}] pane=[${HERDR_PANE_ID:-}]"; exec sleep 300"#,
+            dir.path(),
+            "7e57a000-restart",
+        );
+        let l = h.lanca(&partida, &projeto).await.unwrap();
+        // É o que impede a integração do Claude Code de registrar o pane, e o herdr de religar
+        // o agente sozinho no restore.
+        let log = std::fs::read_to_string(&partida.log).unwrap();
+        assert!(log.contains("herdr_env=[] pane=[]"), "{log}");
+
+        let parou = sessao
+            .cli()
+            .args(["--session", &sessao.nome, "server", "stop"])
+            .output()
+            .unwrap();
+        assert!(parou.status.success(), "{parou:?}");
+        for _ in 0..50 {
+            if !h.vive(&l.hospedagem).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            !h.vive(&l.hospedagem).await,
+            "a sessão sobreviveu ao restart"
+        );
+
+        // Com o processo morto e o servidor fora do ar, é a situação que sobe o servidor, e o
+        // restore dele devolve o pane com o mesmo rótulo.
+        assert_eq!(h.situacao(&l.hospedagem).await, Situacao::Restaurada);
+        assert!(h.de_pe().await);
+        assert!(
+            h.nossas()
+                .await
+                .contains(&"ld-teste-hospedeiro-7e57".into())
+        );
+
+        h.mata(&l.hospedagem).await.unwrap();
+        assert_eq!(h.situacao(&l.hospedagem).await, Situacao::Morta);
+        assert!(
+            h.nossas().await.is_empty(),
+            "o lugar restaurado ficou para trás"
         );
     }
 

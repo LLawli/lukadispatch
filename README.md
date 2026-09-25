@@ -83,7 +83,11 @@ lukadispatch setup --frontend telegram --agent claude-code --session tmux --enve
 ```
 
 Com `--session herdr`, cada sessão vira uma aba no workspace do projeto, na sessão padrão do
-herdr (ao lado das suas) ou na que `[herdr] sessao` pedir no config.
+herdr (ao lado das suas) ou na que `[herdr] sessao` pedir no config. Se o servidor do herdr
+reiniciar, o daemon relança cada sessão no mesmo tópico, com a conversa inteira; num
+`herdr update --handoff` ela nem cai. Depois de um reboot, é o daemon que sobe o servidor do
+herdr quando há sessão para retomar, e na sessão padrão o herdr religa junto os agentes que
+você tinha abertos. Com `[herdr] sessao`, isso fica restrito ao bot.
 
 Outras entram como implementação nova de cada porta ([`docs/portas.md`](docs/portas.md)), e o
 setup passa a oferecê-las pelo nome. Todas as opções do config, comentadas, estão no
