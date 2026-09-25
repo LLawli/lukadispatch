@@ -113,9 +113,19 @@ Medido no herdr 0.8.2.
 - **Pane que roda um comando some quando ele sai**, e a aba e o workspace vão junto se ficarem
   vazios. O motivo de uma morte ao subir só sobra no log do `script`.
 - **Restart do servidor não reroda o comando do pane.** O pane volta como shell, com o mesmo
-  rótulo e `terminal_id` novo; com a integração do Claude Code instalada, o herdr pode religar
-  `claude --resume` ali, sem `LD_SESSION`. Por isso a hospedagem guarda o terminal: a sessão do
-  bot é dada como morta em vez de "viva" num processo que não fala com o daemon.
+  rótulo e `terminal_id` novo. Por isso a hospedagem guarda o terminal: a sessão do bot é dada
+  como morta em vez de "viva" num processo que não fala com o daemon.
+- **Com a integração do Claude Code instalada, o herdr religa o Claude do bot sozinho.** Ele o
+  faz assim que o servidor sobe, sem cliente anexado: o hook da integração roda dentro da sessão
+  do bot (o pane herda `HERDR_ENV` e `HERDR_PANE_ID`) e registra o pane como agente oficial
+  (`agent_session.source = herdr:claude`). O religado é só `claude --resume <id>`, sob um
+  `bash`: sem o `script` (a saída não vai para o log), sem `LD_SESSION` e sem o `--settings` do
+  bot. O modelo e o modo de permissão voltam pelo transcript; os hooks do bot não voltam, então
+  o `Monitor` não é rearmado e o tópico fala sozinho. É a issue #1.
+- **Servidor subido de dentro de uma sessão do Claude Code herda `CLAUDE_CODE_CHILD_SESSION`**,
+  e todo Claude aberto nos panes dele roda com "Transcript saving is off": o `--resume` depois
+  não tem o que retomar. Vale para o herdr e para o tmux. Em experimento, suba o servidor sem as
+  variáveis `CLAUDE*` e `CLAUDECODE`.
 - **O `herdr agent` não reconhece o Claude Code das sessões do bot**: o processo em primeiro
   plano do pane é o `script`. O estado (idle, working) só pode vir da integração do Claude
   Code, que reporta pelo `HERDR_PANE_ID` herdado através do `script`.
