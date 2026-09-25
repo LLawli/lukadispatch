@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/ld-core", "crates/ld-daemon", "crates/ld-cli", "crates/ld-ask", "crates/ld-mcp"]
 
 [workspace.package]
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT"

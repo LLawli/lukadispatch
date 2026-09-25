@@ -6,6 +6,8 @@ versão para as notas do GitHub Release, então escreva para quem vai decidir se
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-09-25
+
 ### Mudado
 
 - `brew install` e `brew upgrade` não compilam mais nada: a fórmula instala o mesmo tarball da
@@ -95,7 +97,8 @@ Primeira versão pública.
 - Com o `~/.claude/settings.json` ilegível, o `install` gravava por cima só os hooks do
   lukadispatch. Agora ele recusa e não altera nada.
 
-[Unreleased]: https://github.com/LLawli/lukadispatch/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/LLawli/lukadispatch/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/LLawli/lukadispatch/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/LLawli/lukadispatch/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/LLawli/lukadispatch/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/LLawli/lukadispatch/compare/v0.1.0...v0.2.0
