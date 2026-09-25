@@ -32,10 +32,12 @@ const FONTE: &str = "custom:lukadispatch";
 /// milissegundos; passar disto é servidor travado, e travar o daemon junto não ajuda ninguém.
 const PRAZO: Duration = Duration::from_secs(10);
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Herdr {
     /// Sessão nomeada do herdr. `None` é a padrão.
     sessao: Option<String>,
+    /// Para onde vai a saída de erro do servidor que o daemon sobe.
+    log_do_servidor: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,6 +67,7 @@ impl Herdr {
     pub fn new(sessao: Option<String>) -> Self {
         Self {
             sessao: sessao.filter(|s| !s.trim().is_empty()),
+            log_do_servidor: paths::state_dir().join("herdr-servidor.log"),
         }
     }
 
@@ -116,22 +119,32 @@ impl Herdr {
     ///
     /// Ao contrário do `tmux new-session`, a CLI do herdr não sobe servidor sozinha. O servidor
     /// sobe em grupo de processo próprio, para sobreviver ao restart do daemon (a unit usa
-    /// `KillMode=process` pelo mesmo motivo).
+    /// `KillMode=process` pelo mesmo motivo). A saída de erro dele vai para um arquivo: o
+    /// servidor que não sobe (socket com caminho longo demais, sessão corrompida) diz o motivo
+    /// ali, e só ali.
     async fn garante_servidor(&self) -> Result<PathBuf> {
         if let Some(s) = self.socket_se_de_pe().await {
             return Ok(s);
         }
-        Command::new("herdr")
+        let log = &self.log_do_servidor;
+        if let Some(pai) = log.parent() {
+            let _ = std::fs::create_dir_all(pai);
+        }
+        let erro = std::fs::File::create(log)
+            .map(std::process::Stdio::from)
+            .unwrap_or_else(|_| std::process::Stdio::null());
+        let mut servidor = Command::new("herdr")
             .args(self.flag_sessao())
             .arg("server")
             .env_remove("HERDR_SOCKET_PATH")
             .env_remove("HERDR_SESSION")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(erro)
             .process_group(0)
             .spawn()
             .context("subindo o servidor do herdr")?;
+        let nome = self.sessao.as_deref().unwrap_or("sessão padrão");
         for _ in 0..50 {
             tokio::time::sleep(Duration::from_millis(100)).await;
             if let Some(s) = self.socket_se_de_pe().await
@@ -139,10 +152,17 @@ impl Herdr {
             {
                 return Ok(s);
             }
+            // Morto não sobe mais: esperar o resto do prazo só atrasaria o erro.
+            if let Ok(Some(status)) = servidor.try_wait() {
+                bail!(
+                    "o servidor do herdr ({nome}) saiu ao subir ({status}): {}",
+                    ultima_linha(log)
+                );
+            }
         }
         bail!(
-            "o servidor do herdr ({}) não subiu em 5 s",
-            self.sessao.as_deref().unwrap_or("sessão padrão")
+            "o servidor do herdr ({nome}) não subiu em 5 s: {}",
+            ultima_linha(log)
         )
     }
 
@@ -214,6 +234,21 @@ async fn chama(socket: &Path, metodo: &str, params: Value) -> Result<Value> {
         );
     }
     Ok(v["result"].clone())
+}
+
+/// A última linha não vazia de um arquivo de log, ou um aviso de que ele não diz nada.
+fn ultima_linha(log: &Path) -> String {
+    std::fs::read_to_string(log)
+        .ok()
+        .and_then(|t| {
+            t.lines()
+                .rev()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .map(str::to_string)
+        })
+        .map(|l| l.chars().take(300).collect())
+        .unwrap_or_else(|| format!("sem mensagem ({})", log.display()))
 }
 
 /// `rótulo@terminal`, o formato da hospedagem.
@@ -387,15 +422,22 @@ mod testes_hospedeiro {
             .is_ok_and(|s| s.status.success())
     }
 
-    /// Para e apaga a sessão do teste mesmo se ele falhar no meio.
-    struct SessaoDeTeste(String);
+    /// Para e apaga a sessão do teste mesmo se ele falhar no meio. O log do servidor fica num
+    /// diretório do teste, e não no estado do daemon de verdade.
+    struct SessaoDeTeste(String, tempfile::TempDir);
 
     impl SessaoDeTeste {
         fn nova(sufixo: &str) -> Self {
-            Self(format!("ldteste-{}-{sufixo}", std::process::id()))
+            Self::com_nome(format!("ldteste-{}-{sufixo}", std::process::id()))
+        }
+        fn com_nome(nome: String) -> Self {
+            Self(nome, tempfile::tempdir().unwrap())
         }
         fn herdr(&self) -> Herdr {
-            Herdr::new(Some(self.0.clone()))
+            Herdr {
+                log_do_servidor: self.1.path().join("herdr-servidor.log"),
+                ..Herdr::new(Some(self.0.clone()))
+            }
         }
     }
 
@@ -521,6 +563,28 @@ mod testes_hospedeiro {
         assert!(
             msg.contains("morreu") && msg.contains("workstream ocupado"),
             "{msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn servidor_que_nao_sobe_diz_o_motivo() {
+        if !tem_herdr() {
+            return;
+        }
+        // Um nome de sessão longo o bastante estoura o caminho do socket unix (~108 bytes), e o
+        // servidor morre ao subir. O motivo é do herdr, e tem de chegar em quem chamou.
+        let sessao =
+            SessaoDeTeste::com_nome(format!("ldteste-{}-{}", std::process::id(), "x".repeat(90)));
+        let dir = tempfile::tempdir().unwrap();
+        let (partida, projeto) = partida_com("exec sleep 60", dir.path(), "c0ffee00-longo");
+        let inicio = std::time::Instant::now();
+        let e = sessao.herdr().lanca(&partida, &projeto).await.unwrap_err();
+        let msg = format!("{e:#}");
+        assert!(msg.contains("saiu ao subir"), "{msg}");
+        assert!(!msg.contains("sem mensagem"), "o motivo se perdeu: {msg}");
+        assert!(
+            inicio.elapsed() < Duration::from_secs(4),
+            "esperou o prazo inteiro por um servidor que já tinha morrido"
         );
     }
 
