@@ -291,7 +291,12 @@ impl App {
                     "🟢 <b>{}</b>\n<code>{}</code>\n{}\n\nPode falar. Para fechar, mande /kill.",
                     escapa(&projeto.name),
                     escapa(&projeto.path),
-                    escapa(&ficha(model, effort, &modo, &lancada.hospedagem)),
+                    escapa(&ficha(
+                        model,
+                        effort,
+                        &modo,
+                        &self.hospedeiro.descreve(&lancada.hospedagem)
+                    )),
                 ),
                 &[],
                 None,
@@ -505,7 +510,7 @@ impl App {
                             model_final.as_deref(),
                             effort_final.as_deref(),
                             &modo,
-                            &lancada.hospedagem
+                            &self.hospedeiro.descreve(&lancada.hospedagem)
                         ))
                     ),
                     &[],
@@ -916,12 +921,19 @@ impl App {
                 });
             }
             EventKind::Elicitation { servidor, pedido } => {
-                let tmux = s.hospedagem.clone().unwrap_or_else(|| "a sessão".into());
+                let onde = match s.hospedagem.as_deref() {
+                    Some(h) => format!(
+                        "Responda no PC:</i>\n<code>{}</code>",
+                        escapa(&self.hospedeiro.como_anexar(h))
+                    ),
+                    None => "Responda no terminal onde a sessão está aberta.</i>".into(),
+                };
                 let corpo = format!(
-                    "🧩 <b>{}</b> está pedindo confirmação:\n{}\n\n<i>Este diálogo é do próprio                      servidor MCP, fora do sistema de permissões do Claude Code, e não dá para                      responder daqui. Responda no PC:</i>\n<code>tmux attach -t {}</code>",
+                    "🧩 <b>{}</b> está pedindo confirmação:\n{}\n\n<i>Este diálogo é do próprio \
+                     servidor MCP, fora do sistema de permissões do Claude Code, e não dá para \
+                     responder daqui. {onde}",
                     escapa(servidor),
                     escapa(&corta(pedido, 600)),
-                    escapa(&tmux)
                 );
                 let frontend = self.frontend.clone();
                 let anterior = self.tira_aviso(&ev.session_id);
@@ -1048,9 +1060,20 @@ impl App {
         let tentativas = self.hub.bump_rearm(&r.session_id);
         if tentativas > TETO_REARME {
             if let Some(canal) = canal_da_sessao(&s) {
+                // `precisa_monitor` garante que a sessão é do bot, então a hospedagem existe.
+                let anexar = s
+                    .hospedagem
+                    .as_deref()
+                    .map(|h| self.hospedeiro.como_anexar(h))
+                    .unwrap_or_default();
                 let _ = self.frontend.envia(
                     Some(&canal),
-                    "🔇 <b>Sessão surda.</b> O monitor não voltou depois de três lembretes, então parei de insistir. Mande /kill e abra outra, ou reative pelo tmux.",
+                    &format!(
+                        "🔇 <b>Sessão surda.</b> O monitor não voltou depois de três lembretes, \
+                         então parei de insistir. Mande /kill e abra outra, ou reative no PC:\n\
+                         <code>{}</code>",
+                        escapa(&anexar)
+                    ),
                     &[],
                     None,
                 ).await;
@@ -1505,10 +1528,10 @@ fn canal_da_sessao(s: &Session) -> Option<Canal> {
     s.canal_id.as_deref().map(Canal::new)
 }
 
-/// Linha de identificação da sessão: modelo, esforço, modo de permissão e tmux.
-fn ficha(model: Option<&str>, effort: Option<&str>, modo: &str, tmux: &str) -> String {
+/// Linha de identificação da sessão: modelo, esforço, modo de permissão e onde ela roda.
+fn ficha(model: Option<&str>, effort: Option<&str>, modo: &str, onde: &str) -> String {
     format!(
-        "modelo: {} · esforço: {} · permissão: {modo} · tmux: {tmux}",
+        "modelo: {} · esforço: {} · permissão: {modo} · {onde}",
         model.unwrap_or("padrão"),
         effort.unwrap_or("padrão"),
     )

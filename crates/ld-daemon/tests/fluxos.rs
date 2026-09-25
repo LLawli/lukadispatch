@@ -25,7 +25,7 @@ use async_trait::async_trait;
 use ld_core::config::{Config, Project};
 use ld_core::context::ContextUsage;
 use ld_core::models::Modelo;
-use ld_core::proto::StopReport;
+use ld_core::proto::{EventKind, SessionEvent, StopReport};
 use ld_core::state::{Session, Store};
 use ld_core::transcript::{Fala, SessaoAnterior};
 use ld_core::usage::{SessionTokens, Windows};
@@ -119,6 +119,12 @@ impl Hospedeiro for HospedeiroFalso {
     }
     async fn nossas(&self) -> Vec<String> {
         self.vivas.lock().unwrap().iter().cloned().collect()
+    }
+    fn descreve(&self, nome: &str) -> String {
+        format!("falso: {nome}")
+    }
+    fn como_anexar(&self, nome: &str) -> String {
+        format!("falso-anexa {nome}")
     }
 }
 
@@ -472,6 +478,14 @@ async fn criar_sessao_abre_canal_e_apresenta_a_sessao() {
         "a sessão nasce se apresentando no canal dela: {:?}",
         c.fe.textos()
     );
+    // Onde ela roda vem do hospedeiro, não de um "tmux:" fixo no domínio.
+    assert!(
+        c.fe.textos()
+            .iter()
+            .any(|t| t.contains(&format!("falso: ld-outro-{id}"))),
+        "{:?}",
+        c.fe.textos()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -768,6 +782,29 @@ async fn turno_que_ninguem_pediu_nao_vai_para_o_canal() {
         "{:?}",
         c.fe.chamadas()
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dialogo_de_mcp_diz_como_anexar_pelo_hospedeiro_em_uso() {
+    // O diálogo só se responde no teclado, então o aviso precisa do comando do hospedeiro que
+    // está de fato rodando a sessão: com o herdr, um "tmux attach" mandaria você para o lugar
+    // errado.
+    let c = cena().await;
+    c.app
+        .on_event(&SessionEvent {
+            session_id: SESSAO.into(),
+            event: EventKind::Elicitation {
+                servidor: "github".into(),
+                pedido: "autorizar?".into(),
+            },
+        })
+        .unwrap();
+    let aviso = espera("o aviso do diálogo", || {
+        c.fe.textos().into_iter().find(|t| t.contains("github"))
+    })
+    .await;
+    assert!(aviso.contains(&format!("falso-anexa {TMUX}")), "{aviso}");
+    assert!(!aviso.contains("tmux attach"), "{aviso}");
 }
 
 fn textos(c: &Cena) -> Vec<String> {

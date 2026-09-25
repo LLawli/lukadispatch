@@ -203,6 +203,13 @@ pub trait Hospedeiro: Send + Sync + 'static {
     /// As sessões que este projeto criou e ainda estão de pé, inclusive as que o banco já
     /// esqueceu (é assim que a reconciliação acha órfãs).
     async fn nossas(&self) -> Vec<String>;
+
+    /// Como a sessão aparece na ficha do canal: o hospedeiro e onde achá-la nele.
+    fn descreve(&self, nome: &str) -> String;
+
+    /// A linha de comando que anexa a sessão no PC. Vai nos avisos que só se resolvem no
+    /// teclado, como um diálogo de servidor MCP ou uma sessão surda.
+    fn como_anexar(&self, nome: &str) -> String;
 }
 
 /// O tmux como [`Hospedeiro`]. As funções livres deste módulo são a implementação.
@@ -225,6 +232,14 @@ impl Hospedeiro for Tmux {
 
     async fn nossas(&self) -> Vec<String> {
         nossas_sessoes().await
+    }
+
+    fn descreve(&self, nome: &str) -> String {
+        format!("tmux: {nome}")
+    }
+
+    fn como_anexar(&self, nome: &str) -> String {
+        format!("tmux attach -t {nome}")
     }
 }
 
