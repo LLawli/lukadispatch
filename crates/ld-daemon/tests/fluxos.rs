@@ -1931,3 +1931,55 @@ async fn o_cli_abre_na_branch_sem_perguntar_e_recusa_a_principal() {
         "a branch com sessão aberta não ganha outra"
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn reconciliar_durante_uma_partida_nao_mata_o_que_parece_orfao() {
+    let (c, _memoria, projeto) = cena_de_worktree().await;
+    // Uma sessão encerrada cujo rótulo ainda está vivo no hospedeiro: é o que a partida de uma
+    // sessão sendo retomada parece, enquanto espera a memória ser solta.
+    c.app
+        .store
+        .upsert(&Session {
+            session_id: "orfa".into(),
+            project: "outro".into(),
+            cwd: "/tmp/outro".into(),
+            transcript_path: None,
+            hospedagem: Some("ld-orfa".into()),
+            canal_id: None,
+            status: "ocioso".into(),
+            status_msg_id: None,
+            model: None,
+            effort: None,
+            permission_mode: None,
+            created_at: 0,
+            ended_at: None,
+        })
+        .unwrap();
+    c.app.store.end("orfa").unwrap();
+    c.hospedeiro.vivas.lock().unwrap().insert("ld-orfa".into());
+    *c.hospedeiro.presa.lock().unwrap() = 2;
+
+    let app = c.app.clone();
+    let abrindo = tokio::spawn(async move { app.create_session(&projeto, None, None, None).await });
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    c.app.reconcile().await.unwrap();
+    assert!(
+        !c.hospedeiro
+            .eventos
+            .lock()
+            .unwrap()
+            .contains(&"mata:ld-orfa".to_string()),
+        "a varredura de órfãs rodou no meio de uma partida"
+    );
+
+    abrindo.await.unwrap().unwrap();
+    c.app.reconcile().await.unwrap();
+    assert!(
+        c.hospedeiro
+            .eventos
+            .lock()
+            .unwrap()
+            .contains(&"mata:ld-orfa".to_string()),
+        "sem partida em curso, a órfã vai embora"
+    );
+}

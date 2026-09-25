@@ -146,6 +146,10 @@ pub struct App {
     /// que caiu sem soltá-la, antes de subir com uma memória só dela. Um teste troca com
     /// [`App::com_espera_da_memoria`].
     espera_da_memoria: std::time::Duration,
+    /// Quantas partidas estão subindo agora. Enquanto houver alguma, a reconciliação não varre
+    /// órfãs: a partida de uma sessão que está sendo retomada tem o rótulo de uma sessão ainda
+    /// encerrada no banco, e passaria por lixo, sobretudo enquanto espera a memória ser solta.
+    partidas_em_curso: Arc<std::sync::atomic::AtomicUsize>,
     /// A hora do último `SessionStart` de cada sessão. É o sinal de que ela já passou pelo
     /// início, e de que o que a memória tirou do caminho antes da partida pode voltar.
     inicios: Arc<Mutex<HashMap<String, tokio::time::Instant>>>,
@@ -190,6 +194,7 @@ impl App {
             espera_depois_do_fim: std::time::Duration::from_secs(5),
             espera_da_memoria: std::time::Duration::from_secs(100),
             inicios: Arc::new(Mutex::new(HashMap::new())),
+            partidas_em_curso: Default::default(),
             entregues: Mutex::new(HashMap::new()),
         }
     }
@@ -257,6 +262,7 @@ impl App {
                 None
             });
         let desde = tokio::time::Instant::now();
+        let _em_curso = EmCurso::conta(&self.partidas_em_curso);
         let r = self
             .lanca_esperando_a_memoria(&p, &dir, worktree.as_ref())
             .await;
@@ -968,7 +974,16 @@ impl App {
         // O contrário também acontece: o hospedeiro ficou com uma sessão viva já encerrada no
         // banco (um relançamento interrompido no meio, por exemplo). Ninguém mais fala com ela,
         // e o canal dela já foi apagado, então é lixo que só consome memória.
-        for rotulo in self.hospedeiro.nossas().await {
+        let partindo = self
+            .partidas_em_curso
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0;
+        let rotulos = if partindo {
+            Vec::new()
+        } else {
+            self.hospedeiro.nossas().await
+        };
+        for rotulo in rotulos {
             if self.store.rotulo_de_sessao_morta(&rotulo).unwrap_or(false) {
                 warn!(rotulo = %rotulo, "sessão órfã de sessão encerrada; matando");
                 let _ = self.hospedeiro.mata(&rotulo).await;
@@ -1839,6 +1854,22 @@ impl App {
 }
 
 /// O canal opaco guardado no banco, como o tipo que o resto do domínio entende.
+/// Conta uma partida em curso enquanto vive, e desconta ao sair, dê ela certo ou não.
+struct EmCurso(Arc<std::sync::atomic::AtomicUsize>);
+
+impl EmCurso {
+    fn conta(contador: &Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        contador.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self(contador.clone())
+    }
+}
+
+impl Drop for EmCurso {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// Como o canal da sessão se chama: o projeto, e a branch quando ela roda numa worktree, para
 /// duas sessões do mesmo projeto não terem canais de mesmo nome.
 pub fn nome_do_canal(projeto: &str, worktree: Option<&Worktree>) -> String {
