@@ -102,11 +102,11 @@ impl Hospedeiro for HospedeiroFalso {
             "o hospedeiro recebeu script que não existe"
         );
         self.partidas.lock().unwrap().push(partida.clone());
-        let tmux = format!("ld-{}-{}", projeto.name, partida.session_id);
-        self.vivas.lock().unwrap().insert(tmux.clone());
+        let hospedagem = format!("ld-{}-{}", projeto.name, partida.session_id);
+        self.vivas.lock().unwrap().insert(hospedagem.clone());
         Ok(Launched {
             session_id: partida.session_id.clone(),
-            tmux,
+            hospedagem,
         })
     }
     async fn vive(&self, nome: &str) -> bool {
@@ -281,7 +281,7 @@ async fn cena_com(limites: Limites) -> Cena {
             project: "proj".into(),
             cwd: "/tmp/proj".into(),
             transcript_path: None,
-            tmux: Some(TMUX.into()),
+            hospedagem: Some(TMUX.into()),
             canal_id: Some(canal.as_str().to_string()),
             status: "ocioso".into(),
             status_msg_id: None,

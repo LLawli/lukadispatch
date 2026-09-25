@@ -272,7 +272,7 @@ impl App {
             project: projeto.name.clone(),
             cwd: projeto.path.clone(),
             transcript_path: None,
-            tmux: Some(lancada.tmux.clone()),
+            hospedagem: Some(lancada.hospedagem.clone()),
             canal_id: Some(canal.as_str().to_string()),
             status: "iniciando".into(),
             status_msg_id: None,
@@ -291,7 +291,7 @@ impl App {
                     "🟢 <b>{}</b>\n<code>{}</code>\n{}\n\nPode falar. Para fechar, mande /kill.",
                     escapa(&projeto.name),
                     escapa(&projeto.path),
-                    escapa(&ficha(model, effort, &modo, &lancada.tmux)),
+                    escapa(&ficha(model, effort, &modo, &lancada.hospedagem)),
                 ),
                 &[],
                 None,
@@ -350,9 +350,9 @@ impl App {
         self.hub.unlisten_qualquer(session_id);
         self.status.forget(session_id);
 
-        if let Some(tmux) = &s.tmux
-            && self.hospedeiro.vive(tmux).await
-            && let Err(e) = self.hospedeiro.mata(tmux).await
+        if let Some(hospedagem) = &s.hospedagem
+            && self.hospedeiro.vive(hospedagem).await
+            && let Err(e) = self.hospedeiro.mata(hospedagem).await
         {
             warn!(sessao = %session_id, erro = %e, "não consegui encerrar a sessão no hospedeiro");
         }
@@ -471,8 +471,8 @@ impl App {
         let effort_final = effort.map(str::to_string).or_else(|| s.effort.clone());
 
         self.marca_relancamento(session_id);
-        if let Some(tmux) = &s.tmux {
-            self.hospedeiro.mata(tmux).await?;
+        if let Some(hospedagem) = &s.hospedagem {
+            self.hospedeiro.mata(hospedagem).await?;
             // Sem esta pausa o `--resume` pode esbarrar no processo anterior ainda saindo.
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
@@ -505,7 +505,7 @@ impl App {
                             model_final.as_deref(),
                             effort_final.as_deref(),
                             &modo,
-                            &lancada.tmux
+                            &lancada.hospedagem
                         ))
                     ),
                     &[],
@@ -585,13 +585,13 @@ impl App {
     pub async fn reconcile(&self) -> Result<usize> {
         let mut mortas = 0;
         for s in self.store.live()? {
-            let Some(tmux) = &s.tmux else {
+            let Some(hospedagem) = &s.hospedagem else {
                 continue; // sessão do terminal: quem cuida dela é o hook SessionEnd.
             };
-            if self.hospedeiro.vive(tmux).await || self.em_relancamento(&s.session_id) {
+            if self.hospedeiro.vive(hospedagem).await || self.em_relancamento(&s.session_id) {
                 continue;
             }
-            warn!(sessao = %s.session_id, tmux = %tmux, "sessão sumiu no hospedeiro; encerrando");
+            warn!(sessao = %s.session_id, hospedagem = %hospedagem, "sessão sumiu no hospedeiro; encerrando");
             self.end_session(&s.session_id, true).await?;
             mortas += 1;
         }
@@ -648,10 +648,14 @@ impl App {
         // O contrário também acontece: o hospedeiro ficou com uma sessão viva já encerrada no
         // banco (um relançamento interrompido no meio, por exemplo). Ninguém mais fala com ela,
         // e o canal dela já foi apagado, então é lixo que só consome memória.
-        for tmux in self.hospedeiro.nossas().await {
-            if self.store.tmux_de_sessao_morta(&tmux).unwrap_or(false) {
-                warn!(tmux = %tmux, "sessão órfã de sessão encerrada; matando");
-                let _ = self.hospedeiro.mata(&tmux).await;
+        for hospedagem in self.hospedeiro.nossas().await {
+            if self
+                .store
+                .hospedagem_de_sessao_morta(&hospedagem)
+                .unwrap_or(false)
+            {
+                warn!(hospedagem = %hospedagem, "sessão órfã de sessão encerrada; matando");
+                let _ = self.hospedeiro.mata(&hospedagem).await;
             }
         }
         Ok(mortas)
@@ -912,7 +916,7 @@ impl App {
                 });
             }
             EventKind::Elicitation { servidor, pedido } => {
-                let tmux = s.tmux.clone().unwrap_or_else(|| "a sessão".into());
+                let tmux = s.hospedagem.clone().unwrap_or_else(|| "a sessão".into());
                 let corpo = format!(
                     "🧩 <b>{}</b> está pedindo confirmação:\n{}\n\n<i>Este diálogo é do próprio                      servidor MCP, fora do sistema de permissões do Claude Code, e não dá para                      responder daqui. Responda no PC:</i>\n<code>tmux attach -t {}</code>",
                     escapa(servidor),
@@ -1516,7 +1520,7 @@ fn nova_sessao(r: &RegisterSession) -> Session {
         project: nome_do_cwd(&r.cwd),
         cwd: r.cwd.clone(),
         transcript_path: Some(r.transcript_path.clone()),
-        tmux: None,
+        hospedagem: None,
         canal_id: None,
         status: "ocioso".into(),
         status_msg_id: None,

@@ -17,7 +17,7 @@ use crate::agente::Partida;
 #[derive(Debug)]
 pub struct Launched {
     pub session_id: String,
-    pub tmux: String,
+    pub hospedagem: String,
 }
 
 /// Nome de sessão tmux: previsível para você achar no `tmux ls`, e único para dois projetos com
@@ -113,7 +113,7 @@ pub async fn launch(partida: &Partida, projeto: &Project) -> Result<Launched> {
 
     Ok(Launched {
         session_id: partida.session_id.clone(),
-        tmux,
+        hospedagem: tmux,
     })
 }
 
@@ -186,7 +186,7 @@ pub async fn kill(tmux: &str) -> Result<()> {
 /// ou um contêiner por sessão entraria como outra implementação, e os testes de fluxo usam uma
 /// de mentira para não depender de tmux nenhum.
 ///
-/// Os nomes que ela devolve em [`Launched::tmux`] e aceita nos outros métodos são opacos para
+/// Os nomes que ela devolve em [`Launched::hospedagem`] e aceita nos outros métodos são opacos para
 /// quem chama: é só o que identifica a sessão para o próprio hospedeiro.
 #[async_trait::async_trait]
 pub trait Hospedeiro: Send + Sync + 'static {
@@ -328,11 +328,15 @@ mod testes_hospedeiro {
         let h = Tmux;
         let l = h.lanca(&partida, &projeto).await.unwrap();
         assert_eq!(l.session_id, "a1b2c3d4-vive");
-        assert!(l.tmux.starts_with("ld-teste-hospedeiro-"), "{}", l.tmux);
-        assert!(h.vive(&l.tmux).await);
-        assert!(h.nossas().await.contains(&l.tmux));
-        h.mata(&l.tmux).await.unwrap();
-        assert!(!h.vive(&l.tmux).await, "a sessão sobreviveu ao mata");
+        assert!(
+            l.hospedagem.starts_with("ld-teste-hospedeiro-"),
+            "{}",
+            l.hospedagem
+        );
+        assert!(h.vive(&l.hospedagem).await);
+        assert!(h.nossas().await.contains(&l.hospedagem));
+        h.mata(&l.hospedagem).await.unwrap();
+        assert!(!h.vive(&l.hospedagem).await, "a sessão sobreviveu ao mata");
     }
 
     #[tokio::test]

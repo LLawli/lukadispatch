@@ -44,7 +44,7 @@ fn sessao_de_teste() -> Session {
         project: "proj".into(),
         cwd: "/tmp/proj".into(),
         transcript_path: None,
-        tmux: Some("ld-proj-aaaa".into()),
+        hospedagem: Some("ld-proj-aaaa".into()),
         canal_id: Some("7".into()),
         status: "ocioso".into(),
         status_msg_id: None,

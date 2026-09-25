@@ -30,6 +30,7 @@ uma peça sem reescrever o resto.
 | [0011](decisoes/0011-armazenamento-nao-e-porta.md) | O SQLite não é uma porta, e o que faria isso mudar |
 | [0012](decisoes/0012-agente-e-envelope.md) | O agente de código é uma porta, e o `ai-memory run` é um envelope separado dele |
 | [0013](decisoes/0013-preview-em-texto.md) | O preview de uma pergunta vai como texto, não como imagem |
+| [0014](decisoes/0014-hospedagem-neutra.md) | O id da sessão no hospedeiro se chama `hospedagem`, no Rust e no banco |
 
 ## Como escrever uma decisão nova
 
