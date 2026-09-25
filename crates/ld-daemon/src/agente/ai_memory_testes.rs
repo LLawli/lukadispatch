@@ -246,7 +246,10 @@ async fn ponte_tira_e_devolve_handoffs_no_ai_memory_de_verdade() {
         .map(|h| h["summary"].as_str().unwrap())
         .collect();
     assert_eq!(resumos, ["segundo", "primeiro"], "o mais novo sai primeiro");
-    assert!(tira_handoffs(&escopo).await.unwrap().is_empty(), "a fila ficou vazia");
+    assert!(
+        tira_handoffs(&escopo).await.unwrap().is_empty(),
+        "a fila ficou vazia"
+    );
 
     devolve_handoffs(&escopo, &tirados).await.unwrap();
     let de_volta = tira_handoffs(&escopo).await.unwrap();
@@ -254,7 +257,11 @@ async fn ponte_tira_e_devolve_handoffs_no_ai_memory_de_verdade() {
         .iter()
         .map(|h| h["summary"].as_str().unwrap())
         .collect();
-    assert_eq!(resumos, ["segundo", "primeiro"], "a ordem entre eles não mudou");
+    assert_eq!(
+        resumos,
+        ["segundo", "primeiro"],
+        "a ordem entre eles não mudou"
+    );
     assert_eq!(de_volta[0]["next_steps"], json!(["b"]));
     assert_eq!(de_volta[0]["cwd"], json!("/home/eu/terminal"));
 
