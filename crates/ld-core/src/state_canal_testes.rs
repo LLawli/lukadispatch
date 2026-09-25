@@ -15,7 +15,7 @@ fn sessao(id: &str, canal: Option<&str>) -> Session {
         project: "proj".into(),
         cwd: format!("/tmp/{id}"),
         transcript_path: None,
-        tmux: Some(format!("ld-proj-{id}")),
+        hospedagem: Some(format!("ld-proj-{id}")),
         canal_id: canal.map(str::to_string),
         status: "ocioso".into(),
         status_msg_id: None,
@@ -172,4 +172,31 @@ fn banco_antigo_com_id_inteiro_continua_funcionando() {
         Some("m1")
     );
     assert_eq!(st.by_canal("630").unwrap().unwrap().session_id, "viva");
+}
+
+#[test]
+fn banco_antigo_com_coluna_tmux_vira_hospedagem() {
+    // A coluna nasceu `tmux`. Uma sessão viva gravada nela não pode sumir na renomeação: é por
+    // ela que o daemon acha o processo para matar no /kill e varrer como órfão.
+    let dir = tempfile::tempdir().unwrap();
+    let caminho = dir.path().join("state.db");
+    Connection::open(&caminho)
+        .unwrap()
+        .execute_batch(ESQUEMA_ANTIGO)
+        .unwrap();
+
+    let st = Store::open(&caminho).unwrap();
+    let viva = st.get("viva").unwrap().unwrap();
+    assert_eq!(viva.hospedagem.as_deref(), Some("ld-proj-viva"));
+    assert!(viva.owned_by_bot());
+    assert!(st.hospedagem_de_sessao_morta("ld-proj-morta").unwrap());
+    assert!(!st.hospedagem_de_sessao_morta("ld-proj-viva").unwrap());
+    drop(st);
+
+    // Abrir de novo (todo restart do daemon) não pode falhar nem perder o valor.
+    let st = Store::open(&caminho).unwrap();
+    assert_eq!(
+        st.get("viva").unwrap().unwrap().hospedagem.as_deref(),
+        Some("ld-proj-viva")
+    );
 }

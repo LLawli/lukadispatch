@@ -25,8 +25,9 @@ projetos, as suas ferramentas e a sua conta.
   conversa.
 - **Ver o consumo**: um painel fixo mostra o contexto e os tokens de cada sessão e quanto resta
   das janelas de 5h e 7 dias da conta.
-- **Voltar para o teclado** quando quiser: cada sessão é um tmux de verdade
-  (`tmux attach -t ld-<projeto>-<id>`), e o que você digitar lá também aparece no tópico.
+- **Voltar para o teclado** quando quiser: cada sessão é um terminal de verdade, no tmux
+  (`tmux attach -t ld-<projeto>-<id>`) ou numa aba do [herdr](https://herdr.dev), e o que você
+  digitar lá também aparece no tópico.
 
 ## Instalar
 
@@ -39,7 +40,7 @@ curl -fsSL https://raw.githubusercontent.com/LLawli/lukadispatch/master/install.
 O script baixa o binário da última release, confere o sha256, instala em `~/.local/bin` e emenda
 no `lukadispatch setup`, que conversa com você até o bot estar respondendo:
 
-1. confere o que a máquina tem (Claude Code, tmux, ai-memory) e diz o que falta;
+1. confere o que a máquina tem (Claude Code, tmux ou herdr, ai-memory) e diz o que falta;
 2. pede o token do bot que você cria no [@BotFather](https://t.me/BotFather), e confere nele se
    o Group Privacy está desligado;
 3. explica como criar o grupo com tópicos e, por uma mensagem que você manda nele, descobre
@@ -66,7 +67,8 @@ Ou baixe o `lukadispatch-linux-<arq>.tar.gz` da [página de releases](https://gi
 e rode o `install.sh --de .` que vem dentro dele.
 
 **Precisa ter:** [Claude Code](https://docs.claude.com/en/docs/claude-code) 2.1.274 ou mais
-novo e `tmux`. O daemon e o CLI são estáticos e rodam em qualquer Linux; a janela de pergunta no
+novo e `tmux` ou [herdr](https://herdr.dev) (basta um; o setup usa o tmux se houver, senão o
+herdr). O daemon e o CLI são estáticos e rodam em qualquer Linux; a janela de pergunta no
 PC usa a gtk4 e a libadwaita 1.5+ do sistema, e sem elas a pergunta segue só pelo chat. O
 [ai-memory](https://github.com/akitaonrails/ai-memory) é opcional: sem ele, o setup oferece rodar
 as sessões direto. Para dividir arquivos grandes: `7z` (ou `rar`) e `ffmpeg`. A transcrição de
@@ -79,6 +81,9 @@ O setup escolhe uma implementação para cada peça. Os padrões são as que exi
 ```bash
 lukadispatch setup --frontend telegram --agent claude-code --session tmux --envelope ai-memory
 ```
+
+Com `--session herdr`, cada sessão vira uma aba no workspace do projeto, na sessão padrão do
+herdr (ao lado das suas) ou na que `[herdr] sessao` pedir no config.
 
 Outras entram como implementação nova de cada porta ([`docs/portas.md`](docs/portas.md)), e o
 setup passa a oferecê-las pelo nome. Todas as opções do config, comentadas, estão no
@@ -135,7 +140,7 @@ lukadispatch new <projeto>            # abre uma sessão sem passar pelo Telegra
 lukadispatch send <id> "texto"        # manda uma mensagem para ela
 lukadispatch send-file <caminho>      # devolve um arquivo pelo tópico da sessão
 lukadispatch kill <id>
-tmux attach -t ld-<projeto>-<id>
+tmux attach -t ld-<projeto>-<id>      # ou, no herdr, o comando que a ficha do tópico mostra
 ```
 
 ## Segurança

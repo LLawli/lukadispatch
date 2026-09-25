@@ -10,7 +10,7 @@ O daemon fala com o mundo por traits. Cada uma tem implementações prontas, esc
 | envelope do agente | `agente::Envelope` | `ai-memory`, `nenhum` | `[agente] envelope = "ai-memory"` |
 | voz para texto | `transcritor::Transcritor` | `processo` (qualquer programa local) | `[transcricao] motor = "processo"` |
 | arquivo grande | `divisor::Divisor` | `video` (ffmpeg), `7z`, `rar` | `[arquivos] divisor = "7z"`, `cortar_video = true` |
-| onde a sessão roda | `sessions::Hospedeiro` | `tmux` | `hospedeiro = "tmux"` |
+| onde a sessão roda | `sessions::Hospedeiro` | `tmux`, `herdr` | `hospedeiro = "tmux"`, `[herdr] sessao` |
 
 Elas são montadas em `main.rs` e chegam ao `App` num `Portas`:
 
@@ -147,7 +147,7 @@ A sessão não roda o agente direto. São três peças numa partida, cada uma tr
 ```
 ai-memory run --new lukadispatch-0123abcd-1790000000   ← Envelope (AiMemory)
   claude --session-id <id> --settings <...> "<prompt>"  ← Agente (ClaudeCode::invocacao)
-num tmux ld-<projeto>-<id>                              ← Hospedeiro (Tmux)
+num tmux ld-<projeto>-<id>, ou aba do herdr            ← Hospedeiro (Tmux, Herdr)
 ```
 
 **Trocar só o envelope** é config: `[agente] envelope = "nenhum"` roda o agente sem o
@@ -257,17 +257,27 @@ grande falha com um erro que diz qual divisor faltou.
 
 ## Hospedeiro: trocar o tmux
 
-**Onde:** `crates/ld-daemon/src/sessions.rs`, trait `Hospedeiro`. Ele recebe o script de partida
+**Onde:** `crates/ld-daemon/src/sessions/`, trait `Hospedeiro`. Ele recebe o script de partida
 pronto (montado pelo agente e pelo envelope) e só o roda.
 
-O tmux foi escolhido porque deixa a sessão anexável no PC (`tmux attach -t ld-<projeto>-<id>`)
-e sobrevive a restart do daemon. Outro multiplexador (zellij, screen) ou um contêiner por sessão
-entraria como outra implementação de `lanca`, `vive`, `mata` e `nossas`.
+O tmux (`mod.rs`) foi o primeiro porque deixa a sessão anexável no PC
+(`tmux attach -t ld-<projeto>-<id>`) e sobrevive a restart do daemon. O herdr (`herdr.rs`) é o
+segundo: uma aba por sessão no workspace do projeto, falando JSON direto no socket dele (só o
+`layout.apply` abre um pane já rodando um comando com ambiente, e a CLI não o expõe). Outro
+multiplexador (zellij, screen) ou um contêiner por sessão entraria como outra implementação de
+`lanca`, `vive`, `mata`, `nossas`, `descreve` e `como_anexar`. Os dois últimos são o que o
+usuário lê: a ficha do tópico e o comando para anexar no PC, que vai nos avisos que só o teclado
+resolve.
+
+O id que `lanca` devolve é opaco e vai para `Session::hospedagem` (coluna `hospedagem`): o tmux
+grava o nome da sessão, o herdr grava `rótulo@terminal`
+([decisoes/0014](decisoes/0014-hospedagem-neutra.md)).
 
 Duas coisas que qualquer hospedeiro tem de preservar, porque o resto do sistema depende delas:
 
 - **A sessão precisa de um terminal de verdade.** Com pipe no stdout, o Claude Code vira não
-  interativo. O tmux resolve isso; espelhar a saída é por `pipe-pane`, não por redirecionamento.
+  interativo. O tmux resolve isso e espelha a saída por `pipe-pane`; o herdr roda o script sob
+  `script -f`, que dá o terminal e espelha no mesmo passo. Redirecionar não serve.
 - **O ambiente da sessão carrega `LD_SESSION` e `LUKADISPATCH_SOCKET`.** É assim que os hooks,
   rodando dentro dela, acham o daemon.
 

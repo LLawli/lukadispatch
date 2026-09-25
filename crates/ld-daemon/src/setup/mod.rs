@@ -46,7 +46,7 @@ lukadispatch setup: configura o lukadispatch nesta máquina, conversando.
 
   --frontend <nome>   o aplicativo de chat           (padrão: telegram)
   --agent <nome>      o agente de código das sessões  (padrão: claude-code)
-  --session <nome>    onde cada sessão roda           (padrão: tmux)
+  --session <nome>    onde cada sessão roda           (padrão: tmux; herdr sem tmux)
   --envelope <nome>   o que envolve o agente          (padrão: ai-memory; ou nenhum)
   --refazer           pergunta de novo o que já está resolvido (trocar de bot, grupo, motor)
 
@@ -108,10 +108,18 @@ pub fn le_argumentos(args: &[String]) -> Result<Pedido> {
 /// pergunta.
 ///
 /// Peça sem flag é a do config atual: rodar o setup de novo não pode desfazer uma escolha. Sem
-/// config, é o padrão do `Config`. Os pré-requisitos locais vêm antes do frontend: é melhor saber
-/// que falta o tmux antes de criar um bot do que depois.
-pub fn pecas(sel: &Selecao, atual: Option<&Config>) -> Result<Vec<Box<dyn Peca>>> {
-    let padrao = Config::default();
+/// config, é o padrão do `Config`, menos o hospedeiro, que é o que a máquina tem (o tmux, senão
+/// o herdr). Os pré-requisitos locais vêm antes do frontend: é melhor saber que falta o tmux
+/// antes de criar um bot do que depois.
+pub fn pecas(
+    sel: &Selecao,
+    atual: Option<&Config>,
+    tem_programa: &dyn Fn(&str) -> bool,
+) -> Result<Vec<Box<dyn Peca>>> {
+    let padrao = Config {
+        hospedeiro: pecas::hospedeiro_da_maquina(tem_programa).into(),
+        ..Config::default()
+    };
     let base = atual.unwrap_or(&padrao);
     let nome = |flag: &Option<String>, doc: &str| flag.clone().unwrap_or_else(|| doc.to_string());
     Ok(vec![
@@ -136,7 +144,7 @@ pub async fn roda(sel: Selecao) -> Result<()> {
     let config = std::fs::read_to_string(&arquivo_config).ok();
     let env = std::fs::read_to_string(&arquivo_env).ok();
     let mut r = Rascunho::de(config.as_deref(), env.as_deref())?;
-    let pecas = pecas(&sel, r.havia_config.then_some(&r.atual))?;
+    let pecas = pecas(&sel, r.havia_config.then_some(&r.atual), &*r.tem_programa)?;
     r.refazer = sel.refazer;
     // O daemon e o setup escutando o mesmo bot brigam: o Telegram entrega cada update a um só, e
     // o outro recebe 409. Por isso o serviço para, mas só quando o setup precisa escutar.

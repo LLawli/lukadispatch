@@ -37,7 +37,7 @@ fn selecao(s: &str) -> Selecao {
 fn sem_seletor_sao_os_padroes_que_existem() {
     let sel = selecao("");
     assert_eq!(sel, Selecao::default());
-    let nomes: Vec<&str> = pecas(&sel, None)
+    let nomes: Vec<&str> = pecas(&sel, None, &so_tmux)
         .unwrap()
         .iter()
         .map(|p| p.nome())
@@ -45,10 +45,62 @@ fn sem_seletor_sao_os_padroes_que_existem() {
     assert_eq!(nomes, ["tmux", "claude-code", "ai-memory", "telegram"]);
 }
 
+fn so_tmux(p: &str) -> bool {
+    p == "tmux"
+}
+
+#[test]
+fn config_novo_usa_o_hospedeiro_que_a_maquina_tem() {
+    // Só um dos dois é necessário: o tmux se houver, senão o herdr.
+    let hospedeiro = |tem: &dyn Fn(&str) -> bool| pecas(&selecao(""), None, tem).unwrap()[0].nome();
+    assert_eq!(hospedeiro(&|p| p == "tmux"), "tmux");
+    assert_eq!(hospedeiro(&|p| p == "herdr"), "herdr");
+    assert_eq!(
+        hospedeiro(&|p| p == "tmux" || p == "herdr"),
+        "tmux",
+        "com os dois, o herdr é opt-in"
+    );
+    assert_eq!(
+        hospedeiro(&|_| false),
+        "tmux",
+        "sem nenhum, o passo do tmux avisa"
+    );
+    // A flag manda mesmo sem o programa: o passo dele é que avisa.
+    assert_eq!(
+        pecas(&selecao("--session herdr"), None, &so_tmux).unwrap()[0].nome(),
+        "herdr"
+    );
+}
+
+#[tokio::test]
+async fn passo_do_herdr_grava_o_hospedeiro_e_avisa_o_que_falta() {
+    let mut r = Rascunho::de(None, None).unwrap();
+    r.tem_programa = Box::new(|p| p == "herdr");
+    let peca = pecas::hospedeiro("herdr").unwrap();
+    let (res, tela) = com_tela("", async |t| peca.configura(t, &mut r).await).await;
+    res.unwrap();
+    assert!(tela.contains("herdr: ok"), "{tela}");
+    assert!(tela.contains("falta o script"), "{tela}");
+    assert!(tela.contains("sessão padrão do herdr"), "{tela}");
+    let cfg: Config = toml::from_str(&r.config_texto()).unwrap();
+    assert_eq!(cfg.hospedeiro, "herdr");
+    crate::sessions::da_config(&cfg).unwrap();
+
+    // Sem herdr, avisa e aponta a saída pelo tmux.
+    let mut r = Rascunho::de(None, None).unwrap();
+    r.tem_programa = Box::new(|_| false);
+    let (res, tela) = com_tela("", async |t| peca.configura(t, &mut r).await).await;
+    res.unwrap();
+    assert!(
+        tela.contains("herdr não está no PATH") && tela.contains("--session tmux"),
+        "{tela}"
+    );
+}
+
 #[test]
 fn seletores_aceitam_espaco_igual_e_apelido() {
     let sel = selecao("--agent claude --envelope=nenhum --session tmux --frontend telegram");
-    let nomes: Vec<&str> = pecas(&sel, None)
+    let nomes: Vec<&str> = pecas(&sel, None, &so_tmux)
         .unwrap()
         .iter()
         .map(|p| p.nome())
@@ -61,10 +113,10 @@ fn implementacao_que_nao_existe_falha_dizendo_as_que_existem() {
     for (arg, esperado) in [
         ("--frontend whatsapp", "telegram"),
         ("--agent codex", "claude-code"),
-        ("--session herdr", "tmux"),
+        ("--session zellij", "tmux, herdr"),
         ("--envelope ai-jail", "ai-memory, nenhum"),
     ] {
-        let e = pecas(&selecao(arg), None).err().expect(arg);
+        let e = pecas(&selecao(arg), None, &so_tmux).err().expect(arg);
         let msg = format!("{e:#}");
         let (opcao, nome) = arg.split_once(' ').unwrap();
         assert!(msg.contains(opcao) && msg.contains(nome), "{msg}");
@@ -78,7 +130,8 @@ fn sem_flag_vale_o_que_esta_no_config() {
     // config novo.
     let cfg: Config = toml::from_str("[agente]\nenvelope = \"nenhum\"\n").unwrap();
     let nomes = |sel: &Selecao| -> Vec<&'static str> {
-        pecas(sel, Some(&cfg))
+        // Com config, a máquina não decide: só herdr instalado e o config segue no tmux.
+        pecas(sel, Some(&cfg), &|p| p == "herdr")
             .unwrap()
             .iter()
             .map(|p| p.nome())
@@ -512,14 +565,14 @@ async fn a_conversa_inteira_termina_num_config_que_o_daemon_aceita() {
 
     // O que o daemon faz na partida com este config.
     crate::agente::da_config(&cfg).unwrap();
-    crate::sessions::da_config(&cfg.hospedeiro).unwrap();
+    crate::sessions::da_config(&cfg).unwrap();
     crate::transcritor::da_config(&cfg.transcricao).unwrap();
     crate::divisor::Divisores::da_config(&cfg.arquivos).unwrap();
 }
 
 /// As peças de verdade do que o config pede, com o Telegram roteirizado no lugar do teloxide.
 fn pecas_de_teste(cfg: Option<&Config>, roteiro: &Arc<Mutex<Roteiro>>) -> Vec<Box<dyn Peca>> {
-    let mut v = pecas(&Selecao::default(), cfg).unwrap();
+    let mut v = pecas(&Selecao::default(), cfg, &so_tmux).unwrap();
     v.pop();
     v.push(Box::new(TelegramFalso(roteiro.clone())));
     v

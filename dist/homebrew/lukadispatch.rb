@@ -10,8 +10,9 @@ class Lukadispatch < Formula
   version "@VERSAO@"
   license "MIT"
 
+  # Cada sessão roda no tmux ou no herdr, e basta um dos dois. O brew não expressa "um ou
+  # outro", então nenhum vira dependência: o setup confere o que a máquina tem e avisa.
   depends_on :linux
-  depends_on "tmux"
 
   on_linux do
     on_intel do
@@ -34,6 +35,9 @@ class Lukadispatch < Formula
 
   def caveats
     <<~EOS
+      As sessões rodam no tmux ou no herdr (https://herdr.dev); instale um dos dois.
+      O setup usa o tmux se houver, senão o herdr.
+
       O setup cria o bot, o grupo e o config conversando, e liga o serviço:
         lukadispatch setup
 

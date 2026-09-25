@@ -3,26 +3,29 @@
 //!
 //! O que compõe a partida (linha de comando, prompt, envelope) não é deste módulo: mora em
 //! [`crate::agente`], que devolve uma [`crate::agente::Partida`] já pronta para rodar. Aqui fica
-//! só o mecanismo que a mantém de pé, hoje o tmux ([`Tmux`]), escolhido porque deixa a sessão
-//! anexável no PC com `tmux attach` e sobrevive a restart do daemon.
+//! só o mecanismo que a mantém de pé: o tmux ([`Tmux`], o padrão) ou o herdr ([`Herdr`]). Os
+//! dois deixam a sessão anexável no PC e sobrevivem a restart do daemon.
 
 use anyhow::{Context, Result, bail};
-use ld_core::config::Project;
+use ld_core::config::{Config, Project, TOKEN_TELEGRAM};
 use ld_core::paths;
 use std::sync::Arc;
 use tokio::process::Command;
 
 use crate::agente::Partida;
 
+mod herdr;
+pub use herdr::Herdr;
+
 #[derive(Debug)]
 pub struct Launched {
     pub session_id: String,
-    pub tmux: String,
+    pub hospedagem: String,
 }
 
-/// Nome de sessão tmux: previsível para você achar no `tmux ls`, e único para dois projetos com
-/// o mesmo nome (ou o mesmo projeto duas vezes) não colidirem.
-pub fn tmux_name(projeto: &str, session_id: &str) -> String {
+/// Nome da sessão no hospedeiro: previsível para você achar no `tmux ls` ou na aba do herdr, e
+/// único para dois projetos com o mesmo nome (ou o mesmo projeto duas vezes) não colidirem.
+pub fn nome_da_sessao(projeto: &str, session_id: &str) -> String {
     let slug: String = projeto
         .chars()
         .map(|c| {
@@ -42,9 +45,18 @@ pub fn tmux_name(projeto: &str, session_id: &str) -> String {
     format!("ld-{slug}-{}", &session_id[..4])
 }
 
+/// Tira do comando o que o daemon tem no ambiente e não pode chegar ao hospedeiro.
+///
+/// O servidor do tmux ou do herdr, quando é o daemon que o sobe, copia o ambiente dele, e todo
+/// pane que nascer ali herda. Sob o systemd, esse ambiente tem o token do bot (o `.env` da
+/// unit): sem isto ele iria parar em cada shell do servidor, inclusive nos seus.
+pub(super) fn sem_segredos(cmd: &mut Command) -> &mut Command {
+    cmd.env_remove(TOKEN_TELEGRAM)
+}
+
 /// Sobe a sessão. Devolve erro sem deixar lixo se o tmux não vingar.
 pub async fn launch(partida: &Partida, projeto: &Project) -> Result<Launched> {
-    let tmux = tmux_name(&projeto.name, &partida.session_id);
+    let tmux = nome_da_sessao(&projeto.name, &partida.session_id);
 
     // A catraca: a sessão sobe num invólucro que espera este arquivo antes de rodar o script.
     // Sem ela, um script que morre em milissegundos some antes de o espelho abaixo ser ligado,
@@ -54,7 +66,7 @@ pub async fn launch(partida: &Partida, projeto: &Project) -> Result<Launched> {
     let _ = std::fs::remove_file(&liberado);
     const INVOLUCRO: &str = r#"i=0; while [ ! -e "$1" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i+1)); done; exec bash "$0""#;
 
-    let saida = Command::new("tmux")
+    let saida = sem_segredos(&mut Command::new("tmux"))
         .args([
             "new-session",
             "-d",
@@ -113,7 +125,7 @@ pub async fn launch(partida: &Partida, projeto: &Project) -> Result<Launched> {
 
     Ok(Launched {
         session_id: partida.session_id.clone(),
-        tmux,
+        hospedagem: tmux,
     })
 }
 
@@ -121,7 +133,7 @@ pub async fn launch(partida: &Partida, projeto: &Project) -> Result<Launched> {
 ///
 /// O arquivo tem sequências de escape do terminal misturadas ao texto; interessa a primeira
 /// linha que fala de erro, que é o que explica a morte.
-fn primeiro_erro(log: &std::path::Path) -> String {
+pub(super) fn primeiro_erro(log: &std::path::Path) -> String {
     let Ok(bruto) = std::fs::read_to_string(log) else {
         return "sem saída registrada".into();
     };
@@ -182,11 +194,11 @@ pub async fn kill(tmux: &str) -> Result<()> {
 ///
 /// É a porta que separa o ciclo de vida da sessão (que o `App` conduz) do mecanismo que a
 /// mantém de pé. Hoje o mecanismo é o tmux ([`Tmux`]), escolhido porque deixa a sessão anexável
-/// no PC com `tmux attach` e sobrevive a restart do daemon. Outro multiplexador (zellij, screen)
-/// ou um contêiner por sessão entraria como outra implementação, e os testes de fluxo usam uma
-/// de mentira para não depender de tmux nenhum.
+/// no PC com `tmux attach` e sobrevive a restart do daemon; o herdr ([`Herdr`]) é a outra
+/// implementação. Outro multiplexador (zellij, screen) ou um contêiner por sessão entraria do
+/// mesmo jeito, e os testes de fluxo usam uma de mentira para não depender de nenhum.
 ///
-/// Os nomes que ela devolve em [`Launched::tmux`] e aceita nos outros métodos são opacos para
+/// Os nomes que ela devolve em [`Launched::hospedagem`] e aceita nos outros métodos são opacos para
 /// quem chama: é só o que identifica a sessão para o próprio hospedeiro.
 #[async_trait::async_trait]
 pub trait Hospedeiro: Send + Sync + 'static {
@@ -203,6 +215,13 @@ pub trait Hospedeiro: Send + Sync + 'static {
     /// As sessões que este projeto criou e ainda estão de pé, inclusive as que o banco já
     /// esqueceu (é assim que a reconciliação acha órfãs).
     async fn nossas(&self) -> Vec<String>;
+
+    /// Como a sessão aparece na ficha do canal: o hospedeiro e onde achá-la nele.
+    fn descreve(&self, nome: &str) -> String;
+
+    /// A linha de comando que anexa a sessão no PC. Vai nos avisos que só se resolvem no
+    /// teclado, como um diálogo de servidor MCP ou uma sessão surda.
+    fn como_anexar(&self, nome: &str) -> String;
 }
 
 /// O tmux como [`Hospedeiro`]. As funções livres deste módulo são a implementação.
@@ -226,15 +245,24 @@ impl Hospedeiro for Tmux {
     async fn nossas(&self) -> Vec<String> {
         nossas_sessoes().await
     }
+
+    fn descreve(&self, nome: &str) -> String {
+        format!("tmux: {nome}")
+    }
+
+    fn como_anexar(&self, nome: &str) -> String {
+        format!("tmux attach -t {nome}")
+    }
 }
 
 /// Os hospedeiros que existem, pelo nome que o config e o `setup --session` usam.
-pub const HOSPEDEIROS: &[&str] = &["tmux"];
+pub const HOSPEDEIROS: &[&str] = &["tmux", "herdr"];
 
 /// O hospedeiro que o config pede. Nome desconhecido é erro na partida do daemon.
-pub fn da_config(nome: &str) -> Result<Arc<dyn Hospedeiro>> {
-    match nome {
+pub fn da_config(cfg: &Config) -> Result<Arc<dyn Hospedeiro>> {
+    match cfg.hospedeiro.as_str() {
         "tmux" => Ok(Arc::new(Tmux)),
+        "herdr" => Ok(Arc::new(Herdr::new(cfg.herdr.sessao.clone()))),
         outro => bail!(
             "hospedeiro desconhecido: {outro:?} (disponíveis: {})",
             HOSPEDEIROS.join(", ")
@@ -248,23 +276,33 @@ mod tests {
 
     #[test]
     fn config_escolhe_o_hospedeiro_pelo_nome() {
-        assert!(da_config("tmux").is_ok());
-        let e = da_config("zellij").err().expect("hospedeiro desconhecido");
+        let com = |nome: &str| Config {
+            hospedeiro: nome.into(),
+            ..Config::default()
+        };
+        assert!(da_config(&com("tmux")).is_ok());
+        assert!(da_config(&com("herdr")).is_ok());
+        let e = da_config(&com("zellij"))
+            .err()
+            .expect("hospedeiro desconhecido");
         let msg = format!("{e:#}");
-        assert!(msg.contains("zellij") && msg.contains("tmux"), "{msg}");
+        assert!(
+            msg.contains("zellij") && msg.contains("tmux") && msg.contains("herdr"),
+            "{msg}"
+        );
     }
 
     #[test]
-    fn nome_de_tmux_e_previsivel_e_unico() {
+    fn nome_da_sessao_e_previsivel_e_unico() {
         let id = "abcd1234-0000-0000-0000-000000000000";
-        assert_eq!(tmux_name("lukadispatch", id), "ld-lukadispatch-abcd");
-        assert_eq!(tmux_name("Meu Projeto!", id), "ld-meu-projeto-abcd");
+        assert_eq!(nome_da_sessao("lukadispatch", id), "ld-lukadispatch-abcd");
+        assert_eq!(nome_da_sessao("Meu Projeto!", id), "ld-meu-projeto-abcd");
     }
 
     #[test]
     fn nome_vazio_nao_gera_sessao_sem_nome() {
         let id = "abcd1234-0000-0000-0000-000000000000";
-        assert_eq!(tmux_name("!!!", id), "ld-projeto-abcd");
+        assert_eq!(nome_da_sessao("!!!", id), "ld-projeto-abcd");
     }
 
     #[test]
@@ -277,6 +315,18 @@ mod tests {
         )
         .unwrap();
         assert!(primeiro_erro(&log).contains("opening managed workstream"));
+    }
+
+    #[test]
+    fn o_token_do_bot_nao_passa_para_o_hospedeiro() {
+        let mut cmd = Command::new("tmux");
+        sem_segredos(&mut cmd);
+        assert!(
+            cmd.as_std()
+                .get_envs()
+                .any(|(k, v)| k == TOKEN_TELEGRAM && v.is_none()),
+            "o token tem de sair do ambiente do servidor"
+        );
     }
 
     #[test]
@@ -328,11 +378,15 @@ mod testes_hospedeiro {
         let h = Tmux;
         let l = h.lanca(&partida, &projeto).await.unwrap();
         assert_eq!(l.session_id, "a1b2c3d4-vive");
-        assert!(l.tmux.starts_with("ld-teste-hospedeiro-"), "{}", l.tmux);
-        assert!(h.vive(&l.tmux).await);
-        assert!(h.nossas().await.contains(&l.tmux));
-        h.mata(&l.tmux).await.unwrap();
-        assert!(!h.vive(&l.tmux).await, "a sessão sobreviveu ao mata");
+        assert!(
+            l.hospedagem.starts_with("ld-teste-hospedeiro-"),
+            "{}",
+            l.hospedagem
+        );
+        assert!(h.vive(&l.hospedagem).await);
+        assert!(h.nossas().await.contains(&l.hospedagem));
+        h.mata(&l.hospedagem).await.unwrap();
+        assert!(!h.vive(&l.hospedagem).await, "a sessão sobreviveu ao mata");
     }
 
     #[tokio::test]

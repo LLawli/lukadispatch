@@ -31,9 +31,10 @@ pub struct Session {
     pub project: String,
     pub cwd: String,
     pub transcript_path: Option<String>,
-    /// Nome da sessão tmux. `None` em sessão que o usuário abriu no terminal: ela entra no
-    /// painel, mas o bot não a controla.
-    pub tmux: Option<String>,
+    /// Id opaco da sessão no hospedeiro (o nome da sessão tmux, o terminal do herdr): só o
+    /// hospedeiro que a subiu sabe o que fazer com o valor. `None` em sessão que o usuário abriu
+    /// no terminal: ela entra no painel, mas o bot não a controla.
+    pub hospedagem: Option<String>,
     /// Id opaco do canal no frontend em uso: um tópico do Telegram (`"630"`) ou um grupo do
     /// WhatsApp (`"120363...@g.us"`). Só o adaptador do frontend sabe o que fazer com o valor;
     /// aqui é só texto.
@@ -54,7 +55,7 @@ pub struct Session {
 
 impl Session {
     pub fn owned_by_bot(&self) -> bool {
-        self.tmux.is_some()
+        self.hospedagem.is_some()
     }
 }
 
@@ -69,7 +70,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     project           TEXT NOT NULL,
     cwd               TEXT NOT NULL,
     transcript_path   TEXT,
-    tmux              TEXT,
+    hospedagem        TEXT,
     -- Nomes de coluna herdados de quando o único frontend era o Telegram e os ids eram inteiros
     -- dele. Ficam TEXT desde que o frontend virou trocável (id opaco de qualquer adaptador), mas
     -- o NOME não muda: renomear pediria recriar a tabela, e isso não compra nada. Um banco criado
@@ -118,6 +119,10 @@ fn migra(conn: &Connection) {
         "ALTER TABLE sessions ADD COLUMN pedido INTEGER NOT NULL DEFAULT 0",
         [],
     );
+    // A coluna nasceu `tmux`, quando o tmux era o único hospedeiro. O `RENAME COLUMN` não recria
+    // a tabela, e o SQLite embutido (`bundled`) sempre o tem; em banco novo a coluna velha não
+    // existe e o erro é o caminho normal, como acima. Veja a decisão 0014.
+    let _ = conn.execute("ALTER TABLE sessions RENAME COLUMN tmux TO hospedagem", []);
 }
 
 fn agora() -> i64 {
@@ -156,17 +161,17 @@ impl Store {
     }
 
     /// Cria ou atualiza a sessão. Só sobrescreve o que veio preenchido, para o `SessionStart` de
-    /// uma sessão que o bot criou não apagar o tópico e o tmux que o daemon já tinha gravado.
+    /// uma sessão que o bot criou não apagar o tópico e a hospedagem que o daemon já tinha gravado.
     pub fn upsert(&self, s: &Session) -> Result<()> {
         let c = self.conn();
         c.execute(
-            "INSERT INTO sessions (session_id, project, cwd, transcript_path, tmux, topic_id, status, status_message_id, model, effort, permission_mode, created_at, updated_at)
+            "INSERT INTO sessions (session_id, project, cwd, transcript_path, hospedagem, topic_id, status, status_message_id, model, effort, permission_mode, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)
              ON CONFLICT(session_id) DO UPDATE SET
                 project         = excluded.project,
                 cwd             = excluded.cwd,
                 transcript_path = COALESCE(excluded.transcript_path, sessions.transcript_path),
-                tmux            = COALESCE(excluded.tmux, sessions.tmux),
+                hospedagem      = COALESCE(excluded.hospedagem, sessions.hospedagem),
                 topic_id        = COALESCE(excluded.topic_id, sessions.topic_id),
                 -- (nome de coluna herdado; guarda o canal_id, veja o comentário no esquema)
                 model           = COALESCE(excluded.model, sessions.model),
@@ -174,7 +179,7 @@ impl Store {
                 permission_mode = COALESCE(excluded.permission_mode, sessions.permission_mode),
                 status          = excluded.status,
                 -- Retomar uma conversa reusa o id da sessão anterior, que estava encerrada. Sem
-                -- limpar isto aqui, ela voltaria viva no tmux e morta no banco: sem tópico, sem
+                -- limpar isto aqui, ela voltaria viva no hospedeiro e morta no banco: sem tópico, sem
                 -- painel e sem ninguém para entregar mensagem.
                 ended_at        = NULL,
                 updated_at      = excluded.updated_at",
@@ -183,7 +188,7 @@ impl Store {
                 s.project,
                 s.cwd,
                 s.transcript_path,
-                s.tmux,
+                s.hospedagem,
                 s.canal_id,
                 s.status,
                 s.status_msg_id,
@@ -200,7 +205,7 @@ impl Store {
         let c = self.conn();
         let s = c
             .query_row(
-                "SELECT session_id, project, cwd, transcript_path, tmux, topic_id, status, status_message_id, model, effort, permission_mode, created_at, ended_at
+                "SELECT session_id, project, cwd, transcript_path, hospedagem, topic_id, status, status_message_id, model, effort, permission_mode, created_at, ended_at
                  FROM sessions WHERE session_id = ?1",
                 [session_id],
                 linha_para_sessao,
@@ -220,7 +225,7 @@ impl Store {
         let c = self.conn();
         let s = c
             .query_row(
-                "SELECT session_id, project, cwd, transcript_path, tmux, topic_id, status, status_message_id, model, effort, permission_mode, created_at, ended_at
+                "SELECT session_id, project, cwd, transcript_path, hospedagem, topic_id, status, status_message_id, model, effort, permission_mode, created_at, ended_at
                  FROM sessions WHERE CAST(topic_id AS TEXT) = ?1 AND ended_at IS NULL
                  ORDER BY created_at DESC LIMIT 1",
                 [canal_id],
@@ -240,7 +245,7 @@ impl Store {
         let c = self.conn();
         let s = c
             .query_row(
-                "SELECT session_id, project, cwd, transcript_path, tmux, topic_id, status, status_message_id, model, effort, permission_mode, created_at, ended_at
+                "SELECT session_id, project, cwd, transcript_path, hospedagem, topic_id, status, status_message_id, model, effort, permission_mode, created_at, ended_at
                  FROM sessions WHERE cwd = ?1 AND session_id <> ?2 AND ended_at IS NULL
                  ORDER BY created_at DESC LIMIT 1",
                 params![cwd, exceto],
@@ -250,7 +255,7 @@ impl Store {
         Ok(s)
     }
 
-    /// Passa tópico, tmux e mensagem de status da sessão velha para a nova (o caso do `/clear`),
+    /// Passa tópico, hospedagem e mensagem de status da sessão velha para a nova (o caso do `/clear`),
     /// e encerra a velha. A fila pendente vai junto: mensagem que chegou antes do `/clear` ainda
     /// é para a mesma pessoa, no mesmo tópico.
     pub fn rekey(&self, antigo: &str, novo: &str) -> Result<()> {
@@ -259,7 +264,7 @@ impl Store {
         tx.execute(
             "UPDATE sessions SET
                 topic_id          = (SELECT topic_id FROM sessions WHERE session_id = ?1),
-                tmux              = COALESCE(tmux, (SELECT tmux FROM sessions WHERE session_id = ?1)),
+                hospedagem        = COALESCE(hospedagem, (SELECT hospedagem FROM sessions WHERE session_id = ?1)),
                 status_message_id = (SELECT status_message_id FROM sessions WHERE session_id = ?1),
                 -- O pedido em aberto é da conversa, não do id: um /clear no meio dele não pode
                 -- fazer a resposta ser descartada.
@@ -376,10 +381,38 @@ impl Store {
     pub fn live(&self) -> Result<Vec<Session>> {
         let c = self.conn();
         let mut stmt = c.prepare(
-            "SELECT session_id, project, cwd, transcript_path, tmux, topic_id, status, status_message_id, model, effort, permission_mode, created_at, ended_at
+            "SELECT session_id, project, cwd, transcript_path, hospedagem, topic_id, status, status_message_id, model, effort, permission_mode, created_at, ended_at
              FROM sessions WHERE ended_at IS NULL ORDER BY created_at DESC",
         )?;
         let linhas = stmt.query_map([], linha_para_sessao)?;
+        Ok(linhas.flatten().collect())
+    }
+
+    /// As sessões que um id digitado pode querer dizer.
+    ///
+    /// O `lukadispatch ls` mostra só o começo do id, e é esse começo que você digita depois no
+    /// `send` e no `kill`. O id exato vale sempre, encerrada ou não. Um prefixo só casa com
+    /// sessão viva: mandar mensagem ou matar uma sessão morta pelo começo do id nunca é o que
+    /// se quis. Mais de um resultado é ambiguidade, e quem chama decide o que dizer.
+    pub fn ids_por_prefixo(&self, id: &str) -> Result<Vec<String>> {
+        let c = self.conn();
+        let exato: Option<String> = c
+            .query_row(
+                "SELECT session_id FROM sessions WHERE session_id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(e) = exato {
+            return Ok(vec![e]);
+        }
+        // `substr` e não `LIKE`: o id vem do usuário, e `%` ou `_` nele virariam curinga.
+        let mut stmt = c.prepare(
+            "SELECT session_id FROM sessions
+             WHERE ended_at IS NULL AND substr(session_id, 1, length(?1)) = ?1
+             ORDER BY created_at DESC",
+        )?;
+        let linhas = stmt.query_map([id], |r| r.get::<_, String>(0))?;
         Ok(linhas.flatten().collect())
     }
 
@@ -427,10 +460,6 @@ impl Store {
         Ok(itens)
     }
 
-    /// `true` quando este tmux é de uma sessão que já foi encerrada.
-    ///
-    /// Serve para varrer painel de tmux órfão: um relançamento interrompido no meio pode deixar
-    /// o processo vivo com a sessão já morta no banco, e aí ele é lixo que ninguém mais alcança.
     /// Sessões encerradas que ainda carregam tópico: o tópico não foi apagado (daemon caiu no
     /// meio, API fora do ar) e virou um canal morto no grupo.
     pub fn canais_vazados(&self) -> Result<Vec<(String, String)>> {
@@ -458,12 +487,17 @@ impl Store {
         Ok(())
     }
 
-    pub fn tmux_de_sessao_morta(&self, tmux: &str) -> Result<bool> {
+    /// `true` quando esta hospedagem é de uma sessão que já foi encerrada.
+    ///
+    /// Serve para varrer sessão órfã no hospedeiro: um relançamento interrompido no meio pode
+    /// deixar o processo vivo com a sessão já morta no banco, e aí ele é lixo que ninguém mais
+    /// alcança.
+    pub fn hospedagem_de_sessao_morta(&self, hospedagem: &str) -> Result<bool> {
         let c = self.conn();
         let achou: Option<i64> = c
             .query_row(
-                "SELECT 1 FROM sessions WHERE tmux = ?1 AND ended_at IS NOT NULL LIMIT 1",
-                [tmux],
+                "SELECT 1 FROM sessions WHERE hospedagem = ?1 AND ended_at IS NOT NULL LIMIT 1",
+                [hospedagem],
                 |r| r.get(0),
             )
             .optional()?;
@@ -509,7 +543,7 @@ fn linha_para_sessao(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
         project: row.get(1)?,
         cwd: row.get(2)?,
         transcript_path: row.get(3)?,
-        tmux: row.get(4)?,
+        hospedagem: row.get(4)?,
         canal_id: coluna_como_texto(row, 5)?,
         status: row.get(6)?,
         status_msg_id: coluna_como_texto(row, 7)?,
@@ -548,7 +582,7 @@ mod tests {
             project: "proj".into(),
             cwd: "/tmp/proj".into(),
             transcript_path: Some("/tmp/t.jsonl".into()),
-            tmux: Some("ld-proj".into()),
+            hospedagem: Some("ld-proj".into()),
             canal_id: Some("7".into()),
             status: "idle".into(),
             status_msg_id: None,
@@ -558,6 +592,34 @@ mod tests {
             created_at: 0,
             ended_at: None,
         }
+    }
+
+    #[test]
+    fn prefixo_do_id_acha_so_a_sessao_viva() {
+        let st = Store::open_memory().unwrap();
+        st.upsert(&sessao("379a86dc-afb4-viva")).unwrap();
+        st.upsert(&sessao("d428b688-5-morta")).unwrap();
+        st.end("d428b688-5-morta").unwrap();
+        st.upsert(&sessao("abcd0000-um")).unwrap();
+        st.upsert(&sessao("abcd1111-dois")).unwrap();
+
+        // O que o `ls` mostra resolve para o id inteiro.
+        assert_eq!(
+            st.ids_por_prefixo("379a86dc").unwrap(),
+            ["379a86dc-afb4-viva"]
+        );
+        // O id exato vale mesmo encerrado; o prefixo, não.
+        assert_eq!(
+            st.ids_por_prefixo("d428b688-5-morta").unwrap(),
+            ["d428b688-5-morta"]
+        );
+        assert!(st.ids_por_prefixo("d428b688").unwrap().is_empty());
+        // Ambíguo volta os dois, e quem chama decide.
+        assert_eq!(st.ids_por_prefixo("abcd").unwrap().len(), 2);
+        assert!(st.ids_por_prefixo("ffff").unwrap().is_empty());
+        // O id vem do usuário: curinga de LIKE não pode casar com tudo.
+        assert!(st.ids_por_prefixo("%").unwrap().is_empty());
+        assert!(st.ids_por_prefixo("____").unwrap().is_empty());
     }
 
     #[test]
@@ -577,11 +639,11 @@ mod tests {
         st.upsert(&sessao("s1")).unwrap();
         let mut sem_topico = sessao("s1");
         sem_topico.canal_id = None;
-        sem_topico.tmux = None;
+        sem_topico.hospedagem = None;
         st.upsert(&sem_topico).unwrap();
         let s = st.get("s1").unwrap().unwrap();
         assert_eq!(s.canal_id.as_deref(), Some("7"));
-        assert_eq!(s.tmux.as_deref(), Some("ld-proj"));
+        assert_eq!(s.hospedagem.as_deref(), Some("ld-proj"));
     }
 
     #[test]
@@ -614,7 +676,7 @@ mod tests {
 
         let mut nova = sessao("nova");
         nova.canal_id = None;
-        nova.tmux = None;
+        nova.hospedagem = None;
         st.upsert(&nova).unwrap();
         st.rekey("velha", "nova").unwrap();
 
@@ -624,7 +686,7 @@ mod tests {
             Some("7"),
             "o tópico foi para a sessão nova"
         );
-        assert_eq!(n.tmux.as_deref(), Some("ld-proj"));
+        assert_eq!(n.hospedagem.as_deref(), Some("ld-proj"));
         let v = st.get("velha").unwrap().unwrap();
         assert!(v.ended_at.is_some() && v.canal_id.is_none());
         assert_eq!(st.by_canal("7").unwrap().unwrap().session_id, "nova");

@@ -544,7 +544,7 @@ fn leituras_sem_dado_nao_derrubam_nada() {
         project: "proj".into(),
         cwd: "/tmp/proj".into(),
         transcript_path: Some("/nao/existe.jsonl".into()),
-        tmux: None,
+        hospedagem: None,
         canal_id: None,
         status: "ocioso".into(),
         status_msg_id: None,

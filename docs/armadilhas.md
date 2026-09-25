@@ -87,7 +87,7 @@ Quando um comportamento parecer estranho, procure aqui antes de "consertar".
   ```
 
 - O restart em si é seguro para a sessão: o `listen` reconecta sozinho, e o `KillMode=process` do
-  serviço poupa o tmux.
+  serviço poupa o tmux (e o servidor do herdr que o daemon tenha subido).
 - Um `listen` de versão anterior repassa linha NDJSON com campo que não conhece, então acrescentar
   campo ao protocolo não exige reiniciar as sessões.
 
@@ -102,3 +102,25 @@ Quando um comportamento parecer estranho, procure aqui antes de "consertar".
 - **Memória com GPU:** no Vulkan o modelo de voz sai do RSS e vai para a GTT. Some
   `/sys/class/drm/card*/device/mem_info_gtt_used`, senão a medição conclui o contrário da
   verdade.
+
+## herdr
+
+Medido no herdr 0.8.2.
+
+- **A CLI não sobe servidor.** `herdr workspace list` sem servidor falha com
+  `server_not_running`, ao contrário do `tmux new-session`, que sobe o dele. O hospedeiro sobe
+  `herdr [--session X] server` antes de lançar, e nunca ao só conferir.
+- **Pane que roda um comando some quando ele sai**, e a aba e o workspace vão junto se ficarem
+  vazios. O motivo de uma morte ao subir só sobra no log do `script`.
+- **Restart do servidor não reroda o comando do pane.** O pane volta como shell, com o mesmo
+  rótulo e `terminal_id` novo; com a integração do Claude Code instalada, o herdr pode religar
+  `claude --resume` ali, sem `LD_SESSION`. Por isso a hospedagem guarda o terminal: a sessão do
+  bot é dada como morta em vez de "viva" num processo que não fala com o daemon.
+- **O `herdr agent` não reconhece o Claude Code das sessões do bot**: o processo em primeiro
+  plano do pane é o `script`. O estado (idle, working) só pode vir da integração do Claude
+  Code, que reporta pelo `HERDR_PANE_ID` herdado através do `script`.
+- **`HERDR_SOCKET_PATH` no ambiente vence a sessão padrão.** Um daemon iniciado de dentro de um
+  pane herda o socket da sessão daquele pane; o hospedeiro sempre resolve o socket pela lista de
+  sessões e passa `--session` explícito.
+- **Experimente numa sessão nomeada** (`herdr --session teste server`), nunca na padrão: é a do
+  usuário, com os panes dele.
