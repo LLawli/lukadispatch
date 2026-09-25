@@ -218,6 +218,18 @@ pub async fn kill(tmux: &str) -> Result<()> {
     Ok(())
 }
 
+/// O que o hospedeiro sabe de uma sessão que o banco dá como viva.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Situacao {
+    /// De pé, onde o banco diz.
+    Viva,
+    /// De pé, mas o hospedeiro passou a achá-la por outra hospedagem, que é a que vem aqui. O
+    /// herdr troca o terminal de todo pane num live handoff, com o processo intacto.
+    Mudou(String),
+    /// Não existe mais.
+    Morta,
+}
+
 /// Onde as sessões rodam: sobe, confere se está viva, mata e lista.
 ///
 /// É a porta que separa o ciclo de vida da sessão (que o `App` conduz) do mecanismo que a
@@ -240,8 +252,20 @@ pub trait Hospedeiro: Send + Sync + 'static {
     /// Encerra. Sessão que já não existe não é erro: o objetivo era ela não existir.
     async fn mata(&self, nome: &str) -> Result<()>;
 
-    /// As sessões que este projeto criou e ainda estão de pé, inclusive as que o banco já
-    /// esqueceu (é assim que a reconciliação acha órfãs).
+    /// O que a reconciliação precisa saber de uma sessão que o banco dá como viva. O padrão
+    /// serve a quem não renomeia sessão viva: viva ou morta, pelo [`Hospedeiro::vive`].
+    async fn situacao(&self, nome: &str) -> Situacao {
+        if self.vive(nome).await {
+            Situacao::Viva
+        } else {
+            Situacao::Morta
+        }
+    }
+
+    /// Os rótulos das sessões que este projeto criou e ainda estão de pé, inclusive as que o
+    /// banco já esqueceu (é assim que a reconciliação acha órfãs). O rótulo é o começo da
+    /// hospedagem: ela é o próprio rótulo, ou o rótulo seguido de `@` e do que mais o
+    /// hospedeiro precisar. [`Hospedeiro::mata`] aceita o rótulo sozinho.
     async fn nossas(&self) -> Vec<String>;
 
     /// Como a sessão aparece na ficha do canal: o hospedeiro e onde achá-la nele.

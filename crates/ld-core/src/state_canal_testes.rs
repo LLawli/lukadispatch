@@ -189,8 +189,8 @@ fn banco_antigo_com_coluna_tmux_vira_hospedagem() {
     let viva = st.get("viva").unwrap().unwrap();
     assert_eq!(viva.hospedagem.as_deref(), Some("ld-proj-viva"));
     assert!(viva.owned_by_bot());
-    assert!(st.hospedagem_de_sessao_morta("ld-proj-morta").unwrap());
-    assert!(!st.hospedagem_de_sessao_morta("ld-proj-viva").unwrap());
+    assert!(st.rotulo_de_sessao_morta("ld-proj-morta").unwrap());
+    assert!(!st.rotulo_de_sessao_morta("ld-proj-viva").unwrap());
     drop(st);
 
     // Abrir de novo (todo restart do daemon) não pode falhar nem perder o valor.

@@ -265,13 +265,15 @@ O tmux (`mod.rs`) foi o primeiro porque deixa a sessão anexável no PC
 segundo: uma aba por sessão no workspace do projeto, falando JSON direto no socket dele (só o
 `layout.apply` abre um pane já rodando um comando com ambiente, e a CLI não o expõe). Outro
 multiplexador (zellij, screen) ou um contêiner por sessão entraria como outra implementação de
-`lanca`, `vive`, `mata`, `nossas`, `descreve` e `como_anexar`. Os dois últimos são o que o
+`lanca`, `vive`, `situacao`, `mata`, `nossas`, `descreve` e `como_anexar`. Os dois últimos são o que o
 usuário lê: a ficha do tópico e o comando para anexar no PC, que vai nos avisos que só o teclado
 resolve.
 
-O id que `lanca` devolve é opaco e vai para `Session::hospedagem` (coluna `hospedagem`): o tmux
-grava o nome da sessão, o herdr grava `rótulo@terminal`
-([decisoes/0014](decisoes/0014-hospedagem-neutra.md)).
+O id que `lanca` devolve vai para `Session::hospedagem` (coluna `hospedagem`): o tmux grava o
+nome da sessão, o herdr grava `rótulo@terminal@pid:início`
+([decisoes/0014](decisoes/0014-hospedagem-neutra.md)). Ele é opaco, com uma exceção: começa
+pelo rótulo, que é o que `nossas` devolve e o que a varredura de órfãs compara
+([decisoes/0015](decisoes/0015-vida-pelo-processo.md)).
 
 Duas coisas que qualquer hospedeiro tem de preservar, porque o resto do sistema depende delas:
 

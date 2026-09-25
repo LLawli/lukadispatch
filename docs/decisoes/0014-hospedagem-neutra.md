@@ -14,8 +14,8 @@ tabela em SQLite antigo.
 ## Decisão
 
 - O campo no Rust vira `hospedagem` (`Session::hospedagem`, `Launched::hospedagem`,
-  `Store::hospedagem_de_sessao_morta`). O valor continua opaco: só o hospedeiro que o gravou
-  sabe o que é.
+  `Store::hospedagem_de_sessao_morta`, que a [0015](0015-vida-pelo-processo.md) trocou por
+  `rotulo_de_sessao_morta`). O valor continua opaco: só o hospedeiro que o gravou sabe o que é.
 - A coluna **também** muda de nome, por `ALTER TABLE sessions RENAME COLUMN tmux TO hospedagem`
   no `migra`. O motivo da 0003 para não renomear não vale aqui: o `rusqlite` usa o SQLite
   embutido (`bundled`), que tem `RENAME COLUMN` desde a 3.25, e ele não recria a tabela. Em

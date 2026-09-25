@@ -15,7 +15,7 @@
 //! O agente de mentira é a prova de que o domínio não depende do Claude Code: se o `/effort`
 //! mostra os níveis dele, e não os do Claude Code, é porque o roteador pergunta à trait.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -40,7 +40,7 @@ use ld_daemon::frontend::{
 };
 use ld_daemon::hub::Aviso;
 use ld_daemon::roteador;
-use ld_daemon::sessions::{Hospedeiro, Launched};
+use ld_daemon::sessions::{Hospedeiro, Launched, Situacao};
 use ld_daemon::transcritor::{Transcrito, Transcritor};
 use tempfile::TempDir;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -66,6 +66,8 @@ impl Transcritor for TranscritorFalso {
 #[derive(Default)]
 struct HospedeiroFalso {
     vivas: Mutex<HashSet<String>>,
+    /// Hospedagem que continua viva com outro nome, como o terminal num live handoff do herdr.
+    mudou: Mutex<HashMap<String, String>>,
     lancadas: Mutex<u32>,
     partidas: Mutex<Vec<Partida>>,
     /// `mata:<nome>` e `lanca:<id>`, na ordem em que aconteceram.
@@ -115,13 +117,32 @@ impl Hospedeiro for HospedeiroFalso {
     async fn vive(&self, nome: &str) -> bool {
         self.vivas.lock().unwrap().contains(nome)
     }
+    async fn situacao(&self, nome: &str) -> Situacao {
+        if let Some(nova) = self.mudou.lock().unwrap().get(nome) {
+            return Situacao::Mudou(nova.clone());
+        }
+        if self.vive(nome).await {
+            Situacao::Viva
+        } else {
+            Situacao::Morta
+        }
+    }
+    /// Aceita a hospedagem ou só o rótulo, como o contrato pede.
     async fn mata(&self, nome: &str) -> Result<()> {
         self.eventos.lock().unwrap().push(format!("mata:{nome}"));
-        self.vivas.lock().unwrap().remove(nome);
+        self.vivas
+            .lock()
+            .unwrap()
+            .retain(|h| h != nome && rotulo(h) != nome);
         Ok(())
     }
     async fn nossas(&self) -> Vec<String> {
-        self.vivas.lock().unwrap().iter().cloned().collect()
+        self.vivas
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|h| rotulo(h).to_string())
+            .collect()
     }
     fn descreve(&self, nome: &str) -> String {
         format!("falso: {nome}")
@@ -129,6 +150,11 @@ impl Hospedeiro for HospedeiroFalso {
     fn como_anexar(&self, nome: &str) -> String {
         format!("falso-anexa {nome}")
     }
+}
+
+/// O começo da hospedagem, antes do `@`.
+fn rotulo(hospedagem: &str) -> &str {
+    hospedagem.split('@').next().unwrap_or_default()
 }
 
 /// Um agente que não é o Claude Code: outros níveis de esforço, um modo só, outro apelido de
@@ -516,6 +542,47 @@ async fn reconciliacao_encerra_sessao_cujo_hospedeiro_morreu() {
     assert!(
         c.fe.chamadas()
             .contains(&Chamada::ApagaCanal(c.canal.clone()))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reconciliacao_segue_a_sessao_viva_que_mudou_de_hospedagem() {
+    let c = cena().await;
+    c.hospedeiro
+        .mudou
+        .lock()
+        .unwrap()
+        .insert(TMUX.into(), format!("{TMUX}@novo"));
+    assert_eq!(c.app.reconcile().await.unwrap(), 0);
+    let s = c.app.store.get(SESSAO).unwrap().unwrap();
+    assert!(s.ended_at.is_none(), "a sessão viva foi encerrada");
+    assert_eq!(s.hospedagem.as_deref(), Some(&*format!("{TMUX}@novo")));
+    assert!(
+        !c.fe
+            .chamadas()
+            .contains(&Chamada::ApagaCanal(c.canal.clone()))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reconciliacao_mata_pelo_rotulo_o_que_sobrou_de_sessao_encerrada() {
+    let c = cena().await;
+    c.app
+        .store
+        .set_hospedagem(SESSAO, &format!("{TMUX}@velho"))
+        .unwrap();
+    c.app.store.end(SESSAO).unwrap();
+    // O hospedeiro reiniciou e devolveu o lugar da sessão com outro nome: o rótulo é o mesmo.
+    c.hospedeiro.vivas.lock().unwrap().clear();
+    c.hospedeiro
+        .vivas
+        .lock()
+        .unwrap()
+        .insert(format!("{TMUX}@restaurado"));
+    c.app.reconcile().await.unwrap();
+    assert!(
+        c.hospedeiro.vivas.lock().unwrap().is_empty(),
+        "sobrou o pane de uma sessão encerrada"
     );
 }
 

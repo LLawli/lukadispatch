@@ -30,7 +30,7 @@ use crate::frontend::formato::escapa;
 use crate::frontend::{Botao, Canal, Frontend, Midia, MsgId};
 use crate::hub::{Hub, Incoming};
 use crate::panel::Panel;
-use crate::sessions::{self, Hospedeiro};
+use crate::sessions::{self, Hospedeiro, Situacao};
 use crate::status::{Ctx, StatusBoard};
 use crate::transcritor::Transcritor;
 
@@ -594,12 +594,21 @@ impl App {
             let Some(hospedagem) = &s.hospedagem else {
                 continue; // sessão do terminal: quem cuida dela é o hook SessionEnd.
             };
-            if self.hospedeiro.vive(hospedagem).await || self.em_relancamento(&s.session_id) {
+            if self.em_relancamento(&s.session_id) {
                 continue;
             }
-            warn!(sessao = %s.session_id, hospedagem = %hospedagem, "sessão sumiu no hospedeiro; encerrando");
-            self.end_session(&s.session_id, true).await?;
-            mortas += 1;
+            match self.hospedeiro.situacao(hospedagem).await {
+                Situacao::Viva => {}
+                Situacao::Mudou(nova) => {
+                    info!(sessao = %s.session_id, de = %hospedagem, para = %nova, "a sessão continua viva com outra hospedagem");
+                    self.store.set_hospedagem(&s.session_id, &nova)?;
+                }
+                Situacao::Morta => {
+                    warn!(sessao = %s.session_id, hospedagem = %hospedagem, "sessão sumiu no hospedeiro; encerrando");
+                    self.end_session(&s.session_id, true).await?;
+                    mortas += 1;
+                }
+            }
         }
 
         // Canal de sessão encerrada que sobrou (daemon caiu no meio do fechamento, adaptador
@@ -654,14 +663,10 @@ impl App {
         // O contrário também acontece: o hospedeiro ficou com uma sessão viva já encerrada no
         // banco (um relançamento interrompido no meio, por exemplo). Ninguém mais fala com ela,
         // e o canal dela já foi apagado, então é lixo que só consome memória.
-        for hospedagem in self.hospedeiro.nossas().await {
-            if self
-                .store
-                .hospedagem_de_sessao_morta(&hospedagem)
-                .unwrap_or(false)
-            {
-                warn!(hospedagem = %hospedagem, "sessão órfã de sessão encerrada; matando");
-                let _ = self.hospedeiro.mata(&hospedagem).await;
+        for rotulo in self.hospedeiro.nossas().await {
+            if self.store.rotulo_de_sessao_morta(&rotulo).unwrap_or(false) {
+                warn!(rotulo = %rotulo, "sessão órfã de sessão encerrada; matando");
+                let _ = self.hospedeiro.mata(&rotulo).await;
             }
         }
         Ok(mortas)

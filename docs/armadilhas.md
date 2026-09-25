@@ -113,8 +113,14 @@ Medido no herdr 0.8.2.
 - **Pane que roda um comando some quando ele sai**, e a aba e o workspace vão junto se ficarem
   vazios. O motivo de uma morte ao subir só sobra no log do `script`.
 - **Restart do servidor não reroda o comando do pane.** O pane volta como shell, com o mesmo
-  rótulo e `terminal_id` novo. Por isso a hospedagem guarda o terminal: a sessão do bot é dada
-  como morta em vez de "viva" num processo que não fala com o daemon.
+  rótulo, o mesmo `pane_id` público (`w1:p3`) e `terminal_id` novo, e sem o ambiente que o
+  `layout.apply` passou.
+- **O `terminal_id` também muda num live handoff** (`herdr update --handoff`,
+  `herdr server live-handoff`), e ali o processo sobrevive, com o mesmo pid. Então o terminal
+  não diz se a sessão vive: a hospedagem leva o processo (`rótulo@terminal@pid:início`), e a
+  reconciliação regrava o terminal novo de uma sessão viva, que é o que o `terminal attach`
+  pede. Depois de um handoff, o pane importado vira shell quando o comando sai, em vez de
+  fechar.
 - **Com a integração do Claude Code instalada, o herdr religa o Claude do bot sozinho.** Ele o
   faz assim que o servidor sobe, sem cliente anexado: o hook da integração roda dentro da sessão
   do bot (o pane herda `HERDR_ENV` e `HERDR_PANE_ID`) e registra o pane como agente oficial
