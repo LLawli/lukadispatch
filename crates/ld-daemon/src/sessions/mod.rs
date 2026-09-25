@@ -480,7 +480,7 @@ mod testes_hospedeiro {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let (partida, projeto) = partida_com("exec sleep 60", dir.path(), "e5f6a7b8-pid");
+        let (partida, projeto) = partida_com("exec sleep 60", dir.path(), "c9d0e1f2-pid");
         let h = Tmux;
         let l = h.lanca(&partida, &projeto).await.unwrap();
         let pid = h.pid(&l.hospedagem).await.expect("o tmux não disse o pid");
