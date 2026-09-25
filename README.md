@@ -97,6 +97,12 @@ terminal aparecerem no painel; nelas, as perguntas continuam no seu terminal. Os
 assíncronos: com o daemon fora do ar, nenhuma sessão sua trava. `lukadispatch uninstall` tira
 tudo, com backup.
 
+Depois de uma atualização, o daemon confere na partida se a telemetria do `~/.claude/settings.json`
+ainda chama um binário que existe, com os hooks desta versão, e a regrava se não chamar (com
+backup em `settings.json.bak`). Ele só corrige a que você já instalou: sem `install --global`,
+nada entra. Se os hooks chamarem outra instalação do lukadispatch que funcione, ela fica como
+está.
+
 ## Usar
 
 No tópico **General**, onde fica o painel:

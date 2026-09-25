@@ -13,6 +13,7 @@ use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
 use ld_core::context::ContextUsage;
+use ld_core::hooks::Reconciliacao;
 use ld_core::models::Modelo;
 use ld_core::state::Session;
 use ld_core::transcript::{Fala, SessaoAnterior};
@@ -264,6 +265,24 @@ impl Agente for ClaudeCode {
         let json = serde_json::to_string_pretty(&ld_core::hooks::bot_settings(&self.locais.cli))?;
         std::fs::write(&self.locais.settings, json)
             .with_context(|| format!("escrevendo {}", self.locais.settings.display()))?;
+
+        // A telemetria das suas sessões de terminal mora no settings global, que só o
+        // `install --global` escreve. Conferir é trabalho da partida, porque toda atualização
+        // passa por ela; falhar aqui é aviso, não motivo para o daemon não subir.
+        let global = self.locais.claude_dir.join("settings.json");
+        match ld_core::hooks::reconcilia_telemetria(&global, &self.locais.cli) {
+            Ok(Reconciliacao::Regravada) => tracing::info!(
+                settings = %global.display(),
+                cli = %self.locais.cli,
+                "telemetria do Claude Code regravada com o binário desta versão"
+            ),
+            Ok(Reconciliacao::OutraInstalacao(outro)) => tracing::info!(
+                %outro,
+                "a telemetria do Claude Code chama outra instalação do lukadispatch; fica como está"
+            ),
+            Ok(Reconciliacao::EmDia | Reconciliacao::NaoInstalada) => {}
+            Err(e) => tracing::warn!("não consegui conferir a telemetria do Claude Code: {e:#}"),
+        }
         Ok(())
     }
 

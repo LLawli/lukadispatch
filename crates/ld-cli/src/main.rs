@@ -394,18 +394,9 @@ fn uninstall() -> i32 {
     0
 }
 
-/// Escreve com backup do que estava lá.
-///
-/// O settings do Claude Code é arquivo do usuário, com coisas que não são nossas. Se um bug
-/// nosso o corromper, o `.bak` é a diferença entre "restaura" e "reconfigura tudo de novo".
+/// Escreve com backup do que estava lá (ver [`ld_core::hooks::grava_settings`]).
 fn escrever_json(caminho: &std::path::Path, v: &serde_json::Value) -> std::io::Result<()> {
-    if let Some(pai) = caminho.parent() {
-        std::fs::create_dir_all(pai)?;
-    }
-    if caminho.exists() {
-        let _ = std::fs::copy(caminho, caminho.with_extension("json.bak"));
-    }
-    std::fs::write(caminho, format!("{}\n", serde_json::to_string_pretty(v)?))
+    ld_core::hooks::grava_settings(caminho, v)
 }
 
 #[cfg(test)]
