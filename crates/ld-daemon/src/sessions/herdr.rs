@@ -32,10 +32,23 @@ const FONTE: &str = "custom:lukadispatch";
 /// milissegundos; passar disto é servidor travado, e travar o daemon junto não ajuda ninguém.
 const PRAZO: Duration = Duration::from_secs(10);
 
+/// Quanto o `ping` que confere se o servidor está de pé pode levar. A reconciliação confere cada
+/// sessão viva a cada minuto, e um servidor que não responde em um segundo conta como fora do
+/// ar naquela volta, em vez de segurar a varredura inteira por dez.
+const PRAZO_DE_CONFERIR: Duration = Duration::from_secs(1);
+
+/// O `sun_path` de um socket unix no Linux: 108 bytes, contando o NUL do fim.
+const SUN_PATH: usize = 108;
+
 #[derive(Debug, Clone)]
 pub struct Herdr {
     /// Sessão nomeada do herdr. `None` é a padrão.
     sessao: Option<String>,
+    /// `XDG_CONFIG_HOME` imposto ao servidor que o daemon sobe. `None` fora dos testes: o daemon
+    /// acha o socket onde o herdr do usuário o põe, pelo mesmo ambiente.
+    config_home: Option<PathBuf>,
+    /// O socket da sessão, calculado uma vez: o caminho não muda enquanto o daemon vive.
+    socket: PathBuf,
     /// Para onde vai a saída de erro do servidor que o daemon sobe.
     log_do_servidor: PathBuf,
 }
@@ -55,19 +68,51 @@ struct Workspace {
     label: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct SessaoListada {
-    name: String,
-    default: bool,
-    running: bool,
-    socket_path: PathBuf,
+/// O diretório de config do herdr, na ordem do herdr 0.8.2 (`src/config/io.rs`): o
+/// `XDG_CONFIG_HOME`, se existir (mesmo vazio), senão `~/.config`, senão o temporário. O
+/// `HERDR_CONFIG_PATH` não entra: ele troca só o caminho do `config.toml`.
+fn dir_do_herdr(xdg_config_home: Option<String>, home: Option<String>) -> PathBuf {
+    match (xdg_config_home, home) {
+        (Some(xdg), _) => PathBuf::from(xdg).join("herdr"),
+        (None, Some(home)) => PathBuf::from(home).join(".config").join("herdr"),
+        (None, None) => std::env::temp_dir().join("herdr"),
+    }
+}
+
+/// Onde o servidor de uma sessão escuta (`src/session.rs` do herdr): a padrão em
+/// `<dir>/herdr.sock`, a nomeada em `<dir>/sessions/<nome>/herdr.sock`. O nome `default` é a
+/// padrão, como o herdr o normaliza.
+///
+/// Calculado, e não perguntado ao `herdr session list`: aquilo era um processo por conferência,
+/// e a reconciliação confere cada sessão viva a cada minuto. O `HERDR_SOCKET_PATH` do ambiente
+/// fica de fora de propósito: um daemon iniciado de dentro de um pane herdaria o da sessão
+/// daquele pane.
+fn socket_da_sessao(dir: &Path, sessao: Option<&str>) -> PathBuf {
+    match sessao.filter(|s| *s != "default") {
+        Some(nome) => dir.join("sessions").join(nome).join("herdr.sock"),
+        None => dir.join("herdr.sock"),
+    }
 }
 
 impl Herdr {
     pub fn new(sessao: Option<String>) -> Self {
+        Self::com(sessao, None, paths::state_dir().join("herdr-servidor.log"))
+    }
+
+    fn com(sessao: Option<String>, config_home: Option<PathBuf>, log: PathBuf) -> Self {
+        let sessao = sessao.filter(|s| !s.trim().is_empty());
+        let dir = match &config_home {
+            Some(c) => c.join("herdr"),
+            None => dir_do_herdr(
+                std::env::var("XDG_CONFIG_HOME").ok(),
+                std::env::var("HOME").ok(),
+            ),
+        };
         Self {
-            sessao: sessao.filter(|s| !s.trim().is_empty()),
-            log_do_servidor: paths::state_dir().join("herdr-servidor.log"),
+            socket: socket_da_sessao(&dir, sessao.as_deref()),
+            sessao,
+            config_home,
+            log_do_servidor: log,
         }
     }
 
@@ -81,50 +126,39 @@ impl Herdr {
         }
     }
 
-    /// A sessão configurada, como o próprio herdr a lista: onde fica o socket e se está de pé.
-    async fn listada(&self) -> Result<Option<SessaoListada>> {
-        #[derive(Deserialize)]
-        struct Lista {
-            sessions: Vec<SessaoListada>,
-        }
-        let saida = Command::new("herdr")
-            .args(["session", "list", "--json"])
-            .output()
-            .await
-            .context("chamando herdr (ele está instalado?)")?;
-        if !saida.status.success() {
-            bail!(
-                "herdr session list falhou: {}",
-                String::from_utf8_lossy(&saida.stderr).trim()
-            );
-        }
-        let lista: Lista =
-            serde_json::from_slice(&saida.stdout).context("lendo a lista de sessões do herdr")?;
-        Ok(lista.sessions.into_iter().find(|s| match &self.sessao {
-            Some(nome) => &s.name == nome,
-            None => s.default,
-        }))
+    /// O servidor da sessão responde? Não sobe nada: é o que `vive`, `mata` e `nossas` usam, e
+    /// conferir não pode ter o efeito colateral de ligar um servidor.
+    ///
+    /// Responder ao `ping`, e não só aceitar a conexão: um socket que ficou de um servidor morto,
+    /// ou de um travado, não pode passar por sessão de pé.
+    async fn de_pe(&self) -> bool {
+        self.socket.exists()
+            && chama_em(&self.socket, "ping", json!({}), PRAZO_DE_CONFERIR)
+                .await
+                .is_ok()
     }
 
-    /// O socket da sessão, se o servidor dela está de pé. Não sobe nada: é o que `vive`, `mata`
-    /// e `nossas` usam, e conferir não pode ter o efeito colateral de ligar um servidor.
-    async fn socket_se_de_pe(&self) -> Option<PathBuf> {
-        match self.listada().await {
-            Ok(Some(s)) if s.running => Some(s.socket_path),
-            _ => None,
-        }
-    }
-
-    /// O socket da sessão, subindo o servidor se ele não estiver de pé.
+    /// Sobe o servidor da sessão, se ele não estiver de pé.
     ///
     /// Ao contrário do `tmux new-session`, a CLI do herdr não sobe servidor sozinha. O servidor
     /// sobe em grupo de processo próprio, para sobreviver ao restart do daemon (a unit usa
     /// `KillMode=process` pelo mesmo motivo). A saída de erro dele vai para um arquivo: o
-    /// servidor que não sobe (socket com caminho longo demais, sessão corrompida) diz o motivo
-    /// ali, e só ali.
-    async fn garante_servidor(&self) -> Result<PathBuf> {
-        if let Some(s) = self.socket_se_de_pe().await {
-            return Ok(s);
+    /// servidor que não sobe (nome de sessão inválido, sessão corrompida) diz o motivo ali, e só
+    /// ali.
+    async fn garante_servidor(&self) -> Result<()> {
+        if self.de_pe().await {
+            return Ok(());
+        }
+        // Com o caminho longo demais o servidor morre ao subir, e o motivo que ele deixa não diz
+        // qual caminho. Aparece com um XDG_CONFIG_HOME fundo.
+        if self.socket.as_os_str().len() >= SUN_PATH {
+            bail!(
+                "o socket do herdr ficaria em {} ({} bytes), e um socket unix aceita até {}: \
+                 encurte o nome da sessão em [herdr] sessao ou o XDG_CONFIG_HOME",
+                self.socket.display(),
+                self.socket.as_os_str().len(),
+                SUN_PATH - 1
+            );
         }
         let log = &self.log_do_servidor;
         if let Some(pai) = log.parent() {
@@ -133,7 +167,8 @@ impl Herdr {
         let erro = std::fs::File::create(log)
             .map(std::process::Stdio::from)
             .unwrap_or_else(|_| std::process::Stdio::null());
-        let mut servidor = sem_segredos(&mut Command::new("herdr"))
+        let mut comando = Command::new("herdr");
+        sem_segredos(&mut comando)
             .args(self.flag_sessao())
             .arg("server")
             .env_remove("HERDR_SOCKET_PATH")
@@ -141,28 +176,28 @@ impl Herdr {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(erro)
-            .process_group(0)
-            .spawn()
-            .context("subindo o servidor do herdr")?;
+            .process_group(0);
+        if let Some(c) = &self.config_home {
+            comando.env("XDG_CONFIG_HOME", c);
+        }
+        let mut servidor = comando.spawn().context("subindo o servidor do herdr")?;
         let nome = self.sessao.as_deref().unwrap_or("sessão padrão");
         for _ in 0..50 {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            if let Some(s) = self.socket_se_de_pe().await
-                && chama(&s, "ping", json!({})).await.is_ok()
-            {
-                return Ok(s);
+            if self.de_pe().await {
+                return Ok(());
             }
             // Morto não sobe mais: esperar o resto do prazo só atrasaria o erro.
             if let Ok(Some(status)) = servidor.try_wait() {
                 bail!(
                     "o servidor do herdr ({nome}) saiu ao subir ({status}): {}",
-                    ultima_linha(log)
+                    motivo_no_log(log)
                 );
             }
         }
         bail!(
             "o servidor do herdr ({nome}) não subiu em 5 s: {}",
-            ultima_linha(log)
+            motivo_no_log(log)
         )
     }
 
@@ -172,15 +207,15 @@ impl Herdr {
     }
 
     /// O pane que roda este terminal, se ele ainda existe.
-    async fn painel_do_terminal(&self, terminal: &str) -> Option<(PathBuf, Painel)> {
-        let socket = self.socket_se_de_pe().await?;
-        let painel = self
-            .paineis(&socket)
+    async fn painel_do_terminal(&self, terminal: &str) -> Option<Painel> {
+        if !self.de_pe().await {
+            return None;
+        }
+        self.paineis(&self.socket)
             .await
             .ok()?
             .into_iter()
-            .find(|p| p.terminal_id == terminal)?;
-        Some((socket, painel))
+            .find(|p| p.terminal_id == terminal)
     }
 
     /// O workspace do projeto: o que já tem o nome dele (inclusive um aberto por você) ou um
@@ -211,6 +246,11 @@ impl Herdr {
 
 /// Uma chamada ao socket: um JSON por linha na ida, um na volta.
 async fn chama(socket: &Path, metodo: &str, params: Value) -> Result<Value> {
+    chama_em(socket, metodo, params, PRAZO).await
+}
+
+/// [`chama`] com um prazo próprio.
+async fn chama_em(socket: &Path, metodo: &str, params: Value, prazo: Duration) -> Result<Value> {
     let ida = async {
         let mut s = UnixStream::connect(socket)
             .await
@@ -221,9 +261,9 @@ async fn chama(socket: &Path, metodo: &str, params: Value) -> Result<Value> {
         BufReader::new(s).read_line(&mut linha).await?;
         anyhow::Ok(linha)
     };
-    let linha = tokio::time::timeout(PRAZO, ida)
+    let linha = tokio::time::timeout(prazo, ida)
         .await
-        .with_context(|| format!("o herdr não respondeu {metodo} em {PRAZO:?}"))??;
+        .with_context(|| format!("o herdr não respondeu {metodo} em {prazo:?}"))??;
     let v: Value = serde_json::from_str(&linha)
         .with_context(|| format!("resposta ilegível do herdr para {metodo}"))?;
     if let Some(e) = v.get("error") {
@@ -236,17 +276,23 @@ async fn chama(socket: &Path, metodo: &str, params: Value) -> Result<Value> {
     Ok(v["result"].clone())
 }
 
-/// A última linha não vazia de um arquivo de log, ou um aviso de que ele não diz nada.
-fn ultima_linha(log: &Path) -> String {
-    std::fs::read_to_string(log)
-        .ok()
-        .and_then(|t| {
-            t.lines()
-                .rev()
-                .map(str::trim)
-                .find(|l| !l.is_empty())
-                .map(str::to_string)
-        })
+/// O motivo no log do servidor: a última linha de erro, ou a última não vazia, ou um aviso de
+/// que ele não diz nada.
+///
+/// A última linha sozinha não serve: quando a CLI do herdr recusa (nome de sessão inválido), ela
+/// fecha com `run 'herdr --help' for usage`, e o motivo está na linha `error:` de antes.
+fn motivo_no_log(log: &Path) -> String {
+    let texto = std::fs::read_to_string(log).unwrap_or_default();
+    let linhas: Vec<&str> = texto
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    linhas
+        .iter()
+        .rev()
+        .find(|l| l.to_ascii_lowercase().starts_with("error"))
+        .or(linhas.last())
         .map(|l| l.chars().take(300).collect())
         .unwrap_or_else(|| format!("sem mensagem ({})", log.display()))
 }
@@ -260,8 +306,9 @@ fn parte(hospedagem: &str) -> (&str, &str) {
 impl Hospedeiro for Herdr {
     async fn lanca(&self, partida: &Partida, projeto: &Project) -> Result<Launched> {
         let rotulo = nome_da_sessao(&projeto.name, &partida.session_id);
-        let socket = self.garante_servidor().await?;
-        let alvo = self.alvo_no_projeto(&socket, projeto).await?;
+        self.garante_servidor().await?;
+        let socket = self.socket.as_path();
+        let alvo = self.alvo_no_projeto(socket, projeto).await?;
 
         // O `script` dá ao agente um terminal de verdade (com pipe no stdout o Claude Code vira
         // não interativo) e espelha a saída no log desde o primeiro byte. É o papel do
@@ -291,14 +338,14 @@ impl Hospedeiro for Herdr {
             .as_object_mut()
             .expect("objeto")
             .extend(alvo.as_object().expect("objeto").clone());
-        let r = chama(&socket, "layout.apply", pedido).await?;
+        let r = chama(socket, "layout.apply", pedido).await?;
         let pane = r["layout"]["root"]["pane_id"]
             .as_str()
             .context("layout.apply sem pane_id")?
             .to_string();
 
         // Morrer em milissegundos fecha o pane antes desta leitura: aí o motivo está no log.
-        let terminal = match chama(&socket, "pane.get", json!({ "pane_id": pane })).await {
+        let terminal = match chama(socket, "pane.get", json!({ "pane_id": pane })).await {
             Ok(p) => p["pane"]["terminal_id"]
                 .as_str()
                 .context("pane.get sem terminal_id")?
@@ -310,7 +357,7 @@ impl Hospedeiro for Herdr {
         // O título é o nome do tópico, para você saber no herdr qual conversa é qual. É só
         // enfeite: falhar aqui não derruba a sessão.
         let _ = chama(
-            &socket,
+            socket,
             "pane.report_metadata",
             json!({ "pane_id": pane, "source": FONTE, "title": projeto.name }),
         )
@@ -334,10 +381,15 @@ impl Hospedeiro for Herdr {
     }
 
     async fn mata(&self, nome: &str) -> Result<()> {
-        let Some((socket, painel)) = self.painel_do_terminal(parte(nome).1).await else {
+        let Some(painel) = self.painel_do_terminal(parte(nome).1).await else {
             return Ok(());
         };
-        let fechou = chama(&socket, "pane.close", json!({ "pane_id": painel.pane_id })).await;
+        let fechou = chama(
+            &self.socket,
+            "pane.close",
+            json!({ "pane_id": painel.pane_id }),
+        )
+        .await;
         if let Err(e) = fechou
             && self.vive(nome).await
         {
@@ -347,10 +399,10 @@ impl Hospedeiro for Herdr {
     }
 
     async fn nossas(&self) -> Vec<String> {
-        let Some(socket) = self.socket_se_de_pe().await else {
+        if !self.de_pe().await {
             return Vec::new();
-        };
-        self.paineis(&socket)
+        }
+        self.paineis(&self.socket)
             .await
             .unwrap_or_default()
             .into_iter()
@@ -408,9 +460,72 @@ mod tests {
     fn sessao_vazia_no_config_e_a_padrao() {
         assert!(Herdr::new(Some("  ".into())).flag_sessao().is_empty());
     }
+
+    #[test]
+    fn diretorio_do_herdr_na_ordem_do_herdr() {
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(
+            dir_do_herdr(s("/x/config"), s("/home/u")),
+            Path::new("/x/config/herdr")
+        );
+        assert_eq!(
+            dir_do_herdr(None, s("/home/u")),
+            Path::new("/home/u/.config/herdr")
+        );
+        // Vazio conta como definido, como no herdr (`std::env::var` devolve Ok("")).
+        assert_eq!(dir_do_herdr(s(""), s("/home/u")), Path::new("herdr"));
+        assert_eq!(dir_do_herdr(None, None), std::env::temp_dir().join("herdr"));
+    }
+
+    #[test]
+    fn o_motivo_e_a_linha_de_erro_e_nao_a_dica_de_uso() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("servidor.log");
+        // O que o herdr 0.8.2 escreve ao recusar um nome de sessão.
+        std::fs::write(
+            &log,
+            "error: session name may only contain ASCII letters, numbers, '.', '_' and '-'\n\
+             run 'herdr --help' for usage\n",
+        )
+        .unwrap();
+        assert!(
+            motivo_no_log(&log).starts_with("error: session name"),
+            "{}",
+            motivo_no_log(&log)
+        );
+
+        std::fs::write(&log, "subindo\nsocket busy at /x\n\n").unwrap();
+        assert_eq!(
+            motivo_no_log(&log),
+            "socket busy at /x",
+            "sem linha de erro, a última"
+        );
+
+        std::fs::write(&log, "").unwrap();
+        assert!(motivo_no_log(&log).starts_with("sem mensagem"));
+    }
+
+    #[test]
+    fn socket_da_padrao_e_da_nomeada() {
+        let dir = Path::new("/c/herdr");
+        assert_eq!(
+            socket_da_sessao(dir, None),
+            Path::new("/c/herdr/herdr.sock")
+        );
+        assert_eq!(
+            socket_da_sessao(dir, Some("bot")),
+            Path::new("/c/herdr/sessions/bot/herdr.sock")
+        );
+        assert_eq!(
+            socket_da_sessao(dir, Some("default")),
+            Path::new("/c/herdr/herdr.sock"),
+            "o herdr trata `default` como a sessão padrão"
+        );
+    }
 }
 
-/// Contra o herdr de verdade, numa sessão nomeada só do teste: nunca a sua sessão padrão.
+/// Contra o herdr de verdade, numa sessão nomeada só do teste e com um `XDG_CONFIG_HOME` só
+/// dele: nem a sua sessão padrão nem o seu `~/.config/herdr` são tocados.
 #[cfg(test)]
 mod testes_hospedeiro {
     use super::*;
@@ -422,32 +537,55 @@ mod testes_hospedeiro {
             .is_ok_and(|s| s.status.success())
     }
 
-    /// Para e apaga a sessão do teste mesmo se ele falhar no meio. O log do servidor fica num
-    /// diretório do teste, e não no estado do daemon de verdade.
-    struct SessaoDeTeste(String, tempfile::TempDir);
+    /// Para o servidor do teste mesmo se ele falhar no meio. A config do herdr e o log do
+    /// servidor ficam num diretório do teste, que some junto.
+    struct SessaoDeTeste {
+        nome: String,
+        dir: tempfile::TempDir,
+        config_home: PathBuf,
+    }
 
     impl SessaoDeTeste {
         fn nova(sufixo: &str) -> Self {
             Self::com_nome(format!("ldteste-{}-{sufixo}", std::process::id()))
         }
         fn com_nome(nome: String) -> Self {
-            Self(nome, tempfile::tempdir().unwrap())
+            let dir = tempfile::tempdir().unwrap();
+            let config_home = dir.path().to_path_buf();
+            Self {
+                nome,
+                dir,
+                config_home,
+            }
+        }
+        /// A config num diretório fundo o bastante para o socket passar do `sun_path`.
+        fn funda(mut self) -> Self {
+            self.config_home = self.dir.path().join("x".repeat(100));
+            self
         }
         fn herdr(&self) -> Herdr {
-            Herdr {
-                log_do_servidor: self.1.path().join("herdr-servidor.log"),
-                ..Herdr::new(Some(self.0.clone()))
-            }
+            Herdr::com(
+                Some(self.nome.clone()),
+                Some(self.config_home.clone()),
+                self.dir.path().join("herdr-servidor.log"),
+            )
+        }
+        /// A CLI do herdr apontada para a config do teste.
+        fn cli(&self) -> std::process::Command {
+            let mut c = std::process::Command::new("herdr");
+            c.env("XDG_CONFIG_HOME", &self.config_home)
+                .env_remove("HERDR_SOCKET_PATH")
+                .env_remove("HERDR_SESSION");
+            c
         }
     }
 
     impl Drop for SessaoDeTeste {
         fn drop(&mut self) {
-            for acao in ["stop", "delete"] {
-                let _ = std::process::Command::new("herdr")
-                    .args(["session", acao, &self.0, "--json"])
-                    .output();
-            }
+            let _ = self
+                .cli()
+                .args(["session", "stop", &self.nome, "--json"])
+                .output();
         }
     }
 
@@ -521,8 +659,8 @@ mod testes_hospedeiro {
         let l1 = h.lanca(&p1, &projeto).await.unwrap();
         let l2 = h.lanca(&p2, &projeto).await.unwrap();
 
-        let socket = h.socket_se_de_pe().await.unwrap();
-        let r = chama(&socket, "workspace.list", json!({})).await.unwrap();
+        let socket = &h.socket;
+        let r = chama(socket, "workspace.list", json!({})).await.unwrap();
         let ws: Vec<Workspace> = serde_json::from_value(r["workspaces"].clone()).unwrap();
         let do_projeto: Vec<_> = ws
             .iter()
@@ -530,7 +668,7 @@ mod testes_hospedeiro {
             .collect();
         assert_eq!(do_projeto.len(), 1, "{ws:?}");
         let abas = chama(
-            &socket,
+            socket,
             "tab.list",
             json!({ "workspace_id": do_projeto[0].workspace_id }),
         )
@@ -571,21 +709,103 @@ mod testes_hospedeiro {
         if !tem_herdr() {
             return;
         }
-        // Um nome de sessão longo o bastante estoura o caminho do socket unix (~108 bytes), e o
-        // servidor morre ao subir. O motivo é do herdr, e tem de chegar em quem chamou.
-        let sessao =
-            SessaoDeTeste::com_nome(format!("ldteste-{}-{}", std::process::id(), "x".repeat(90)));
+        // O herdr recusa nome de sessão com caractere fora de [A-Za-z0-9._-] e morre ao subir.
+        // O motivo é do herdr, e tem de chegar em quem chamou.
+        let sessao = SessaoDeTeste::com_nome(format!("ldteste-{}-inválido", std::process::id()));
         let dir = tempfile::tempdir().unwrap();
-        let (partida, projeto) = partida_com("exec sleep 60", dir.path(), "c0ffee00-longo");
+        let (partida, projeto) = partida_com("exec sleep 60", dir.path(), "c0ffee00-invalido");
         let inicio = std::time::Instant::now();
         let e = sessao.herdr().lanca(&partida, &projeto).await.unwrap_err();
         let msg = format!("{e:#}");
         assert!(msg.contains("saiu ao subir"), "{msg}");
-        assert!(!msg.contains("sem mensagem"), "o motivo se perdeu: {msg}");
+        assert!(msg.contains("session name"), "o motivo se perdeu: {msg}");
         assert!(
             inicio.elapsed() < Duration::from_secs(4),
             "esperou o prazo inteiro por um servidor que já tinha morrido"
         );
+    }
+
+    #[tokio::test]
+    async fn socket_longo_demais_e_recusado_antes_de_subir() {
+        if !tem_herdr() {
+            return;
+        }
+        let sessao = SessaoDeTeste::nova("longo").funda();
+        let h = sessao.herdr();
+        assert!(
+            h.socket.as_os_str().len() >= SUN_PATH,
+            "{}",
+            h.socket.display()
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let (partida, projeto) = partida_com("exec sleep 60", dir.path(), "c0ffee00-longo");
+        let e = h.lanca(&partida, &projeto).await.unwrap_err();
+        let msg = format!("{e:#}");
+        assert!(msg.contains("socket unix aceita até 107"), "{msg}");
+        assert!(msg.contains(&*h.socket.to_string_lossy()), "{msg}");
+        assert!(
+            !sessao.dir.path().join("herdr-servidor.log").exists(),
+            "tentou subir o servidor mesmo assim"
+        );
+    }
+
+    #[tokio::test]
+    async fn o_socket_calculado_e_o_que_o_proprio_herdr_lista() {
+        if !tem_herdr() {
+            return;
+        }
+        let sessao = SessaoDeTeste::nova("lista");
+        let h = sessao.herdr();
+        let dir = tempfile::tempdir().unwrap();
+        let (partida, projeto) = partida_com("exec sleep 60", dir.path(), "d00d0000-lista");
+        let l = h.lanca(&partida, &projeto).await.unwrap();
+
+        let saida = sessao
+            .cli()
+            .args(["session", "list", "--json"])
+            .output()
+            .unwrap();
+        assert!(saida.status.success(), "{saida:?}");
+        let lista: Value = serde_json::from_slice(&saida.stdout).unwrap();
+        let dela = lista["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == sessao.nome.as_str())
+            .unwrap_or_else(|| panic!("a sessão do teste não está na lista: {lista}"));
+        assert_eq!(dela["running"], true, "{dela}");
+        assert_eq!(
+            Path::new(dela["socket_path"].as_str().unwrap()),
+            h.socket,
+            "o daemon calculou um socket diferente do que o herdr usa"
+        );
+
+        h.mata(&l.hospedagem).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn socket_que_nao_responde_nao_esta_de_pe() {
+        // Não depende do herdr: o que se testa é o daemon diante de um socket sem servidor que
+        // responda.
+        let sessao = SessaoDeTeste::nova("mudo");
+        let h = sessao.herdr();
+        std::fs::create_dir_all(h.socket.parent().unwrap()).unwrap();
+
+        // Aceita a conexão (o kernel enfileira) e nunca responde: é o servidor travado.
+        let mudo = std::os::unix::net::UnixListener::bind(&h.socket).unwrap();
+        let inicio = std::time::Instant::now();
+        assert!(!h.de_pe().await, "servidor travado passou por de pé");
+        assert!(h.nossas().await.is_empty());
+        assert!(
+            inicio.elapsed() < Duration::from_secs(4),
+            "a conferência esperou o prazo longo: {:?}",
+            inicio.elapsed()
+        );
+
+        // Sem ninguém escutando, o arquivo que sobrou é só um socket velho.
+        drop(mudo);
+        assert!(h.socket.exists());
+        assert!(!h.de_pe().await, "socket velho passou por de pé");
     }
 
     #[tokio::test]
@@ -600,9 +820,7 @@ mod testes_hospedeiro {
         assert!(!h.vive(nome).await);
         assert!(h.mata(nome).await.is_ok());
         assert!(h.nossas().await.is_empty());
-        assert!(
-            h.socket_se_de_pe().await.is_none(),
-            "conferir subiu servidor"
-        );
+        assert!(!h.de_pe().await, "conferir subiu servidor");
+        assert!(!h.socket.exists(), "conferir subiu servidor");
     }
 }
