@@ -7,7 +7,7 @@
 //! dois deixam a sessão anexável no PC e sobrevivem a restart do daemon.
 
 use anyhow::{Context, Result, bail};
-use ld_core::config::{Config, Project};
+use ld_core::config::{Config, Project, TOKEN_TELEGRAM};
 use ld_core::paths;
 use std::sync::Arc;
 use tokio::process::Command;
@@ -45,6 +45,15 @@ pub fn nome_da_sessao(projeto: &str, session_id: &str) -> String {
     format!("ld-{slug}-{}", &session_id[..4])
 }
 
+/// Tira do comando o que o daemon tem no ambiente e não pode chegar ao hospedeiro.
+///
+/// O servidor do tmux ou do herdr, quando é o daemon que o sobe, copia o ambiente dele, e todo
+/// pane que nascer ali herda. Sob o systemd, esse ambiente tem o token do bot (o `.env` da
+/// unit): sem isto ele iria parar em cada shell do servidor, inclusive nos seus.
+pub(super) fn sem_segredos(cmd: &mut Command) -> &mut Command {
+    cmd.env_remove(TOKEN_TELEGRAM)
+}
+
 /// Sobe a sessão. Devolve erro sem deixar lixo se o tmux não vingar.
 pub async fn launch(partida: &Partida, projeto: &Project) -> Result<Launched> {
     let tmux = nome_da_sessao(&projeto.name, &partida.session_id);
@@ -57,7 +66,7 @@ pub async fn launch(partida: &Partida, projeto: &Project) -> Result<Launched> {
     let _ = std::fs::remove_file(&liberado);
     const INVOLUCRO: &str = r#"i=0; while [ ! -e "$1" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i+1)); done; exec bash "$0""#;
 
-    let saida = Command::new("tmux")
+    let saida = sem_segredos(&mut Command::new("tmux"))
         .args([
             "new-session",
             "-d",
@@ -306,6 +315,18 @@ mod tests {
         )
         .unwrap();
         assert!(primeiro_erro(&log).contains("opening managed workstream"));
+    }
+
+    #[test]
+    fn o_token_do_bot_nao_passa_para_o_hospedeiro() {
+        let mut cmd = Command::new("tmux");
+        sem_segredos(&mut cmd);
+        assert!(
+            cmd.as_std()
+                .get_envs()
+                .any(|(k, v)| k == TOKEN_TELEGRAM && v.is_none()),
+            "o token tem de sair do ambiente do servidor"
+        );
     }
 
     #[test]
