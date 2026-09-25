@@ -553,6 +553,14 @@ impl Hospedeiro for Herdr {
         Ok(())
     }
 
+    /// O processo gravado na hospedagem, se ainda é o nosso.
+    async fn pid(&self, nome: &str) -> Option<u32> {
+        Hospedagem::le(nome)
+            .processo
+            .filter(Processo::vivo)
+            .map(|p| p.pid)
+    }
+
     async fn nossas(&self) -> Vec<String> {
         if !self.de_pe().await {
             return Vec::new();

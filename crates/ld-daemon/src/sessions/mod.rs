@@ -272,6 +272,14 @@ pub trait Hospedeiro: Send + Sync + 'static {
     /// hospedeiro precisar. [`Hospedeiro::mata`] aceita o rótulo sozinho.
     async fn nossas(&self) -> Vec<String>;
 
+    /// O processo que roda no painel da sessão: o que o script de partida virou. Serve para
+    /// parar a sessão com calma antes de derrubá-la. `None` quando o hospedeiro não sabe dizer,
+    /// e aí a sessão só é derrubada.
+    async fn pid(&self, nome: &str) -> Option<u32> {
+        let _ = nome;
+        None
+    }
+
     /// Como a sessão aparece na ficha do canal: o hospedeiro e onde achá-la nele.
     fn descreve(&self, nome: &str) -> String;
 
@@ -300,6 +308,24 @@ impl Hospedeiro for Tmux {
 
     async fn nossas(&self) -> Vec<String> {
         nossas_sessoes().await
+    }
+
+    async fn pid(&self, nome: &str) -> Option<u32> {
+        let saida = Command::new("tmux")
+            .args([
+                "display-message",
+                "-p",
+                "-t",
+                &format!("={nome}"),
+                "#{pane_pid}",
+            ])
+            .output()
+            .await
+            .ok()?;
+        if !saida.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&saida.stdout).trim().parse().ok()
     }
 
     fn descreve(&self, nome: &str) -> String {

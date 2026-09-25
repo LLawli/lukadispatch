@@ -22,7 +22,10 @@ use serde_json::{Map, Value, json};
 /// Os servidores MCP que valem para um diretório, já mesclados.
 ///
 /// A ordem de precedência é a do próprio Claude Code: o mais específico ganha do mais geral.
-pub fn servidores_do_projeto(claude_json: &Path, cwd: &str) -> Map<String, Value> {
+/// `projeto` é a chave do projeto no `~/.claude.json`, e `cwd`, onde está o `.mcp.json`. São a
+/// mesma pasta, menos numa worktree: o Claude Code guarda os servidores pelo caminho do
+/// repositório, e a worktree, noutra pasta, não tem entrada lá.
+pub fn servidores_do_projeto(claude_json: &Path, projeto: &str, cwd: &str) -> Map<String, Value> {
     let mut saida = Map::new();
 
     let doc: Value = std::fs::read_to_string(claude_json)
@@ -35,7 +38,7 @@ pub fn servidores_do_projeto(claude_json: &Path, cwd: &str) -> Map<String, Value
     }
     if let Some(m) = doc
         .get("projects")
-        .and_then(|p| p.get(cwd))
+        .and_then(|p| p.get(projeto))
         .and_then(|p| p.get("mcpServers"))
         .and_then(Value::as_object)
     {
@@ -139,7 +142,7 @@ mod tests {
             json!({"mcpServers": {"repo": {"command": "r"}}}),
         );
 
-        let s = servidores_do_projeto(&claude, &cwd);
+        let s = servidores_do_projeto(&claude, &cwd, &cwd);
         assert_eq!(sorted(&s), vec!["ambos", "global", "repo"]);
         assert_eq!(s["ambos"]["command"], "do-projeto");
     }
@@ -200,7 +203,7 @@ mod tests {
     #[test]
     fn sem_arquivo_nenhum_devolve_vazio() {
         let dir = tempfile::tempdir().unwrap();
-        let s = servidores_do_projeto(&dir.path().join("nao-existe.json"), "/tmp/x");
+        let s = servidores_do_projeto(&dir.path().join("nao-existe.json"), "/tmp/x", "/tmp/x");
         assert!(s.is_empty());
     }
 
@@ -208,5 +211,28 @@ mod tests {
         let mut v: Vec<String> = m.keys().cloned().collect();
         v.sort();
         v
+    }
+
+    #[test]
+    fn worktree_herda_os_servidores_do_repositorio_e_le_o_mcp_json_dela() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join("claude.json");
+        std::fs::write(
+            &claude,
+            r#"{"projects": {"/repo": {"mcpServers": {"do-projeto": {"command": "a"}}}}}"#,
+        )
+        .unwrap();
+        let wt = dir.path().join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(
+            wt.join(".mcp.json"),
+            r#"{"mcpServers": {"do-repo": {"command": "b"}}}"#,
+        )
+        .unwrap();
+        let s = servidores_do_projeto(&claude, "/repo", &wt.to_string_lossy());
+        assert!(
+            s.contains_key("do-projeto") && s.contains_key("do-repo"),
+            "{s:?}"
+        );
     }
 }

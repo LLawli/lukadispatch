@@ -25,12 +25,15 @@ use async_trait::async_trait;
 use ld_core::config::{Config, Project};
 use ld_core::context::ContextUsage;
 use ld_core::models::Modelo;
-use ld_core::proto::{EventKind, SessionEvent, StopReport};
-use ld_core::state::{Session, Store};
+use ld_core::proto::{EventKind, RegisterSession, SessionEvent, StopReport};
+use ld_core::state::{Session, Store, Worktree};
 use ld_core::transcript::{Fala, SessaoAnterior};
 use ld_core::usage::{SessionTokens, Windows};
 use ld_daemon::agente::claude_code::{ClaudeCode, Locais};
-use ld_daemon::agente::{Agente, AiMemory, Invocacao, Modo, Partida, PedidoDePartida, SemMemoria};
+use ld_daemon::agente::{
+    Agente, AiMemory, Guardado, Invocacao, Modo, Partida, PartidaDaMemoria, PedidoDePartida,
+    SemMemoria,
+};
 use ld_daemon::app::{App, Portas};
 use ld_daemon::divisor::{Divisor, Divisores, Partes};
 use ld_daemon::frontend::memoria::{Chamada, Memoria};
@@ -72,6 +75,11 @@ struct HospedeiroFalso {
     restauradas: Mutex<HashSet<String>>,
     /// Recusa os próximos lançamentos, como um hospedeiro que não consegue subir a sessão.
     recusa: Mutex<bool>,
+    /// Quantos dos próximos lançamentos morrem ao subir com a memória presa a uma partida
+    /// anterior, deixando no painel o que o `ai-memory run` diz nesse caso.
+    presa: Mutex<u32>,
+    /// O processo que o painel diz rodar.
+    pid: Mutex<Option<u32>>,
     lancadas: Mutex<u32>,
     partidas: Mutex<Vec<Partida>>,
     /// `mata:<nome>` e `lanca:<id>`, na ordem em que aconteceram.
@@ -100,6 +108,18 @@ impl Hospedeiro for HospedeiroFalso {
     async fn lanca(&self, partida: &Partida, projeto: &Project) -> Result<Launched> {
         if *self.recusa.lock().unwrap() {
             anyhow::bail!("o hospedeiro recusou");
+        }
+        {
+            let mut presa = self.presa.lock().unwrap();
+            if *presa > 0 {
+                *presa -= 1;
+                std::fs::write(
+                    &partida.log,
+                    "Error: opening managed workstream\nCaused by: workstream is already active: x",
+                )
+                .unwrap();
+                anyhow::bail!("a sessão morreu ao subir: Error: opening managed workstream");
+            }
         }
         *self.lancadas.lock().unwrap() += 1;
         self.eventos
@@ -146,6 +166,9 @@ impl Hospedeiro for HospedeiroFalso {
             .retain(|h| h != nome && rotulo(h) != nome);
         self.restauradas.lock().unwrap().remove(nome);
         Ok(())
+    }
+    async fn pid(&self, _nome: &str) -> Option<u32> {
+        *self.pid.lock().unwrap()
     }
     async fn nossas(&self) -> Vec<String> {
         self.vivas
@@ -211,8 +234,13 @@ impl Agente for AgenteFalso {
         Ok(Invocacao {
             argv,
             prompt: Some(format!(
-                "fale com o Luka por {}; arquivo até {} bytes",
-                pedido.chat.onde, pedido.chat.teto_envio
+                "fale com o Luka por {}; arquivo até {} bytes{}",
+                pedido.chat.onde,
+                pedido.chat.teto_envio,
+                pedido
+                    .instrucoes
+                    .map(|i| format!("\n{i}"))
+                    .unwrap_or_default()
             )),
         })
     }
@@ -316,6 +344,10 @@ fn luka() -> Autor {
 }
 
 async fn cena_com(limites: Limites) -> Cena {
+    cena_montada(limites, Arc::new(SemMemoria)).await
+}
+
+async fn cena_montada(limites: Limites, memoria: Arc<dyn ld_daemon::agente::Memoria>) -> Cena {
     let fe = Memoria::com_limites(limites);
     let canal = fe.cria_canal("proj").await.unwrap();
     fe.limpa_registro();
@@ -364,7 +396,7 @@ async fn cena_com(limites: Limites) -> Cena {
         Portas {
             frontend: fe.clone(),
             agente: Arc::new(AgenteFalso),
-            memoria: Arc::new(SemMemoria),
+            memoria,
             transcritor: Some(Arc::new(TranscritorFalso("roda os testes"))),
             divisores: Divisores::new(vec![Arc::new(DivisorFalso)]),
             hospedeiro: hospedeiro.clone(),
@@ -372,7 +404,8 @@ async fn cena_com(limites: Limites) -> Cena {
     )
     .com_raiz_arquivos(raiz.path().join("arquivos"))
     .com_raiz_sessoes(raiz.path().join("sessoes"))
-    .com_espera_depois_do_fim(Duration::from_millis(50));
+    .com_espera_depois_do_fim(Duration::from_millis(50))
+    .com_espera_da_memoria(Duration::from_secs(100));
 
     Cena {
         app: Arc::new(app),
@@ -1351,4 +1384,205 @@ async fn o_claude_code_sobe_dentro_do_ai_memory() {
     assert!(script.contains("'--model' 'opus'"), "{script}");
     assert!(prompt.contains("select:Monitor"), "{prompt}");
     assert!(prompt.contains(&c.fe.onde("outro")), "{prompt}");
+}
+
+// ------------------------------------------------------------------ memória de longo prazo
+
+/// Uma memória que registra o que o domínio pediu a ela.
+#[derive(Default)]
+struct MemoriaFalsa {
+    /// Para cada embrulho: a worktree que veio (a branch) e se a partida era isolada.
+    embrulhos: Mutex<Vec<(Option<String>, bool)>>,
+    /// `tira` e `devolve`, na ordem em que aconteceram.
+    eventos: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl ld_daemon::agente::Memoria for MemoriaFalsa {
+    fn nome(&self) -> &'static str {
+        "falsa"
+    }
+    async fn embrulha(&self, p: &PartidaDaMemoria<'_>, argv: Vec<String>) -> Result<Vec<String>> {
+        self.embrulhos
+            .lock()
+            .unwrap()
+            .push((p.worktree.map(|w| w.branch.clone()), p.isolada));
+        Ok(argv)
+    }
+    fn instrucoes(&self, p: &PartidaDaMemoria<'_>) -> Option<String> {
+        p.worktree
+            .map(|w| format!("INSTRUÇÃO DA BRANCH {}", w.branch))
+    }
+    async fn antes_da_partida(&self, _: &PartidaDaMemoria<'_>) -> Result<Option<Guardado>> {
+        self.eventos.lock().unwrap().push("tira".into());
+        Ok(Some(Guardado(Box::new(()))))
+    }
+    async fn devolve(&self, _: Guardado) -> Result<()> {
+        self.eventos.lock().unwrap().push("devolve".into());
+        Ok(())
+    }
+    fn ocupada(&self, saida: &str) -> bool {
+        saida.contains("workstream is already active")
+    }
+}
+
+/// Uma cena com a memória falsa e um projeto numa worktree da branch `feat`.
+async fn cena_de_worktree() -> (Cena, Arc<MemoriaFalsa>, Project) {
+    let memoria = Arc::new(MemoriaFalsa::default());
+    let c = cena_montada(Limites::default(), memoria.clone()).await;
+    let caminho = c.raiz.path().join("wt/outro/feat");
+    std::fs::create_dir_all(&caminho).unwrap();
+    let caminho = caminho.to_string_lossy().into_owned();
+    c.app
+        .store
+        .registra_worktree(&Worktree {
+            caminho: caminho.clone(),
+            projeto: "outro".into(),
+            raiz: "/tmp/outro".into(),
+            branch: "feat".into(),
+            criada_em: 0,
+            usada_em: 0,
+        })
+        .unwrap();
+    let projeto = Project {
+        name: "outro".into(),
+        path: caminho,
+        permission_mode: None,
+        model: None,
+        effort: None,
+    };
+    (c, memoria, projeto)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sessao_em_worktree_tem_canal_com_a_branch_e_a_memoria_sabe_dela() {
+    let (c, memoria, projeto) = cena_de_worktree().await;
+    c.app
+        .create_session(&projeto, None, None, None)
+        .await
+        .unwrap();
+
+    assert!(
+        c.fe.chamadas().iter().any(|ch| matches!(ch,
+            Chamada::CriaCanal { nome, .. } if nome == "outro · feat")),
+        "duas sessões do mesmo projeto não podem ter canais de mesmo nome"
+    );
+    assert_eq!(
+        *memoria.embrulhos.lock().unwrap(),
+        [(Some("feat".to_string()), false)]
+    );
+    let (_, prompt) = c.hospedeiro.ultima_partida();
+    assert!(prompt.contains("INSTRUÇÃO DA BRANCH feat"), "{prompt}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn memoria_presa_espera_e_tenta_de_novo() {
+    let (c, memoria, projeto) = cena_de_worktree().await;
+    *c.hospedeiro.presa.lock().unwrap() = 2;
+    c.app
+        .create_session(&projeto, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        *memoria.embrulhos.lock().unwrap(),
+        [
+            (Some("feat".to_string()), false),
+            (Some("feat".to_string()), false),
+            (Some("feat".to_string()), false),
+        ],
+        "dentro do prazo, a mesma memória: é ela que tem o registro da branch"
+    );
+    assert_eq!(*c.hospedeiro.lancadas.lock().unwrap(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn memoria_que_nao_solta_no_prazo_vira_memoria_isolada() {
+    let (c, memoria, projeto) = cena_de_worktree().await;
+    // Com 100 s de prazo e uma volta a cada 10 s, são onze tentativas na mesma memória: a
+    // décima segunda, já fora do prazo, é a isolada, e é essa que sobe.
+    *c.hospedeiro.presa.lock().unwrap() = 11;
+    c.app
+        .create_session(&projeto, None, None, None)
+        .await
+        .unwrap();
+    let embrulhos = memoria.embrulhos.lock().unwrap().clone();
+    assert_eq!(embrulhos.len(), 12, "{embrulhos:?}");
+    assert_eq!(embrulhos.last(), Some(&(Some("feat".to_string()), true)));
+    assert!(embrulhos[..11].iter().all(|(_, isolada)| !isolada));
+}
+
+#[tokio::test(start_paused = true)]
+async fn o_que_a_memoria_tirou_so_volta_depois_do_inicio_da_sessao() {
+    let (c, memoria, projeto) = cena_de_worktree().await;
+    let id = c
+        .app
+        .create_session(&projeto, None, None, None)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    assert_eq!(
+        *memoria.eventos.lock().unwrap(),
+        ["tira"],
+        "sem o início da sessão, o que foi tirado continua fora"
+    );
+
+    c.app
+        .on_register(&RegisterSession {
+            session_id: id,
+            cwd: projeto.path.clone(),
+            transcript_path: "/tmp/t.jsonl".into(),
+            reason: "startup".into(),
+            model: None,
+        })
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert_eq!(*memoria.eventos.lock().unwrap(), ["tira", "devolve"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn partida_que_falha_devolve_na_hora() {
+    let (c, memoria, projeto) = cena_de_worktree().await;
+    *c.hospedeiro.recusa.lock().unwrap() = true;
+    assert!(
+        c.app
+            .create_session(&projeto, None, None, None)
+            .await
+            .is_err()
+    );
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert_eq!(*memoria.eventos.lock().unwrap(), ["tira", "devolve"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn relancar_pede_ao_processo_que_saia_antes_de_derrubar_o_painel() {
+    let c = cena().await;
+    let mut processo = std::process::Command::new("sleep")
+        .arg("60")
+        .spawn()
+        .unwrap();
+    *c.hospedeiro.pid.lock().unwrap() = Some(processo.id());
+    // Sem recolher o filho, o pid dele fica como zumbi e parece vivo para sempre.
+    let recolhe = tokio::task::spawn_blocking(move || processo.wait().unwrap());
+
+    c.app.relaunch(SESSAO, Some("opus"), None).await.unwrap();
+
+    let status = tokio::time::timeout(Duration::from_secs(5), recolhe)
+        .await
+        .expect("o processo não recebeu o pedido de saída")
+        .unwrap();
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(
+        status.signal(),
+        Some(15),
+        "saiu por SIGTERM, e não derrubado"
+    );
+    assert!(
+        c.hospedeiro
+            .eventos
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| e.starts_with("mata:")),
+        "o hospedeiro ainda derruba o painel depois"
+    );
 }
