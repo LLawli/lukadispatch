@@ -146,6 +146,10 @@ pub struct App {
     /// que caiu sem soltá-la, antes de subir com uma memória só dela. Um teste troca com
     /// [`App::com_espera_da_memoria`].
     espera_da_memoria: std::time::Duration,
+    /// A hora (do hook) do último fim de turno de cada sessão. Evento de ferramenta mais velho
+    /// que ele é resto do turno que já acabou, que chegou atrasado porque o hook dele é
+    /// assíncrono, e não pode tirar a sessão de "ocioso".
+    fins_de_turno: Mutex<HashMap<String, u64>>,
     /// Quantas partidas estão subindo agora. Enquanto houver alguma, a reconciliação não varre
     /// órfãs: a partida de uma sessão que está sendo retomada tem o rótulo de uma sessão ainda
     /// encerrada no banco, e passaria por lixo, sobretudo enquanto espera a memória ser solta.
@@ -195,6 +199,7 @@ impl App {
             espera_da_memoria: std::time::Duration::from_secs(100),
             inicios: Arc::new(Mutex::new(HashMap::new())),
             partidas_em_curso: Default::default(),
+            fins_de_turno: Mutex::new(HashMap::new()),
             entregues: Mutex::new(HashMap::new()),
         }
     }
@@ -1213,8 +1218,21 @@ impl App {
             // Sessão de terminal: conta para o painel, não tem onde escrever.
             return Ok(());
         };
+        // Resto do turno que já acabou: o hook de ferramenta é assíncrono e pode chegar depois
+        // do `Stop`. Sem isto a sessão ficava "trabalhando" parada, e o /model recusava.
+        let atrasado = ev.at_ms.is_some_and(|quando| {
+            self.fins_de_turno
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&ev.session_id)
+                .is_some_and(|fim| quando < *fim)
+        });
 
         match &ev.event {
+            EventKind::ToolStart { .. } if atrasado => {}
+            // O fim de uma ferramenta nunca começa um turno: com a sessão ociosa, é resto do
+            // anterior, mesmo vindo de um binário que não manda a hora.
+            EventKind::ToolEnd { .. } if atrasado || s.status == "ocioso" => {}
             EventKind::ToolStart { label, effort, .. } => {
                 // Só escreve quando muda: isto roda a cada ferramenta.
                 if effort.is_some() && effort.as_deref() != s.effort.as_deref() {
@@ -1243,7 +1261,9 @@ impl App {
                 }
                 info!(sessao = %ev.session_id, "prompt digitado no PC, espelhado no canal");
                 self.marca_pedido(&ev.session_id);
-                self.store.set_status(&ev.session_id, "pensando")?;
+                if !atrasado {
+                    self.store.set_status(&ev.session_id, "pensando")?;
+                }
                 let corpo = format!("👤 <i>do PC</i>\n{}", escapa(&corta(text, 1200)));
                 let frontend = self.frontend.clone();
                 tokio::spawn(async move {
@@ -1334,6 +1354,10 @@ impl App {
             self.store.set_transcript(&r.session_id, t)?;
         }
         self.store.set_status(&r.session_id, "ocioso")?;
+        self.fins_de_turno
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(r.session_id.clone(), r.at_ms.unwrap_or_else(agora_ms));
         // O fim do turno é quando o contexto realmente mudou: é a hora certa de redesenhar.
         self.panel.refresh();
 
@@ -1926,6 +1950,13 @@ fn nome_do_cwd(cwd: &str) -> String {
         .find(|p| !p.is_empty())
         .unwrap_or(cwd)
         .to_string()
+}
+
+fn agora_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn agora() -> i64 {

@@ -66,6 +66,7 @@ fn trata(evento: &str, ev: Value) -> i32 {
             let entrada = ev.get("tool_input").cloned().unwrap_or(Value::Null);
             client::send(&Request::Event(SessionEvent {
                 session_id,
+                at_ms: agora_ms(),
                 event: EventKind::ToolStart {
                     label: label_for_tool(&tool, &entrada),
                     tool,
@@ -78,6 +79,7 @@ fn trata(evento: &str, ev: Value) -> i32 {
             let tool = texto(&ev, "tool_name").unwrap_or_default();
             client::send(&Request::Event(SessionEvent {
                 session_id,
+                at_ms: agora_ms(),
                 event: EventKind::ToolEnd {
                     ok: evento == "tool-end",
                     tool,
@@ -95,6 +97,7 @@ fn trata(evento: &str, ev: Value) -> i32 {
             }
             client::send(&Request::Event(SessionEvent {
                 session_id,
+                at_ms: agora_ms(),
                 event: EventKind::Notification { text: texto_ev },
             }));
         }
@@ -116,6 +119,7 @@ fn trata(evento: &str, ev: Value) -> i32 {
             }
             client::send(&Request::Event(SessionEvent {
                 session_id,
+                at_ms: agora_ms(),
                 event: EventKind::UserPrompt { text: texto_prompt },
             }));
         }
@@ -133,6 +137,7 @@ fn trata(evento: &str, ev: Value) -> i32 {
                 .unwrap_or_else(|| "confirmação".into());
             client::send(&Request::Event(SessionEvent {
                 session_id,
+                at_ms: agora_ms(),
                 event: EventKind::Elicitation { servidor, pedido },
             }));
         }
@@ -140,6 +145,7 @@ fn trata(evento: &str, ev: Value) -> i32 {
         "elicitation-result" => {
             client::send(&Request::Event(SessionEvent {
                 session_id,
+                at_ms: agora_ms(),
                 event: EventKind::ElicitationFim,
             }));
         }
@@ -150,6 +156,7 @@ fn trata(evento: &str, ev: Value) -> i32 {
             };
             client::send(&Request::Event(SessionEvent {
                 session_id,
+                at_ms: agora_ms(),
                 event: EventKind::ModelSwitch { model: para },
             }));
         }
@@ -165,12 +172,22 @@ fn trata(evento: &str, ev: Value) -> i32 {
     0
 }
 
+/// A hora deste hook, para o daemon saber a ordem dos eventos de um turno: os hooks de
+/// ferramenta são assíncronos e podem chegar depois do `Stop`.
+fn agora_ms() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_millis() as u64)
+}
+
 /// Fim de turno: entrega a resposta e, se o monitor tiver caído, acorda o Claude para re-armar.
 fn stop(ev: &Value, session_id: String) -> i32 {
     let req = Request::Stop(StopReport {
         session_id,
         transcript_path: texto(ev, "transcript_path"),
         last_assistant_message: texto(ev, "last_assistant_message"),
+        at_ms: agora_ms(),
     });
 
     let Some(Response::Listener {

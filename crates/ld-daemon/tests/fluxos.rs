@@ -962,6 +962,7 @@ async fn toque_no_card_de_permissao_decide() {
 
 fn stop(texto: &str) -> StopReport {
     StopReport {
+        at_ms: None,
         session_id: SESSAO.into(),
         transcript_path: None,
         last_assistant_message: Some(texto.into()),
@@ -1018,6 +1019,7 @@ async fn dialogo_de_mcp_diz_como_anexar_pelo_hospedeiro_em_uso() {
     let c = cena().await;
     c.app
         .on_event(&SessionEvent {
+            at_ms: None,
             session_id: SESSAO.into(),
             event: EventKind::Elicitation {
                 servidor: "github".into(),
@@ -1982,4 +1984,51 @@ async fn reconciliar_durante_uma_partida_nao_mata_o_que_parece_orfao() {
             .contains(&"mata:ld-orfa".to_string()),
         "sem partida em curso, a órfã vai embora"
     );
+}
+
+fn ferramenta(inicio: bool, at_ms: Option<u64>) -> SessionEvent {
+    SessionEvent {
+        session_id: SESSAO.into(),
+        event: if inicio {
+            EventKind::ToolStart {
+                tool: "Monitor".into(),
+                label: "Monitor".into(),
+                effort: None,
+            }
+        } else {
+            EventKind::ToolEnd {
+                tool: "Monitor".into(),
+                ok: true,
+            }
+        },
+        at_ms,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn evento_de_ferramenta_atrasado_nao_prende_a_sessao_trabalhando() {
+    let c = cena().await;
+    let status = || c.app.store.get(SESSAO).unwrap().unwrap().status;
+    c.app.on_event(&ferramenta(true, Some(100))).unwrap();
+    assert_eq!(status(), "ferramenta");
+    c.app
+        .on_stop(&StopReport {
+            at_ms: Some(300),
+            ..stop("pronto")
+        })
+        .await
+        .unwrap();
+    assert_eq!(status(), "ocioso");
+
+    // Os hooks são assíncronos: o fim e o começo de ferramenta do turno que acabou chegam
+    // depois do Stop. O `/model` recusava a sessão parada achando que ela trabalhava.
+    c.app.on_event(&ferramenta(false, Some(200))).unwrap();
+    c.app.on_event(&ferramenta(true, Some(250))).unwrap();
+    c.app.on_event(&ferramenta(false, None)).unwrap();
+    assert_eq!(status(), "ocioso");
+    c.app.relaunch(SESSAO, Some("opus"), None).await.unwrap();
+
+    // Um turno novo, depois do Stop, volta a contar.
+    c.app.on_event(&ferramenta(true, Some(u64::MAX))).unwrap();
+    assert_eq!(status(), "ferramenta");
 }
