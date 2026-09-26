@@ -1165,7 +1165,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "ld-ask"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "gtk4",
  "ld-core",
@@ -1175,7 +1175,7 @@ dependencies = [
 
 [[package]]
 name = "ld-cli"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "ld-core",
@@ -1185,7 +1185,7 @@ dependencies = [
 
 [[package]]
 name = "ld-core"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "rusqlite",
@@ -1199,7 +1199,7 @@ dependencies = [
 
 [[package]]
 name = "ld-daemon"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1225,7 +1225,7 @@ dependencies = [
 
 [[package]]
 name = "ld-mcp"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "ld-core",
  "serde",

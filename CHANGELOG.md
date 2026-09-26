@@ -6,8 +6,18 @@ versão para as notas do GitHub Release, então escreva para quem vai decidir se
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-26
+
 ### Adicionado
 
+- O herdr como hospedeiro das sessões, além do tmux: com `hospedeiro = "herdr"`, cada sessão é
+  uma aba no workspace do projeto, anexável com `herdr terminal attach`. As sessões do bot sobem
+  numa sessão própria do herdr, `lukadispatch`, separada das suas; `[herdr] sessao = "default"`
+  as põe ao lado das suas. Uma sessão que cai com o servidor do herdr (restart, update, reboot)
+  volta no mesmo tópico com `--resume`, com aviso, e um live handoff não a derruba.
+- O `lukadispatch setup` pergunta o hospedeiro (`--session tmux` ou `--session herdr`), e nenhum
+  dos dois é obrigatório: sem escolha, vale o que a máquina tem. A fórmula do Homebrew não exige
+  mais o tmux.
 - Cada sessão aberta pelo bot roda numa git worktree da branch dela, em
   `~/.local/share/lukadispatch/worktrees`, fora do repositório. Duas sessões no mesmo projeto não
   pisam mais uma na outra, nem no checkout que você usa no terminal. Vale para tmux e herdr.
@@ -26,11 +36,11 @@ versão para as notas do GitHub Release, então escreva para quem vai decidir se
   página `worktrees/<branch>` em vez de handoff. O handoff manual que você deixou no terminal não
   é mais consumido por uma sessão do bot.
 
+- `LUKADISPATCH_TELEGRAM_API` aponta o bot para outro endereço do Bot API, como um servidor
+  próprio dele.
+
 ### Mudado
 
-- Com o herdr, as sessões do bot sobem numa sessão própria, `lukadispatch`, e não mais na padrão,
-  ao lado das suas. `[herdr] sessao = "default"` volta ao jeito antigo. Sessão aberta antes da
-  atualização continua na padrão até ser fechada.
 - Relançar ou fechar uma sessão pede primeiro ao agente que saia, e só depois derruba o terminal:
   com o ai-memory, o fim da conversa entra no registro, e uma troca de modelo não esbarra mais no
   workstream preso.
@@ -44,6 +54,19 @@ versão para as notas do GitHub Release, então escreva para quem vai decidir se
 - A mensagem mandada enquanto o serviço reiniciava (um deploy, um `systemctl restart`) recebia o
   aviso de que tinha sido guardada, e a resposta dela não chegava ao chat. Agora ela chega. O
   mesmo valia para a mensagem que esperou o monitor de uma sessão voltar.
+- O token do bot ia parar no ambiente de todo shell do servidor do tmux que o daemon subia,
+  inclusive nos que não são do bot. E um daemon iniciado de dentro de um Claude Code passava as
+  marcas daquela sessão às do bot, que rodavam sem gravar conversa, e aí o `--resume` de uma
+  troca de modelo não tinha o que retomar.
+- O id curto que o `lukadispatch ls` mostra funciona no `send`, `kill`, `model` e `send-file`.
+  Antes o `kill` respondia sucesso sem matar nada, e o `send` guardava a mensagem para uma sessão
+  que não existe.
+- Depois de um `brew upgrade`, a telemetria das sessões de terminal (`install --global`) parava de
+  chegar ao painel sem aviso, porque os hooks apontavam para a pasta da versão anterior. A
+  partida do daemon agora os corrige.
+- Dois `/model` seguidos relançavam a mesma sessão duas vezes ao mesmo tempo; agora o segundo é
+  recusado com aviso. E o `/model` às vezes respondia que a sessão estava trabalhando quando ela
+  já tinha terminado o turno.
 
 ## [0.2.3] - 2026-09-25
 
@@ -136,7 +159,8 @@ Primeira versão pública.
 - Com o `~/.claude/settings.json` ilegível, o `install` gravava por cima só os hooks do
   lukadispatch. Agora ele recusa e não altera nada.
 
-[Unreleased]: https://github.com/LLawli/lukadispatch/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/LLawli/lukadispatch/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/LLawli/lukadispatch/compare/v0.2.3...v0.3.0
 [0.2.3]: https://github.com/LLawli/lukadispatch/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/LLawli/lukadispatch/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/LLawli/lukadispatch/compare/v0.2.0...v0.2.1
