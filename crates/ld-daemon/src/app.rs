@@ -20,10 +20,12 @@ use ld_core::paths;
 use ld_core::proto::{
     EventKind, RegisterSession, Response, SessionEvent, SessionSummary, StopReport,
 };
-use ld_core::state::{Session, Store};
+use ld_core::state::{Session, Store, Worktree};
 use tracing::{info, warn};
 
-use crate::agente::{Agente, DescricaoDoChat, Envelope, PedidoDePartida};
+use crate::agente::{
+    Agente, DescricaoDoChat, Guardado, Invocacao, Memoria, PartidaDaMemoria, PedidoDePartida,
+};
 use crate::cards::{Acao, Card, Cards, Efeito};
 use crate::divisor::Divisores;
 use crate::frontend::formato::escapa;
@@ -73,7 +75,7 @@ const TETO_REARME: u32 = 3;
 pub struct Portas {
     pub frontend: Arc<dyn Frontend>,
     pub agente: Arc<dyn Agente>,
-    pub envelope: Arc<dyn Envelope>,
+    pub memoria: Arc<dyn Memoria>,
     /// `None` desliga a transcrição: áudio ainda chega como arquivo, só não vira card.
     pub transcritor: Option<Arc<dyn Transcritor>>,
     pub divisores: Divisores,
@@ -98,7 +100,7 @@ pub struct App {
     pub store: Arc<Store>,
     pub frontend: Arc<dyn Frontend>,
     pub agente: Arc<dyn Agente>,
-    pub envelope: Arc<dyn Envelope>,
+    pub memoria: Arc<dyn Memoria>,
     pub transcritor: Option<Arc<dyn Transcritor>>,
     pub divisores: Divisores,
     pub hospedeiro: Arc<dyn Hospedeiro>,
@@ -109,12 +111,17 @@ pub struct App {
     /// Padrão `paths::state_dir().join("sessions")`; um teste troca por um tempdir com
     /// [`App::com_raiz_sessoes`]. Cada sessão vive em `raiz_sessoes/<id>/`.
     pub raiz_sessoes: PathBuf,
+    /// Raiz de todas as worktrees das sessões. Padrão [`crate::worktree::base`]; um teste troca
+    /// por um tempdir com [`App::com_raiz_worktrees`].
+    pub raiz_worktrees: PathBuf,
     pub hub: Hub,
     pub status: StatusBoard,
     pub cards: Cards,
     /// Transcrições esperando seu aval antes de virarem mensagem para a sessão.
     pub confirmacoes: crate::confirmacao::Confirmacoes,
     pub panel: Panel,
+    /// As escolhas em aberto do `/new` e do `/kill`.
+    pub novo: crate::novo::Estado,
     /// Último aviso de ociosidade ("Claude is waiting for your input") por sessão.
     ///
     /// Ele é útil quando chega, e vira lixo assim que você responde: some na próxima mensagem
@@ -135,6 +142,25 @@ pub struct App {
     /// `situacao` do hospedeiro sobe o servidor se ele ainda estiver fora do ar. Um teste troca
     /// com [`App::com_espera_depois_do_fim`].
     espera_depois_do_fim: std::time::Duration,
+    /// Quanto a partida espera a memória de uma worktree ser solta por uma partida anterior
+    /// que caiu sem soltá-la, antes de subir com uma memória só dela. Um teste troca com
+    /// [`App::com_espera_da_memoria`].
+    espera_da_memoria: std::time::Duration,
+    /// As sessões que estão sendo relançadas agora. Um segundo relançamento da mesma sessão
+    /// (dois `/model` seguidos) derrubaria o painel que o primeiro acabou de subir, e os dois
+    /// disputariam a mesma conversa e a mesma memória.
+    relancando_agora: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// A hora (do hook) do último fim de turno de cada sessão. Evento de ferramenta mais velho
+    /// que ele é resto do turno que já acabou, que chegou atrasado porque o hook dele é
+    /// assíncrono, e não pode tirar a sessão de "ocioso".
+    fins_de_turno: Mutex<HashMap<String, u64>>,
+    /// Quantas partidas estão subindo agora. Enquanto houver alguma, a reconciliação não varre
+    /// órfãs: a partida de uma sessão que está sendo retomada tem o rótulo de uma sessão ainda
+    /// encerrada no banco, e passaria por lixo, sobretudo enquanto espera a memória ser solta.
+    partidas_em_curso: Arc<std::sync::atomic::AtomicUsize>,
+    /// A hora do último `SessionStart` de cada sessão. É o sinal de que ela já passou pelo
+    /// início, e de que o que a memória tirou do caminho antes da partida pode voltar.
+    inicios: Arc<Mutex<HashMap<String, tokio::time::Instant>>>,
     /// Última mensagem entregue a cada sessão pelo frontend, com a hora.
     ///
     /// O hook `UserPromptSubmit` não distingue o que você digitou no PC do que chegou pelo
@@ -157,21 +183,28 @@ impl App {
             store,
             frontend: portas.frontend,
             agente: portas.agente,
-            envelope: portas.envelope,
+            memoria: portas.memoria,
             transcritor: portas.transcritor,
             divisores: portas.divisores,
             hospedeiro: portas.hospedeiro,
             raiz_arquivos: paths::arquivos_base(),
             raiz_sessoes: paths::state_dir().join("sessions"),
+            raiz_worktrees: crate::worktree::base(),
             hub: Hub::new(),
             status: StatusBoard::new(),
             cards: Cards::new(),
             confirmacoes: Default::default(),
             panel,
+            novo: Default::default(),
             avisos: Arc::new(Mutex::new(HashMap::new())),
             relancando: Mutex::new(HashMap::new()),
             reconciliando: tokio::sync::Mutex::new(()),
             espera_depois_do_fim: std::time::Duration::from_secs(5),
+            espera_da_memoria: std::time::Duration::from_secs(100),
+            inicios: Arc::new(Mutex::new(HashMap::new())),
+            partidas_em_curso: Default::default(),
+            fins_de_turno: Mutex::new(HashMap::new()),
+            relancando_agora: Default::default(),
             entregues: Mutex::new(HashMap::new()),
         }
     }
@@ -185,6 +218,18 @@ impl App {
     /// Troca a espera entre o fim de um processo por fora e a reconciliação que ele agenda.
     pub fn com_espera_depois_do_fim(mut self, espera: std::time::Duration) -> Self {
         self.espera_depois_do_fim = espera;
+        self
+    }
+
+    /// Troca a raiz das worktrees por outra (um tempdir de teste, tipicamente).
+    pub fn com_raiz_worktrees(mut self, raiz: PathBuf) -> Self {
+        self.raiz_worktrees = raiz;
+        self
+    }
+
+    /// Troca quanto a partida espera a memória de uma worktree ser solta.
+    pub fn com_espera_da_memoria(mut self, espera: std::time::Duration) -> Self {
+        self.espera_da_memoria = espera;
         self
     }
 
@@ -202,33 +247,179 @@ impl App {
         }
     }
 
-    /// Monta a partida (pede ao agente a invocação, embrulha no envelope, escreve o script) e
+    /// Monta a partida (pede ao agente a invocação, embrulha na memória, escreve o script) e
     /// pede ao hospedeiro para subir. Usado tanto para abrir sessão nova quanto para relançar
     /// uma existente com `--resume`.
+    ///
+    /// Em volta da partida vai o que a memória precisa: o que ela tira do caminho antes volta
+    /// depois que a sessão passou pelo início (ou na hora, se a partida falhou).
     async fn monta_e_lanca(&self, p: PedidoDeLancamento<'_>) -> Result<sessions::Launched> {
         let dir = self.raiz_sessoes.join(p.session_id);
         std::fs::create_dir_all(&dir).with_context(|| format!("criando {}", dir.display()))?;
+        let worktree = self.store.worktree_em(&p.projeto.path).ok().flatten();
+        let base = PartidaDaMemoria {
+            session_id: p.session_id,
+            cwd: Path::new(&p.projeto.path),
+            worktree: worktree.as_ref(),
+            isolada: false,
+        };
+        let guardado = self
+            .memoria
+            .antes_da_partida(&base)
+            .await
+            .unwrap_or_else(|e| {
+                warn!(sessao = %p.session_id, erro = %format!("{e:#}"), "a memória não se preparou para a partida");
+                None
+            });
+        let desde = tokio::time::Instant::now();
+        let _em_curso = EmCurso::conta(&self.partidas_em_curso);
+        let r = self
+            .lanca_esperando_a_memoria(&p, &dir, worktree.as_ref())
+            .await;
+        if let Some(g) = guardado {
+            self.devolve_depois_do_inicio(p.session_id, g, desde, r.is_ok());
+        }
+        r
+    }
 
+    /// Sobe a partida. Se ela morrer porque a memória ainda está presa a uma partida anterior
+    /// (um processo que caiu sem soltá-la), espera e tenta de novo; passado o prazo, sobe com
+    /// uma memória só dela, em vez de deixar você esperando mais.
+    async fn lanca_esperando_a_memoria(
+        &self,
+        p: &PedidoDeLancamento<'_>,
+        dir: &Path,
+        worktree: Option<&Worktree>,
+    ) -> Result<sessions::Launched> {
         let chat = DescricaoDoChat {
             plataforma: self.frontend.plataforma().into(),
-            onde: self.frontend.onde(&p.projeto.name),
+            onde: self
+                .frontend
+                .onde(&nome_do_canal(&p.projeto.name, worktree)),
             teto_envio: self.frontend.limites().enviar,
             renderiza_markdown: self.frontend.renderiza_markdown(),
         };
-        let pedido = PedidoDePartida {
-            projeto: p.projeto,
-            permission_mode: p.permission_mode,
-            model: p.model,
-            effort: p.effort,
-            resume: p.resume,
-            retomada: p.retomada,
-            wrap_mcp: self.cfg.wrap_mcp,
-            chat: &chat,
+        let raiz = worktree.map_or(p.projeto.path.as_str(), |w| w.raiz.as_str());
+        let comeco = tokio::time::Instant::now();
+        let mut isolada = false;
+        loop {
+            let memoria = PartidaDaMemoria {
+                session_id: p.session_id,
+                cwd: Path::new(&p.projeto.path),
+                worktree,
+                isolada,
+            };
+            let instrucoes = self.memoria.instrucoes(&memoria);
+            let pedido = PedidoDePartida {
+                projeto: p.projeto,
+                raiz,
+                permission_mode: p.permission_mode,
+                model: p.model,
+                effort: p.effort,
+                resume: p.resume,
+                retomada: p.retomada,
+                wrap_mcp: self.cfg.wrap_mcp,
+                chat: &chat,
+                instrucoes: instrucoes.as_deref(),
+            };
+            let invocacao = self.agente.invocacao(&pedido, p.session_id, dir)?;
+            let argv = self.memoria.embrulha(&memoria, invocacao.argv).await?;
+            let mut partida = crate::agente::escreve_partida(
+                dir,
+                p.session_id,
+                Invocacao {
+                    argv,
+                    prompt: invocacao.prompt,
+                },
+            )?;
+            partida.espera_ao_subir = partida
+                .espera_ao_subir
+                .max(self.memoria.segura_a_partida(&memoria));
+            // O espelho do painel é só desta tentativa: o erro de uma anterior não pode decidir
+            // por esta.
+            let _ = std::fs::remove_file(&partida.log);
+            let erro = match self.hospedeiro.lanca(&partida, p.projeto).await {
+                Ok(l) => return Ok(l),
+                Err(e) => e,
+            };
+            let saida = format!(
+                "{}\n{erro:#}",
+                std::fs::read_to_string(&partida.log).unwrap_or_default()
+            );
+            if isolada || !self.memoria.ocupada(&saida) {
+                return Err(erro);
+            }
+            if comeco.elapsed() < self.espera_da_memoria {
+                info!(sessao = %p.session_id, "a memória ainda está presa a uma partida anterior; esperando");
+                tokio::time::sleep(self.espera_da_memoria / 10).await;
+            } else {
+                warn!(sessao = %p.session_id, "a memória não foi solta a tempo; esta partida usa uma só dela");
+                isolada = true;
+            }
+        }
+    }
+
+    /// Devolve o que a memória tirou do caminho, depois que a sessão passou pelo início (o
+    /// `SessionStart` dela chegou), ou na hora se ela não subiu. Com teto: sessão que não avisa
+    /// o início em um minuto não segura o que foi tirado para sempre.
+    fn devolve_depois_do_inicio(
+        &self,
+        session_id: &str,
+        guardado: Guardado,
+        desde: tokio::time::Instant,
+        subiu: bool,
+    ) {
+        let memoria = self.memoria.clone();
+        let inicios = self.inicios.clone();
+        let id = session_id.to_string();
+        tokio::spawn(async move {
+            if subiu {
+                let prazo = desde + std::time::Duration::from_secs(60);
+                while tokio::time::Instant::now() < prazo {
+                    let iniciou = inicios
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get(&id)
+                        .is_some_and(|quando| *quando >= desde);
+                    if iniciou {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+                // Os hooks do início rodam juntos: o nosso pode ter chegado antes do que lê a
+                // memória.
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+            if let Err(e) = memoria.devolve(guardado).await {
+                warn!(sessao = %id, erro = %format!("{e:#}"), "não consegui devolver o que a memória tirou do caminho");
+            }
+        });
+    }
+
+    /// Para a sessão pedindo ao agente que saia, antes de o hospedeiro derrubar tudo. Quem
+    /// embrulha o agente (a memória) termina o trabalho dele quando o agente sai: derrubado junto,
+    /// ele deixaria a memória presa e sem o fim da conversa.
+    async fn para_com_calma(&self, hospedagem: &str) {
+        let Some(pid) = self.hospedeiro.pid(hospedagem).await else {
+            return;
         };
-        let invocacao = self.agente.invocacao(&pedido, p.session_id, &dir)?;
-        let partida =
-            crate::agente::escreve_partida(&dir, p.session_id, self.envelope.as_ref(), invocacao)?;
-        self.hospedeiro.lanca(&partida, p.projeto).await
+        let alvos = self.memoria.a_parar(pid);
+        for alvo in &alvos {
+            let _ = tokio::process::Command::new("kill")
+                .args(["-TERM", &alvo.to_string()])
+                .status()
+                .await;
+        }
+        for _ in 0..40 {
+            if !Path::new(&format!("/proc/{pid}")).exists() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        warn!(
+            pid,
+            "a sessão não saiu com calma em 10 s; o hospedeiro derruba"
+        );
     }
 
     // ---------------------------------------------------------------- ciclo de vida
@@ -245,7 +436,11 @@ impl App {
         effort: Option<&str>,
         retomar: Option<&str>,
     ) -> Result<String> {
-        let canal = self.frontend.cria_canal(&projeto.name).await?;
+        let worktree = self.store.worktree_em(&projeto.path).ok().flatten();
+        let canal = self
+            .frontend
+            .cria_canal(&nome_do_canal(&projeto.name, worktree.as_ref()))
+            .await?;
 
         // Antes de subir: a pasta precisa estar confiada, senão o agente para num diálogo que só
         // dá para responder no teclado do PC, e do celular a sessão parece muda.
@@ -259,7 +454,11 @@ impl App {
             }
         }
 
-        let modo = self.cfg.permission_mode_for(&projeto.path);
+        // A regra de permissão é do projeto: numa worktree, a do repositório dela.
+        let raiz = worktree
+            .as_ref()
+            .map_or(projeto.path.as_str(), |w| w.raiz.as_str());
+        let modo = self.cfg.permission_mode_for(raiz);
         let id = match retomar {
             Some(r) => r.to_string(),
             None => self.agente.novo_id(),
@@ -400,9 +599,11 @@ impl App {
 
         if let Some(hospedagem) = &s.hospedagem
             && self.hospedeiro.vive(hospedagem).await
-            && let Err(e) = self.hospedeiro.mata(hospedagem).await
         {
-            warn!(sessao = %session_id, erro = %e, "não consegui encerrar a sessão no hospedeiro");
+            self.para_com_calma(hospedagem).await;
+            if let Err(e) = self.hospedeiro.mata(hospedagem).await {
+                warn!(sessao = %session_id, erro = %e, "não consegui encerrar a sessão no hospedeiro");
+            }
         }
 
         if apagar_canal && let Some(canal) = canal_da_sessao(&s) {
@@ -533,6 +734,11 @@ impl App {
         effort: Option<&str>,
     ) -> Result<String> {
         let session_id = s.session_id.as_str();
+        let Some(_vez) = Relancando::comeca(&self.relancando_agora, session_id) else {
+            bail!(
+                "a sessão já está sendo reiniciada; espere o aviso de que ela voltou e mande de novo"
+            );
+        };
         let projeto = Project {
             name: s.project.clone(),
             path: s.cwd.clone(),
@@ -541,16 +747,18 @@ impl App {
             effort: None,
         };
         // O modo guardado é o que vale: ele pode ter sido trocado por /mode depois da criação.
-        let modo = s
-            .permission_mode
-            .clone()
-            .unwrap_or_else(|| self.cfg.permission_mode_for(&s.cwd));
+        let modo = s.permission_mode.clone().unwrap_or_else(|| {
+            let worktree = self.store.worktree_em(&s.cwd).ok().flatten();
+            self.cfg
+                .permission_mode_for(worktree.as_ref().map_or(s.cwd.as_str(), |w| &w.raiz))
+        });
         // Trocar só o esforço não derruba o modelo.
         let model_final = model.map(str::to_string).or_else(|| s.model.clone());
         let effort_final = effort.map(str::to_string).or_else(|| s.effort.clone());
 
         self.marca_relancamento(session_id);
         if let Some(hospedagem) = &s.hospedagem {
+            self.para_com_calma(hospedagem).await;
             self.hospedeiro.mata(hospedagem).await?;
             // Sem esta pausa o `--resume` pode esbarrar no processo anterior ainda saindo.
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -781,7 +989,16 @@ impl App {
         // O contrário também acontece: o hospedeiro ficou com uma sessão viva já encerrada no
         // banco (um relançamento interrompido no meio, por exemplo). Ninguém mais fala com ela,
         // e o canal dela já foi apagado, então é lixo que só consome memória.
-        for rotulo in self.hospedeiro.nossas().await {
+        let partindo = self
+            .partidas_em_curso
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0;
+        let rotulos = if partindo {
+            Vec::new()
+        } else {
+            self.hospedeiro.nossas().await
+        };
+        for rotulo in rotulos {
             if self.store.rotulo_de_sessao_morta(&rotulo).unwrap_or(false) {
                 warn!(rotulo = %rotulo, "sessão órfã de sessão encerrada; matando");
                 let _ = self.hospedeiro.mata(&rotulo).await;
@@ -965,6 +1182,10 @@ impl App {
     // ---------------------------------------------------------------- vindo dos hooks
 
     pub fn on_register(&self, r: &RegisterSession) -> Result<()> {
+        self.inicios
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(r.session_id.clone(), tokio::time::Instant::now());
         // Sessão que o bot criou: só falta o caminho do transcript.
         if let Some(existente) = self.store.get(&r.session_id)? {
             if existente.transcript_path.as_deref() != Some(r.transcript_path.as_str()) {
@@ -1007,8 +1228,21 @@ impl App {
             // Sessão de terminal: conta para o painel, não tem onde escrever.
             return Ok(());
         };
+        // Resto do turno que já acabou: o hook de ferramenta é assíncrono e pode chegar depois
+        // do `Stop`. Sem isto a sessão ficava "trabalhando" parada, e o /model recusava.
+        let atrasado = ev.at_ms.is_some_and(|quando| {
+            self.fins_de_turno
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&ev.session_id)
+                .is_some_and(|fim| quando < *fim)
+        });
 
         match &ev.event {
+            EventKind::ToolStart { .. } if atrasado => {}
+            // O fim de uma ferramenta nunca começa um turno: com a sessão ociosa, é resto do
+            // anterior, mesmo vindo de um binário que não manda a hora.
+            EventKind::ToolEnd { .. } if atrasado || s.status == "ocioso" => {}
             EventKind::ToolStart { label, effort, .. } => {
                 // Só escreve quando muda: isto roda a cada ferramenta.
                 if effort.is_some() && effort.as_deref() != s.effort.as_deref() {
@@ -1037,7 +1271,9 @@ impl App {
                 }
                 info!(sessao = %ev.session_id, "prompt digitado no PC, espelhado no canal");
                 self.marca_pedido(&ev.session_id);
-                self.store.set_status(&ev.session_id, "pensando")?;
+                if !atrasado {
+                    self.store.set_status(&ev.session_id, "pensando")?;
+                }
                 let corpo = format!("👤 <i>do PC</i>\n{}", escapa(&corta(text, 1200)));
                 let frontend = self.frontend.clone();
                 tokio::spawn(async move {
@@ -1128,6 +1364,10 @@ impl App {
             self.store.set_transcript(&r.session_id, t)?;
         }
         self.store.set_status(&r.session_id, "ocioso")?;
+        self.fins_de_turno
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(r.session_id.clone(), r.at_ms.unwrap_or_else(agora_ms));
         // O fim do turno é quando o contexto realmente mudou: é a hora certa de redesenhar.
         self.panel.refresh();
 
@@ -1143,6 +1383,11 @@ impl App {
             // turno sem mensagem nova, mas ele continua o que foi pedido: a resposta é de quem
             // pediu. O que fica de fora é o re-arme do canal e os prompts do daemon.
             let de_fundo = origem == Some(ld_core::transcript::Origem::TarefaDeFundo);
+            // A mensagem que esperou na fila (a sessão surda num restart do daemon, o monitor
+            // caído) entra pelo `listen` sem marcar pedido. A marca não pode ficar para a
+            // entrega da fila: com o monitor voltando por re-arme, ela entra no meio do turno do
+            // re-arme, e o fim daquele turno consumiria a marca da mensagem.
+            let do_canal = origem == Some(ld_core::transcript::Origem::MensagemDoCanal);
             let resposta = self.resposta_do_turno(r, &s);
             info!(
                 sessao = %r.session_id,
@@ -1151,7 +1396,7 @@ impl App {
                 tem_texto = resposta.is_some(),
                 "fim de turno"
             );
-            if (pedida || de_fundo)
+            if (pedida || de_fundo || do_canal)
                 && let Some(texto) = resposta
             {
                 // Texto e arquivo saem na ordem em que o agente os escreveu. Uma resposta que
@@ -1648,6 +1893,62 @@ impl App {
 }
 
 /// O canal opaco guardado no banco, como o tipo que o resto do domínio entende.
+/// A vez de relançar uma sessão: existe uma por sessão, e sai ao terminar, dê certo ou não.
+struct Relancando {
+    em_curso: Arc<Mutex<std::collections::HashSet<String>>>,
+    session_id: String,
+}
+
+impl Relancando {
+    fn comeca(
+        em_curso: &Arc<Mutex<std::collections::HashSet<String>>>,
+        session_id: &str,
+    ) -> Option<Self> {
+        let nova = em_curso
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(session_id.to_string());
+        nova.then(|| Self {
+            em_curso: em_curso.clone(),
+            session_id: session_id.to_string(),
+        })
+    }
+}
+
+impl Drop for Relancando {
+    fn drop(&mut self) {
+        self.em_curso
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.session_id);
+    }
+}
+
+/// Conta uma partida em curso enquanto vive, e desconta ao sair, dê ela certo ou não.
+struct EmCurso(Arc<std::sync::atomic::AtomicUsize>);
+
+impl EmCurso {
+    fn conta(contador: &Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        contador.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self(contador.clone())
+    }
+}
+
+impl Drop for EmCurso {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Como o canal da sessão se chama: o projeto, e a branch quando ela roda numa worktree, para
+/// duas sessões do mesmo projeto não terem canais de mesmo nome.
+pub fn nome_do_canal(projeto: &str, worktree: Option<&Worktree>) -> String {
+    match worktree {
+        Some(w) => format!("{projeto} · {}", w.branch),
+        None => projeto.to_string(),
+    }
+}
+
 fn canal_da_sessao(s: &Session) -> Option<Canal> {
     s.canal_id.as_deref().map(Canal::new)
 }
@@ -1695,6 +1996,13 @@ fn nome_do_cwd(cwd: &str) -> String {
         .find(|p| !p.is_empty())
         .unwrap_or(cwd)
         .to_string()
+}
+
+fn agora_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn agora() -> i64 {

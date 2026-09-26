@@ -1,7 +1,7 @@
 //! Onde as sessões rodam: o hospedeiro, que sobe o script de partida que o agente montou e mata
 //! quando pedido.
 //!
-//! O que compõe a partida (linha de comando, prompt, envelope) não é deste módulo: mora em
+//! O que compõe a partida (linha de comando, prompt, memória) não é deste módulo: mora em
 //! [`crate::agente`], que devolve uma [`crate::agente::Partida`] já pronta para rodar. Aqui fica
 //! só o mecanismo que a mantém de pé: o tmux ([`Tmux`], o padrão) ou o herdr ([`Herdr`]). Os
 //! dois deixam a sessão anexável no PC e sobrevivem a restart do daemon.
@@ -15,7 +15,7 @@ use tokio::process::Command;
 use crate::agente::Partida;
 
 mod herdr;
-pub use herdr::Herdr;
+pub use herdr::{Herdr, SESSAO_DO_BOT};
 
 #[derive(Debug)]
 pub struct Launched {
@@ -145,7 +145,7 @@ pub async fn launch(partida: &Partida, projeto: &Project) -> Result<Launched> {
 
     // Morrer logo depois de subir é o caso comum de erro (workstream ocupado, diálogo de
     // confiança, projeto inexistente), e é justamente o que passaria por "deu certo".
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    tokio::time::sleep(partida.espera_ao_subir).await;
     if !has_session(&tmux).await {
         bail!("a sessão morreu ao subir: {}", primeiro_erro(&partida.log));
     }
@@ -272,6 +272,14 @@ pub trait Hospedeiro: Send + Sync + 'static {
     /// hospedeiro precisar. [`Hospedeiro::mata`] aceita o rótulo sozinho.
     async fn nossas(&self) -> Vec<String>;
 
+    /// O processo que roda no painel da sessão: o que o script de partida virou. Serve para
+    /// parar a sessão com calma antes de derrubá-la. `None` quando o hospedeiro não sabe dizer,
+    /// e aí a sessão só é derrubada.
+    async fn pid(&self, nome: &str) -> Option<u32> {
+        let _ = nome;
+        None
+    }
+
     /// Como a sessão aparece na ficha do canal: o hospedeiro e onde achá-la nele.
     fn descreve(&self, nome: &str) -> String;
 
@@ -300,6 +308,26 @@ impl Hospedeiro for Tmux {
 
     async fn nossas(&self) -> Vec<String> {
         nossas_sessoes().await
+    }
+
+    async fn pid(&self, nome: &str) -> Option<u32> {
+        let saida = Command::new("tmux")
+            .args([
+                "display-message",
+                "-p",
+                "-t",
+                // `=nome` casa o nome exato, mas só vira alvo de pane com o `:` no fim: sem ele
+                // o tmux responde vazio, e com código de saída 0.
+                &format!("={nome}:"),
+                "#{pane_pid}",
+            ])
+            .output()
+            .await
+            .ok()?;
+        if !saida.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&saida.stdout).trim().parse().ok()
     }
 
     fn descreve(&self, nome: &str) -> String {
@@ -434,6 +462,7 @@ mod testes_hospedeiro {
             session_id: id.into(),
             script,
             log: dir.join("pane.log"),
+            espera_ao_subir: crate::agente::ESPERA_AO_SUBIR,
         };
         let projeto = Project {
             name: "teste-hospedeiro".into(),
@@ -443,6 +472,22 @@ mod testes_hospedeiro {
             effort: None,
         };
         (partida, projeto)
+    }
+
+    #[tokio::test]
+    async fn tmux_diz_o_processo_que_o_script_virou() {
+        if !tem_tmux() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (partida, projeto) = partida_com("exec sleep 60", dir.path(), "c9d0e1f2-pid");
+        let h = Tmux;
+        let l = h.lanca(&partida, &projeto).await.unwrap();
+        let pid = h.pid(&l.hospedagem).await.expect("o tmux não disse o pid");
+        let cmdline = std::fs::read_to_string(format!("/proc/{pid}/cmdline")).unwrap();
+        h.mata(&l.hospedagem).await.unwrap();
+        assert!(cmdline.starts_with("sleep"), "{cmdline:?}");
+        assert!(h.pid("ld-nao-existe-0000").await.is_none());
     }
 
     #[tokio::test]

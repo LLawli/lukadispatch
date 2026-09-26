@@ -37,6 +37,28 @@ Quando um comportamento parecer estranho, procure aqui antes de "consertar".
   tempo no nome.
 - **`--fresh` não combina com `--session-id`.** O ai-memory recusa com "cannot be combined with a
   native session".
+- **Numa worktree, sem marcador, a memória vai para um projeto com o nome da branch.** Os hooks
+  mandam só o cwd, e o servidor usa o nome da pasta; o CLI, na mesma pasta, resolve o projeto
+  certo, então a sessão fica partida em dois sem dar erro. O daemon grava o `.ai-memory.toml`
+  acima das worktrees ([0018](decisoes/0018-memoria-do-projeto-na-worktree.md)).
+- **O handoff manual vale para o projeto inteiro**, e o `cwd` que o `memory_handoff_begin` recebe
+  é só registro: a próxima sessão de qualquer pasta do projeto o consome. Só o automático (do
+  `SessionEnd`) é entregue por pasta.
+- **Derrubar o `ai-memory run` deixa o workstream preso por até 90 s** e perde o fim da conversa
+  no registro. `SIGTERM` no agente (o filho dele) faz ele terminar direito; `SIGTERM` nele mesmo,
+  não, porque ele só trata `SIGINT`.
+- **`ai-memory mcp-bridge` só roda dentro do Claude Code.** Sem `CLAUDE_CODE_SESSION_ID` ele sai
+  na hora. Teste do daemon que roda de dentro de uma sessão herda a variável e passa, e o serviço
+  falha: suba o daemon de teste sem as variáveis `CLAUDE*`.
+- **Nome de workstream não aceita `/`.** O de uma worktree é a branch com `/` trocada por `-`.
+- **`ai-memory workstreams` recusa `--limit` acima de 100** e responde 404 ("not found in
+  workspace") para projeto que ele ainda não viu, em vez de lista vazia.
+- **O `ai-memory run` segura a partida até 5 s** esperando uma trava ocupada, e só então morre com
+  409. Quem confere se a sessão subiu tem de esperar mais que isso, senão a partida presa passa
+  por viva (`Memoria::segura_a_partida`).
+- **A trava de um `ai-memory run` derrubado dura até 90 s.** Retomar a mesma sessão nesse meio
+  tempo é esperar: a partida tem o rótulo de uma sessão ainda encerrada no banco, e a varredura
+  de órfãs da reconciliação fica parada enquanto houver partida em curso.
 
 ## Telegram
 
@@ -92,6 +114,13 @@ Quando um comportamento parecer estranho, procure aqui antes de "consertar".
   campo ao protocolo não exige reiniciar as sessões.
 
 ## tmux e sistema
+
+- **`tmux display-message -t =nome` responde vazio, com código 0.** O `=` (nome exato) só vira
+  alvo de pane com o `:` no fim: `=nome:`. Sem ele, o pid do painel não vinha, e a parada com
+  calma derrubava o `ai-memory run` junto.
+- **O fim da saída de um painel que morre não chega ao `pipe-pane`.** O tmux fecha o painel antes
+  de ler as últimas linhas, então o erro final (um 409 do ai-memory, por exemplo) some do espelho.
+  Reconheça a falha pelo que é impresso antes dela.
 
 - **Caminho de socket unix tem limite (~108 bytes).** O socket fica em `$XDG_RUNTIME_DIR`.
 - **Para espelhar a saída de uma sessão interativa, use `tmux pipe-pane`**, não redirecionamento:

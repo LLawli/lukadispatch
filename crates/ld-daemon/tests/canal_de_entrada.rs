@@ -10,7 +10,7 @@ use std::time::Duration;
 use ld_core::config::Config;
 use ld_core::proto::{Request, Response, line};
 use ld_core::state::{Session, Store};
-use ld_daemon::agente::Direto;
+use ld_daemon::agente::SemMemoria;
 use ld_daemon::agente::claude_code::{ClaudeCode, Locais};
 use ld_daemon::app::{App, Portas};
 use ld_daemon::divisor::Divisores;
@@ -79,7 +79,7 @@ async fn sobe_daemon(dir: &std::path::Path) -> Arc<App> {
         Portas {
             frontend: frontend_de_teste(),
             agente: Arc::new(agente),
-            envelope: Arc::new(Direto),
+            memoria: Arc::new(SemMemoria),
             transcritor: None,
             divisores: Divisores::new(vec![]),
             hospedeiro: Arc::new(Tmux),

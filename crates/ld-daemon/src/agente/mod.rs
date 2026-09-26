@@ -9,9 +9,10 @@
 //!
 //! - o **agente** diz como ele mesmo é chamado ([`Agente::invocacao`]): `claude --session-id ...
 //!   --settings ... "<prompt>"`;
-//! - o **envelope** ([`Envelope`]) embrulha essa chamada: [`AiMemory`] sobe o agente como
+//! - a **memória** ([`Memoria`]) embrulha essa chamada: [`AiMemory`] sobe o agente como
 //!   `ai-memory run --new <workstream> claude ...`, para a sessão entrar na memória de longo
-//!   prazo; [`Direto`] roda o agente como está. Trocar o agente não mexe no envelope, e vice-versa.
+//!   prazo; [`SemMemoria`] roda o agente como está. Trocar o agente não mexe na memória, e
+//!   vice-versa. Ela é opcional: nada do domínio pode depender de haver uma.
 //!
 //! [`escreve_partida`] junta os dois num script, que o `Hospedeiro` (o tmux) roda. O script existe
 //! para dar para ler depois, exatamente, o que foi lançado quando algo der errado.
@@ -30,11 +31,14 @@ use anyhow::{Context, Result};
 use ld_core::config::{Config, Project};
 use ld_core::context::ContextUsage;
 use ld_core::models::Modelo;
-use ld_core::state::Session;
+use ld_core::state::{Session, Worktree};
 use ld_core::transcript::{Fala, SessaoAnterior};
 use ld_core::usage::{SessionTokens, Windows};
 
+pub mod ai_memory;
 pub mod claude_code;
+
+pub use ai_memory::{AiMemory, workstream};
 
 #[cfg(test)]
 mod testes;
@@ -61,7 +65,12 @@ pub struct DescricaoDoChat {
 /// O que o domínio pede ao abrir (ou reabrir) uma sessão.
 #[derive(Debug, Clone)]
 pub struct PedidoDePartida<'a> {
+    /// O projeto como a sessão o vê: o `path` é o cwd dela, que numa worktree é a pasta da
+    /// worktree, e não a do repositório.
     pub projeto: &'a Project,
+    /// A pasta do repositório. É a mesma do `projeto.path` fora de worktree; dentro de uma, é
+    /// por ela que o agente acha o que guardou por projeto (os servidores MCP, no Claude Code).
+    pub raiz: &'a str,
     /// Modo de permissão do lukadispatch (`"perguntar"`, `"auto"`...). O agente traduz para o
     /// que ele entende.
     pub permission_mode: &'a str,
@@ -75,6 +84,8 @@ pub struct PedidoDePartida<'a> {
     /// Passar os servidores MCP pelo proxy do lukadispatch.
     pub wrap_mcp: bool,
     pub chat: &'a DescricaoDoChat,
+    /// O que a memória de longo prazo quer que o agente saiba ao começar ([`Memoria::instrucoes`]).
+    pub instrucoes: Option<&'a str>,
 }
 
 /// Como chamar o agente: programa, argumentos e o prompt inicial.
@@ -96,7 +107,14 @@ pub struct Partida {
     /// Onde o hospedeiro espelha a saída da sessão: sem isso, uma sessão que morre ao subir não
     /// deixa pista nenhuma.
     pub log: PathBuf,
+    /// Quanto o hospedeiro espera, depois de subir, antes de dizer que a sessão está de pé.
+    /// Morrer logo depois de subir é o caso comum de erro, e passaria por "deu certo".
+    pub espera_ao_subir: std::time::Duration,
 }
+
+/// O que o hospedeiro espera ao subir quando ninguém pede mais: o bastante para um erro de
+/// linha de comando ou de pasta aparecer.
+pub const ESPERA_AO_SUBIR: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Um modo de permissão que o agente aceita.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,72 +202,114 @@ pub trait Agente: Send + Sync + 'static {
     fn tokens_da_sessao(&self, session_id: &str) -> Option<SessionTokens>;
 }
 
-/// O que embrulha a chamada do agente antes de rodar.
-pub trait Envelope: Send + Sync + 'static {
-    /// Nome curto, o mesmo do config (`"ai-memory"`, `"nenhum"`).
+/// O que a memória sabe de uma partida de sessão.
+#[derive(Debug, Clone, Copy)]
+pub struct PartidaDaMemoria<'a> {
+    pub session_id: &'a str,
+    /// O cwd da sessão.
+    pub cwd: &'a Path,
+    /// A worktree em que a sessão roda, quando roda numa.
+    pub worktree: Option<&'a Worktree>,
+    /// A memória da worktree estava ocupada por outra partida e não liberou a tempo: esta usa
+    /// uma só dela, em vez de esperar mais.
+    pub isolada: bool,
+}
+
+/// O que a memória tirou do caminho antes de uma partida, para devolver depois dela. Só a
+/// implementação que tirou sabe o que tem dentro.
+pub struct Guardado(pub Box<dyn std::any::Any + Send + Sync>);
+
+/// A memória de longo prazo das sessões, que embrulha a chamada do agente antes de rodar.
+///
+/// Opcional ([`SemMemoria`] não faz nada): o que ela oferece a sessão ganha quando existe, e o
+/// resto do daemon funciona igual sem ela. Por isso tudo aqui, menos o embrulho, tem um padrão
+/// que não faz nada.
+#[async_trait::async_trait]
+pub trait Memoria: Send + Sync + 'static {
+    /// Nome curto, o mesmo do config (`"ai-memory"`, `"nenhuma"`).
     fn nome(&self) -> &'static str;
 
     /// A linha de comando final, a partir da do agente.
-    fn embrulha(&self, session_id: &str, argv: Vec<String>) -> Vec<String>;
+    async fn embrulha(
+        &self,
+        partida: &PartidaDaMemoria<'_>,
+        argv: Vec<String>,
+    ) -> Result<Vec<String>>;
+
+    /// O que o agente precisa saber da memória ao começar, e que vai no prompt de partida.
+    fn instrucoes(&self, partida: &PartidaDaMemoria<'_>) -> Option<String> {
+        let _ = partida;
+        None
+    }
+
+    /// Antes de subir: deixa o disco pronto para a memória e tira do caminho o que a sessão não
+    /// deve receber. O que foi tirado volta por [`Memoria::devolve`] depois que a sessão subiu.
+    async fn antes_da_partida(&self, partida: &PartidaDaMemoria<'_>) -> Result<Option<Guardado>> {
+        let _ = partida;
+        Ok(None)
+    }
+
+    /// Devolve o que [`Memoria::antes_da_partida`] tirou.
+    async fn devolve(&self, guardado: Guardado) -> Result<()> {
+        let _ = guardado;
+        Ok(())
+    }
+
+    /// A sessão morreu ao subir porque a memória dela estava presa a uma partida anterior (um
+    /// processo que caiu sem soltá-la)? `saida` é o que o painel mostrou. Quem chama espera e
+    /// tenta de novo.
+    fn ocupada(&self, saida: &str) -> bool {
+        let _ = saida;
+        false
+    }
+
+    /// Por quanto tempo a memória pode segurar a partida antes de o agente nascer ou de ela
+    /// desistir. O hospedeiro espera pelo menos isso para dizer que a sessão subiu: antes, uma
+    /// partida que ainda vai morrer por [`Memoria::ocupada`] parece viva.
+    fn segura_a_partida(&self, partida: &PartidaDaMemoria<'_>) -> std::time::Duration {
+        let _ = partida;
+        std::time::Duration::ZERO
+    }
+
+    /// Para parar a sessão com calma, que processo recebe o sinal: o agente, e não o que o
+    /// embrulha, para quem embrulha terminar o trabalho dele. `pid` é o processo do painel.
+    fn a_parar(&self, pid: u32) -> Vec<u32> {
+        vec![pid]
+    }
+
+    /// A worktree foi apagada: esquece o que a memória guardava só dela.
+    async fn worktree_apagada(&self, worktree: &Worktree) -> Result<()> {
+        let _ = worktree;
+        Ok(())
+    }
 }
 
-/// `ai-memory run --new <workstream> <agente...>`: a sessão entra na memória de longo prazo.
+/// Sem memória de longo prazo: o agente roda como está.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct AiMemory;
+pub struct SemMemoria;
 
-/// O agente roda como está.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct Direto;
-
-impl Envelope for AiMemory {
+#[async_trait::async_trait]
+impl Memoria for SemMemoria {
     fn nome(&self) -> &'static str {
-        "ai-memory"
+        "nenhuma"
     }
 
-    fn embrulha(&self, session_id: &str, argv: Vec<String>) -> Vec<String> {
-        let mut linha = vec![
-            "ai-memory".to_string(),
-            "run".to_string(),
-            "--new".to_string(),
-            workstream(session_id),
-        ];
-        linha.extend(argv);
-        linha
+    async fn embrulha(
+        &self,
+        _partida: &PartidaDaMemoria<'_>,
+        argv: Vec<String>,
+    ) -> Result<Vec<String>> {
+        Ok(argv)
     }
-}
-
-impl Envelope for Direto {
-    fn nome(&self) -> &'static str {
-        "nenhum"
-    }
-
-    fn embrulha(&self, session_id: &str, argv: Vec<String>) -> Vec<String> {
-        let _ = session_id;
-        argv
-    }
-}
-
-/// Nome do workstream do ai-memory para esta partida da sessão.
-///
-/// Único por partida: o `ai-memory run` recusa com 409 um workstream já ativo e recusa de novo
-/// um nome de `--new` que já existe, e a mesma sessão sobe mais de uma vez (troca de modelo por
-/// `--resume`). O prefixo `lukadispatch-<8 do id>` é o que você procura no `ai-memory`; o
-/// carimbo de tempo no fim é o que o torna inédito.
-pub fn workstream(session_id: &str) -> String {
-    let agora = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format!("lukadispatch-{}-{agora}", &session_id[..8])
 }
 
 /// Os agentes que existem, pelo nome que o config (`[agente] tipo`) e o `setup --agent` usam.
 pub const AGENTES: &[&str] = &["claude-code"];
 
-/// Os envelopes que existem, pelo nome de `[agente] envelope` e do `setup --envelope`.
-pub const ENVELOPES: &[&str] = &["ai-memory", "nenhum"];
+/// As memórias que existem, pelo nome de `[agente] memoria` e do `setup --memoria`.
+pub const MEMORIAS: &[&str] = &["ai-memory", "nenhuma"];
 
-/// O agente e o envelope que o config pede. Nome desconhecido é erro na partida do daemon.
+/// O agente e a memória que o config pede. Nome desconhecido é erro na partida do daemon.
 pub fn da_config(config: &Config) -> Result<Pecas> {
     let cfg = &config.agente;
     let agente: Arc<dyn Agente> = match cfg.tipo.as_str() {
@@ -265,38 +325,35 @@ pub fn da_config(config: &Config) -> Result<Pecas> {
             AGENTES.join(", ")
         ),
     };
-    let envelope: Arc<dyn Envelope> = match cfg.envelope.as_str() {
+    let memoria: Arc<dyn Memoria> = match cfg.memoria.as_str() {
         "ai-memory" => Arc::new(AiMemory),
-        "nenhum" => Arc::new(Direto),
+        // `nenhum` é o nome de quando isto se chamava envelope, e está em configs instalados.
+        "nenhuma" | "nenhum" => Arc::new(SemMemoria),
         outro => anyhow::bail!(
-            "envelope desconhecido: {outro:?} (disponíveis: {})",
-            ENVELOPES.join(", ")
+            "memória desconhecida: {outro:?} (disponíveis: {})",
+            MEMORIAS.join(", ")
         ),
     };
-    Ok(Pecas { agente, envelope })
+    Ok(Pecas { agente, memoria })
 }
 
 /// O par escolhido pelo config.
 pub struct Pecas {
     pub agente: Arc<dyn Agente>,
-    pub envelope: Arc<dyn Envelope>,
+    pub memoria: Arc<dyn Memoria>,
 }
 
 /// Escreve o script de partida em `dir` e devolve o que o hospedeiro precisa para rodá-lo.
 ///
-/// O prompt vai para `dir/prompt.txt` e entra no script como `"$(cat <arquivo>)"`; o resto da
-/// linha de comando vai com cada argumento entre aspas simples. O script é reescrito a cada
+/// A linha de comando da `invocacao` já vem embrulhada pela memória. O prompt vai para
+/// `dir/prompt.txt` e entra no script como `"$(cat <arquivo>)"`; o resto da linha de comando vai
+/// com cada argumento entre aspas simples. O script é reescrito a cada
 /// partida da sessão.
 ///
 /// **O prompt aparece no `ps`**: o shell expande o `$(cat ...)` antes de o agente nascer, e o
 /// texto vira argv. Um `pkill -f` cujo padrão apareça no prompt (e o prompt cita
 /// `lukadispatch listen`) mata a sessão inteira.
-pub fn escreve_partida(
-    dir: &Path,
-    session_id: &str,
-    envelope: &dyn Envelope,
-    invocacao: Invocacao,
-) -> Result<Partida> {
+pub fn escreve_partida(dir: &Path, session_id: &str, invocacao: Invocacao) -> Result<Partida> {
     std::fs::create_dir_all(dir).with_context(|| format!("criando {}", dir.display()))?;
 
     let prompt_arquivo = dir.join("prompt.txt");
@@ -305,8 +362,8 @@ pub fn escreve_partida(
             .with_context(|| format!("escrevendo {}", prompt_arquivo.display()))?;
     }
 
-    let argv = envelope.embrulha(session_id, invocacao.argv);
-    // A linha de comando em si (envelope, agente e flags) fica junta, de um jeito legível de
+    let argv = invocacao.argv;
+    // A linha de comando em si (memória, agente e flags) fica junta, de um jeito legível de
     // ler inteira; só o prompt, que é sempre o argumento mais longo, ganha linha própria.
     let mut comando: String = argv
         .iter()
@@ -335,6 +392,7 @@ exec {comando}
         session_id: session_id.to_string(),
         script,
         log: dir.join("pane.log"),
+        espera_ao_subir: ESPERA_AO_SUBIR,
     })
 }
 

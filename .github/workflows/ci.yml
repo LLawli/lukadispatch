@@ -21,17 +21,33 @@ jobs:
       - uses: actions/checkout@v7
       # gtk4 e libadwaita são da janela de pergunta. ffmpeg e p7zip existem para os testes de
       # corte de vídeo e de volumes rodarem de verdade: sem eles, esses testes retornam cedo e
-      # passam sem ter testado nada.
+      # passam sem ter testado nada. tmux e herdr são os hospedeiros da suíte e2e
+      # (crates/ld-daemon/tests/e2e), que também roda os testes de hospedeiro de verdade.
       - name: dependências de sistema
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libgtk-4-dev libadwaita-1-dev ffmpeg p7zip-full
+            libgtk-4-dev libadwaita-1-dev ffmpeg p7zip-full tmux
+      # O herdr não tem pacote no apt: vai o binário do release, numa versão fixa e conferida.
+      - name: herdr
+        env:
+          VERSAO: v0.8.2
+          SHA256: 976150a14d490c94b243ea2e1a7eb2dfb67f12e36b182db90936f6728e6aecf4
+        run: |
+          curl -fsSL -o herdr \
+            "https://github.com/herdrdev/herdr/releases/download/$VERSAO/herdr-linux-x86_64"
+          echo "$SHA256  herdr" | sha256sum -c -
+          sudo install -m 0755 herdr /usr/local/bin/herdr
+          herdr --version
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # Aqui faltar tmux, herdr ou python3 é falha: pular a suíte e2e seria um verde que não
+      # testou nada.
       - run: ./ci.sh
+        env:
+          LUKADISPATCH_E2E_EXIGE: "1"
 
   msrv:
     name: MSRV (rust-version do Cargo.toml)

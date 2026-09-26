@@ -49,3 +49,7 @@ sha2 = "0.10"
 [dev-dependencies]
 filetime = "0.2"
 tokio = { version = "1.53", features = ["test-util"] }
+# O Bot API de mentira da suíte e2e (tests/e2e). Já estão na árvore por baixo do teloxide.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"

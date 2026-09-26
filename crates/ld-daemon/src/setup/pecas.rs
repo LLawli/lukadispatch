@@ -1,7 +1,7 @@
 //! O passo de setup de cada implementação de cada porta.
 //!
 //! Uma implementação nova (codex, whatsapp, herdr, ai-jail) ganha o passo dela aqui e um braço
-//! no registro da porta ([`frontend`], [`agente`], [`hospedeiro`], [`envelope`]), do mesmo
+//! no registro da porta ([`frontend`], [`agente`], [`hospedeiro`], [`memoria`]), do mesmo
 //! jeito que se registra no `da_config` da porta. O resto do setup não muda.
 
 use anyhow::{Result, bail};
@@ -61,11 +61,11 @@ pub fn hospedeiro_da_maquina(tem_programa: &dyn Fn(&str) -> bool) -> &'static st
     }
 }
 
-pub fn envelope(nome: &str) -> Result<Box<dyn Peca>> {
+pub fn memoria(nome: &str) -> Result<Box<dyn Peca>> {
     match nome {
         "ai-memory" => Ok(Box::new(AiMemory)),
-        "nenhum" | "none" => Ok(Box::new(Nenhum)),
-        outro => desconhecido("--envelope", outro, crate::agente::ENVELOPES),
+        "nenhuma" | "nenhum" | "none" => Ok(Box::new(Nenhuma)),
+        outro => desconhecido("--memoria", outro, crate::agente::MEMORIAS),
     }
 }
 
@@ -229,12 +229,20 @@ impl Peca for Herdr {
                  Instale pelo gerenciador de pacotes da sua distro.",
             );
         }
-        match r.atual.herdr.sessao.as_deref().filter(|s| !s.is_empty()) {
-            Some(s) => tela.diz(&format!("As sessões sobem na sessão \"{s}\" do herdr.")),
-            None => tela.diz(
-                "As sessões sobem na sessão padrão do herdr, ao lado das suas. Para separá-las, \
-                 ponha sessao = \"nome\" em [herdr] no config.",
+        match r.atual.herdr.sessao.as_deref().map(str::trim) {
+            Some("default") => tela.diz(
+                "As sessões sobem na sessão padrão do herdr, ao lado das suas, porque o config \
+                 pede sessao = \"default\" em [herdr].",
             ),
+            Some(s) if !s.is_empty() => {
+                tela.diz(&format!("As sessões sobem na sessão \"{s}\" do herdr."))
+            }
+            _ => tela.diz(&format!(
+                "As sessões sobem numa sessão própria do herdr, \"{}\", separada das suas. \
+                 Para vê-las: herdr --session {}",
+                crate::sessions::SESSAO_DO_BOT,
+                crate::sessions::SESSAO_DO_BOT
+            )),
         }
         r.poe(None, "hospedeiro", "herdr");
         Ok(())
@@ -250,7 +258,7 @@ impl Peca for AiMemory {
     }
 
     async fn configura(&self, tela: &mut Tela<'_>, r: &mut Rascunho) -> Result<()> {
-        let mut envelope = "ai-memory";
+        let mut memoria = "ai-memory";
         if (r.tem_programa)("ai-memory") {
             tela.diz("ai-memory: ok.");
         } else {
@@ -259,26 +267,33 @@ impl Peca for AiMemory {
                  (https://github.com/akitaonrails/ai-memory), mas não é obrigatório.",
             );
             if tela.sim("Rodar as sessões sem ele por enquanto?")? {
-                envelope = "nenhum";
+                memoria = "nenhuma";
             } else {
                 tela.diz("Instale o ai-memory antes de abrir a primeira sessão.");
             }
         }
-        r.poe(Some("agente"), "envelope", envelope);
+        poe_memoria(r, memoria);
         Ok(())
     }
 }
 
-struct Nenhum;
+struct Nenhuma;
 
 #[async_trait(?Send)]
-impl Peca for Nenhum {
+impl Peca for Nenhuma {
     fn nome(&self) -> &'static str {
-        "nenhum"
+        "nenhuma"
     }
 
     async fn configura(&self, _tela: &mut Tela<'_>, r: &mut Rascunho) -> Result<()> {
-        r.poe(Some("agente"), "envelope", "nenhum");
+        poe_memoria(r, "nenhuma");
         Ok(())
     }
+}
+
+/// Grava a memória escolhida, e tira a chave com o nome antigo (`envelope`): as duas juntas
+/// fariam o config não carregar, porque uma é apelido da outra.
+fn poe_memoria(r: &mut Rascunho, memoria: &str) {
+    r.tira(Some("agente"), "envelope");
+    r.poe(Some("agente"), "memoria", memoria);
 }

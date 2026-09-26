@@ -120,9 +120,14 @@ fn desenha(store: &Store, agente: &dyn Agente) -> anyhow::Result<String> {
         } else {
             "💻"
         };
+        // Duas sessões do mesmo projeto em branches diferentes só se distinguem pela branch.
+        let worktree = store.worktree_em(&sessao.cwd).ok().flatten();
         s.push_str(&format!(
             "\n{dono} <b>{}</b> · {}\n",
-            escape_html(&sessao.project),
+            escape_html(&crate::app::nome_do_canal(
+                &sessao.project,
+                worktree.as_ref()
+            )),
             escape_html(&sessao.status)
         ));
 
@@ -283,5 +288,51 @@ mod tests {
         let t = desenha(&store, &agente).unwrap();
         assert!(t.contains("nenhuma sessão viva"));
         assert!(t.contains("Limites da conta"));
+    }
+
+    #[test]
+    fn sessao_numa_worktree_aparece_com_a_branch() {
+        let store = Store::open_memory().unwrap();
+        store
+            .registra_worktree(&ld_core::state::Worktree {
+                caminho: "/wt/api/feat".into(),
+                projeto: "api".into(),
+                raiz: "/p/api".into(),
+                branch: "feat".into(),
+                criada_em: 0,
+                usada_em: 0,
+            })
+            .unwrap();
+        store
+            .upsert(&ld_core::state::Session {
+                session_id: "s1".into(),
+                project: "api".into(),
+                cwd: "/wt/api/feat".into(),
+                transcript_path: None,
+                hospedagem: Some("ld-api-s1".into()),
+                canal_id: None,
+                status: "ocioso".into(),
+                status_msg_id: None,
+                model: Some("opus".into()),
+                effort: None,
+                permission_mode: None,
+                created_at: 0,
+                ended_at: None,
+            })
+            .unwrap();
+        let raiz = tempfile::tempdir().unwrap();
+        let agente = crate::agente::claude_code::ClaudeCode::new(
+            crate::agente::claude_code::Locais {
+                cli: "/opt/ld/lukadispatch".into(),
+                mcp_proxy: "/opt/ld/lukadispatch-mcp".into(),
+                settings: raiz.path().join("bot-settings.json"),
+                claude_json: raiz.path().join("claude.json"),
+                claude_dir: raiz.path().join("claude"),
+                uso_db: raiz.path().join("uso.db"),
+            },
+            None,
+        );
+        let t = desenha(&store, &agente).unwrap();
+        assert!(t.contains("<b>api · feat</b>"), "{t}");
     }
 }

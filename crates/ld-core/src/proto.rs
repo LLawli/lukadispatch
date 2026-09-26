@@ -98,6 +98,10 @@ pub enum Request {
         /// Continuar a última conversa daquele projeto em vez de começar do zero.
         #[serde(default)]
         resume_last: bool,
+        /// Abrir na worktree desta branch, criando a branch a partir da principal se ela não
+        /// existir. Sem ela, a sessão abre na pasta do projeto.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
     },
     Kill {
         session_id: String,
@@ -122,12 +126,20 @@ pub struct StopReport {
     pub session_id: String,
     pub transcript_path: Option<String>,
     pub last_assistant_message: Option<String>,
+    /// Quando o hook rodou, em milissegundos desde a época. Ver [`SessionEvent::at_ms`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SessionEvent {
     pub session_id: String,
     pub event: EventKind,
+    /// Quando o hook rodou, em milissegundos desde a época. Os hooks de ferramenta são
+    /// assíncronos: o de uma ferramenta pode chegar ao daemon depois do `Stop` do mesmo turno, e
+    /// é esta hora, e não a de chegada, que diz a ordem. `None` em binário anterior a ela.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -305,6 +317,7 @@ mod tests {
                 session_id: "s1".into(),
                 transcript_path: Some("/tmp/t.jsonl".into()),
                 last_assistant_message: Some("pronto".into()),
+                at_ms: Some(1),
             }),
             Request::Event(SessionEvent {
                 session_id: "s1".into(),
@@ -313,6 +326,7 @@ mod tests {
                     label: "cargo test".into(),
                     effort: Some("high".into()),
                 },
+                at_ms: None,
             }),
         ];
         for caso in casos {
@@ -405,5 +419,25 @@ mod tests {
         };
         let txt = line(&r);
         assert_eq!(txt.matches('\n').count(), 1);
+    }
+
+    #[test]
+    fn evento_de_binario_antigo_sem_hora_ainda_chega() {
+        // Sem hora, a linha é exatamente a de antes do campo existir: é o que o binário
+        // anterior (os hooks globais de uma instalação velha) manda.
+        let antigo = line(&Request::Event(SessionEvent {
+            session_id: "s1".into(),
+            event: EventKind::ToolEnd {
+                tool: "Bash".into(),
+                ok: true,
+            },
+            at_ms: None,
+        }));
+        assert!(!antigo.contains("at_ms"), "{antigo}");
+        let v: Request = serde_json::from_str(antigo.trim()).unwrap();
+        assert!(matches!(
+            v,
+            Request::Event(SessionEvent { at_ms: None, .. })
+        ));
     }
 }

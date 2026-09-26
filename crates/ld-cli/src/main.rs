@@ -23,14 +23,16 @@ lukadispatch
   ls                        sessões vivas
   models                    catálogo de modelos lido do binário do Claude Code
   kill <id>                 fecha uma sessão
-  new <projeto> [--continuar]   abre uma sessão (--continuar retoma a última conversa)
+  new <projeto> [--branch <b>] [--continuar]
+                            abre uma sessão (--continuar retoma a última conversa); com
+                            --branch, na worktree dela, criando a branch se não existir
   send <id> <texto>         entrega uma mensagem a uma sessão sem passar pelo Telegram
   send-file <caminho> [--legenda <texto>] [--como-arquivo] [--session <id>]
                             manda um arquivo do disco para o tópico da sessão (a sessão em si
                             não precisa do --session: ela já tem LD_SESSION no ambiente)
   model <id> <modelo>       troca o modelo reiniciando com o contexto inteiro
   effort <id> <nível>       idem para o esforço (low, medium, high, xhigh, max)
-  setup [--frontend telegram] [--agent claude-code] [--session tmux|herdr] [--envelope ai-memory]
+  setup [--frontend telegram] [--agent claude-code] [--session tmux|herdr] [--memoria ai-memory]
                             configura tudo conversando: o bot, o grupo, o config, os hooks e o
                             serviço (os padrões são os que existem hoje; --help lista)
   install [--global]        escreve os hooks; --global acrescenta a telemetria ao settings do
@@ -62,13 +64,18 @@ fn main() -> ExitCode {
             args.get(2).map(String::as_str),
         ),
         "new" => {
-            let continuar = args.iter().any(|a| a == "--continuar");
-            let nome: Vec<String> = args[1..]
-                .iter()
-                .filter(|a| *a != "--continuar")
-                .cloned()
-                .collect();
-            new(nome.join(" "), continuar)
+            let mut continuar = false;
+            let mut branch = None;
+            let mut nome = Vec::new();
+            let mut resto = args[1..].iter();
+            while let Some(a) = resto.next() {
+                match a.as_str() {
+                    "--continuar" => continuar = true,
+                    "--branch" => branch = resto.next().cloned(),
+                    _ => nome.push(a.clone()),
+                }
+            }
+            new(nome.join(" "), branch, continuar)
         }
         "setup" => setup(&args[1..]),
         "install" => install(args.iter().any(|a| a == "--global")),
@@ -165,15 +172,16 @@ fn kill(id: Option<&str>) -> i32 {
     }
 }
 
-fn new(projeto: String, continuar: bool) -> i32 {
+fn new(projeto: String, branch: Option<String>, continuar: bool) -> i32 {
     if projeto.is_empty() {
-        eprintln!("uso: lukadispatch new <projeto>");
+        eprintln!("uso: lukadispatch new <projeto> [--branch <b>] [--continuar]");
         return 2;
     }
     match client::call(
         &Request::NewSession {
             project: projeto,
             resume_last: continuar,
+            branch,
         },
         client::PRAZO_NEW,
     ) {

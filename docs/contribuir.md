@@ -52,6 +52,22 @@ têm testes em `crates/ld-daemon/tests/fluxos.rs`, que rodam o domínio inteiro 
 em memória e dublês das outras portas: sem rede, sem tmux e sem modelo de voz. Os testes de
 corte de vídeo e de volumes precisam de `ffmpeg` e `7z` na máquina; sem eles, retornam cedo.
 
+A suíte e2e (`crates/ld-daemon/tests/e2e`) roda o daemon inteiro, com o binário de verdade, e
+dirige cada cenário pelo Telegram, com updates na forma em que ele os manda. As duas pontas que
+não existem no CI são trocadas: o Telegram por um Bot API de mentira que sobe no próprio teste (o
+adaptador do teloxide fala com ele por `LUKADISPATCH_TELEGRAM_API`), e o Claude Code pelo dublê
+`tests/e2e/claude`, um script Python que dispara os ganchos do `--settings` e lê o canal pelo
+`listen`. O resto é real: socket, CLI dos ganchos, git, worktree e hospedeiro. Cada cenário roda
+no tmux e no herdr. O daemon sobe com HOME, XDG, socket, tmux e herdr num tempdir, então a suíte
+não toca no seu tmux, no seu herdr nem no serviço instalado.
+
+Ela precisa de `tmux`, `herdr` e `python3`. Sem eles, o cenário é pulado; com
+`LUKADISPATCH_E2E_EXIGE=1` (o CI liga), faltar um deles é falha. Para rodar só ela:
+
+```bash
+cargo test -p ld-daemon --test e2e
+```
+
 Duas regras que vieram de bug real (mais em [armadilhas.md](armadilhas.md#testes)):
 
 - A tradução de entrada de um adaptador se testa com payload copiado da plataforma, não com um

@@ -26,6 +26,8 @@ lugar errado.
 | `confirmacao` | a fila de transcrições esperando aval: um card por vez por canal, casamento da correção pelo id do card respondido | transcrever; desenhar o card |
 | `hub` | o estado vivo: quem está ouvindo (`listen`), perguntas abertas e seus `oneshot`, a contagem de re-arme. Não sobrevive a restart, de propósito | persistir nada |
 | `status` | a mensagem de status de cada sessão, uma tarefa por sessão com debounce, adotando a mensagem do banco depois de um restart | decidir o texto do status (recebe pronto) |
+| `novo` | o `/new` em etapas (pasta, projeto, branch, continuar ou do zero), o `/new <projeto> <branch>`, o `/new new-project` e a pergunta do `/kill` numa worktree, com as escolhas dos botões guardadas em memória | abrir sessão (chama o `app`); falar com o git (é o `worktree`) |
+| `worktree` | o git das worktrees: onde cada uma mora, as branches e onde estão em checkout, criar, contar o que se perderia e apagar; criar projeto com commit vazio | decidir quando (quem decide é o `novo`); saber de chat ou de memória |
 | `panel` | o painel do canal principal: uma mensagem, fixada, redesenhada com debounce a partir do banco e do uso da conta | responder comando |
 | `arquivos` | o lado do domínio dos arquivos: o marcador `@arquivo:` na resposta, a validação do que o agente pediu para mandar, a raiz de anexos por sessão, a limpeza de anexo de sessão morta e de áudio vencido | baixar da plataforma (é `Frontend::baixa`); partir arquivo (é `Divisor`) |
 | `socket` | servir o protocolo NDJSON do `ld-core::proto` aos hooks e ao `listen` | lógica de negócio (repassa para o `app`) |
@@ -45,7 +47,7 @@ lugar errado.
 | `transcritor::processo` | chamar um programa local como transcritor: WAV 16 kHz, marcadores no comando, uma transcrição por vez, prazo, texto vazio como erro |
 | `divisor` (mod.rs) | a trait `Divisor` e a cadeia `Divisores`, com fallback e o teto de partes |
 | `divisor::video`, `sete_z`, `rar` | as três formas de partir: trechos de vídeo por tempo, volumes de 7z, volumes de RAR |
-| `agente` (mod.rs) | as traits `Agente` e `Envelope`, a `DescricaoDoChat` que o domínio passa ao agente, e o script de partida neutro (`escreve_partida`), que junta envelope e invocação |
+| `agente` (mod.rs) | as traits `Agente` e `Memoria`, a `DescricaoDoChat` que o domínio passa ao agente, e o script de partida neutro (`escreve_partida`), que junta memória e invocação |
 | `agente::claude_code` | tudo que é Claude Code: flags da linha de comando, prompts de partida e de re-arme, `bot-settings.json` com os ganchos, confiança de pasta, catálogo de modelos, modos de permissão, leitura do transcript e do uso da conta |
 | `sessions` | a trait `Hospedeiro`, o `Tmux` e o `Herdr`: rodar o script de partida num terminal de verdade, saber se está vivo, matar, listar, dizer como anexar |
 

@@ -332,8 +332,11 @@ impl Agente for ClaudeCode {
         // vir com `--strict-mcp-config`, senão o original subiria junto com o embrulhado, e o
         // servidor apareceria duas vezes na sessão.
         if pedido.wrap_mcp {
-            let servidores =
-                ld_core::mcp::servidores_do_projeto(&self.locais.claude_json, &pedido.projeto.path);
+            let servidores = ld_core::mcp::servidores_do_projeto(
+                &self.locais.claude_json,
+                pedido.raiz,
+                &pedido.projeto.path,
+            );
             if !servidores.is_empty() {
                 let arquivo = dir.join("mcp.json");
                 let conteudo = ld_core::mcp::config_embrulhada(
@@ -354,12 +357,22 @@ impl Agente for ClaudeCode {
 
         let prompt = match pedido.resume {
             Some(_) => rearm_prompt(&self.locais.cli, session_id, pedido.retomada, pedido.chat),
-            None => bootstrap_prompt(
-                &self.locais.cli,
-                session_id,
-                pedido.chat,
-                self.usuario.as_deref(),
-            ),
+            None => {
+                let mut p = bootstrap_prompt(
+                    &self.locais.cli,
+                    session_id,
+                    pedido.chat,
+                    self.usuario.as_deref(),
+                );
+                // O que a memória pede vai no fim, depois das regras do canal: elas valem para
+                // toda sessão, e isto só para esta.
+                if let Some(extra) = pedido.instrucoes {
+                    p.push('\n');
+                    p.push_str(extra);
+                    p.push('\n');
+                }
+                p
+            }
         };
 
         Ok(Invocacao {

@@ -24,8 +24,9 @@ pub const PRAZO_LOCAL: Duration = Duration::from_secs(5);
 pub const PRAZO_ENVIO: Duration = Duration::from_secs(180);
 
 /// Abrir sessão envolve criar tópico no Telegram e subir tmux: é a operação mais lenta do
-/// sistema, e falhar por impaciência deixaria tópico órfão.
-pub const PRAZO_NEW: Duration = Duration::from_secs(90);
+/// sistema, e falhar por impaciência deixaria tópico órfão. Numa worktree, a partida ainda pode
+/// esperar até 100 s a memória de uma partida anterior ser solta.
+pub const PRAZO_NEW: Duration = Duration::from_secs(150);
 
 pub fn connect(prazo: Duration) -> Option<UnixStream> {
     let stream = UnixStream::connect(paths::socket()).ok()?;

@@ -33,11 +33,11 @@ depth = 1
 # hospedeiro = "tmux"             # ou "herdr"; o setup escolhe o tmux se houver, senão o herdr
 #
 # [herdr]
-# sessao = "bot"                  # sessão nomeada do herdr; sem isto, a padrão, ao lado das suas
+# sessao = "lukadispatch"         # sessão do herdr; esta é a padrão; "default" põe ao lado das suas
 #
 # [agente]
 # tipo = "claude-code"
-# envelope = "ai-memory"          # "nenhum" roda o claude direto, sem o ai-memory
+# memoria = "ai-memory"           # "nenhuma" roda o claude direto, sem o ai-memory
 #
 # [transcricao]                   # o lukadispatch setup instala o motor e preenche isto
 # ativa = true                    # false: a voz chega como arquivo de áudio, sem texto

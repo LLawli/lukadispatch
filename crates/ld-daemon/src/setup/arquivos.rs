@@ -99,6 +99,17 @@ impl Rascunho {
         }
     }
 
+    /// Tira uma chave, se ela existir.
+    pub fn tira(&mut self, tabela: Option<&str>, chave: &str) {
+        let alvo = match tabela {
+            None => Some(self.config.as_table_mut() as &mut dyn TableLike),
+            Some(t) => self.config.get_mut(t).and_then(Item::as_table_like_mut),
+        };
+        if let Some(alvo) = alvo {
+            alvo.remove(chave);
+        }
+    }
+
     /// Acrescenta `id` a uma lista de inteiros, sem repetir e sem tirar quem já estava.
     ///
     /// Num config novo a lista começa vazia: a que vem no exemplo é enfeite, e somar a ela

@@ -34,6 +34,10 @@ use super::{
 /// Quantos segundos o Telegram segura o `getUpdates` sem novidade.
 pub const PRAZO_POLL: u32 = 25;
 
+/// A variável que troca o endereço do Bot API. Serve a um servidor próprio do Bot API e à suíte
+/// e2e, que sobe um de mentira no próprio teste para o adaptador de verdade falar com ele.
+pub const API_TELEGRAM: &str = "LUKADISPATCH_TELEGRAM_API";
+
 pub struct Telegram {
     bot: Bot,
     chat: ChatId,
@@ -58,12 +62,26 @@ impl Telegram {
 /// Telegram para segurar a conexão por PRAZO_POLL. Com o padrão, toda janela ociosa morria em
 /// erro de rede e reabria: o update não se perdia (o Telegram reenvia), mas o log virava um
 /// aviso a cada 20s e cada mensagem podia atrasar alguns segundos.
+///
+/// Com [`API_TELEGRAM`] no ambiente, fala com esse endereço no lugar do Bot API oficial.
 pub fn bot(token: String) -> Bot {
     let cliente = teloxide::net::default_reqwest_settings()
         .timeout(Duration::from_secs(PRAZO_POLL as u64 + 30))
         .build()
         .expect("cliente http do teloxide");
-    Bot::with_client(token, cliente)
+    let bot = Bot::with_client(token, cliente);
+    match std::env::var(API_TELEGRAM) {
+        Ok(url) if !url.trim().is_empty() => {
+            // O `join` de um endereço absoluto devolve o próprio endereço, já no tipo de URL do
+            // teloxide: assim não entra uma dependência só para o `Url::parse`.
+            let api = bot
+                .api_url()
+                .join(url.trim())
+                .unwrap_or_else(|e| panic!("{API_TELEGRAM} não é uma URL: {e}"));
+            bot.set_api_url(api)
+        }
+        _ => bot,
+    }
 }
 
 /// Traduz um update do Telegram num [`Evento`], ou descarta.
