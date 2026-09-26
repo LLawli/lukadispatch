@@ -919,8 +919,8 @@ fn nome_de_projeto_valido(pasta: &Path, nome: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Cria o projeto e abre a sessão nele. A sessão abre na pasta do projeto, e não numa worktree:
-/// num projeto que acabou de nascer não há checkout de ninguém para proteger.
+/// Cria o projeto e pergunta o nome da primeira branch: a sessão abre na worktree dela, como em
+/// qualquer projeto, e a branch principal fica intocada.
 async fn cria_projeto(app: &Arc<App>, pasta: &Path, nome: &str) -> anyhow::Result<()> {
     let caminho = pasta.join(nome);
     if let Err(e) = worktree::inicia_projeto(&caminho).await {
@@ -944,7 +944,10 @@ async fn cria_projeto(app: &Arc<App>, pasta: &Path, nome: &str) -> anyhow::Resul
         model: None,
         effort: None,
     };
-    crate::roteador::abrir(app, &p, None, None, None).await
+    let base = worktree::principal(&caminho)
+        .await
+        .unwrap_or_else(|| "master".into());
+    pergunta_nome_da_branch(app, p, base).await
 }
 
 // ------------------------------------------------------------------ fechar

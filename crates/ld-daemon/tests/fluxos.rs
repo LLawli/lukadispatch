@@ -1879,7 +1879,7 @@ async fn manter_fecha_a_sessao_e_a_worktree_volta_no_new() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn new_project_cria_o_repositorio_e_abre_a_sessao_nele() {
+async fn new_project_cria_o_repositorio_e_abre_numa_branch_dele() {
     let (c, _) = cena_git().await;
     c.no_principal("/new new-project").await;
     c.toca("projetos").await;
@@ -1898,7 +1898,17 @@ async fn new_project_cria_o_repositorio_e_abre_a_sessao_nele() {
             .success(),
         "nasce com commit, senão não sai worktree dele"
     );
-    assert!(c.sessao_em(&pasta).is_some());
+    // A sessão não abre na principal: pergunta o nome da primeira branch.
+    assert!(c.sessao_em(&pasta).is_none());
+    assert!(c.falou("nome da branch nova"), "{:?}", c.fe.textos());
+    c.no_principal("feat/inicio").await;
+    let w = c
+        .app
+        .store
+        .worktree_da_branch(&pasta.to_string_lossy(), "feat/inicio")
+        .unwrap()
+        .expect("a primeira branch não virou worktree");
+    assert!(c.sessao_em(Path::new(&w.caminho)).is_some());
 }
 
 #[tokio::test(flavor = "multi_thread")]
