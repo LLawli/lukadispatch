@@ -215,31 +215,32 @@ fn a_parada_vai_para_o_agente_e_nao_para_o_ai_memory() {
     let _ = filho.wait();
 }
 
-/// Contra o ai-memory de verdade, num projeto descartável: `cargo test -- --ignored ponte`.
+/// Contra o ai-memory de verdade, num projeto descartável: `cargo test -- --ignored mcp_tira`.
+/// Rode sem as variáveis do Claude Code no ambiente (`env -u CLAUDE_CODE_SESSION_ID ...`), como o
+/// daemon roda: foi assim que a ponte de stdio passou no teste e falhou no serviço, e é assim que o HTTP tem de passar.
 /// Cria dois handoffs manuais, tira da fila, confere que a fila ficou vazia, devolve e confere
 /// que eles voltaram com o conteúdo, na mesma ordem. Apaga o projeto no fim.
 #[tokio::test]
 #[ignore = "fala com o servidor do ai-memory desta máquina"]
-async fn ponte_tira_e_devolve_handoffs_no_ai_memory_de_verdade() {
+async fn mcp_tira_e_devolve_handoffs_no_ai_memory_de_verdade() {
     let escopo = Escopo {
         workspace: "default".into(),
         project: format!("lukadispatch-teste-ponte-{}", agora()),
     };
-    let mut ponte = Ponte::abre().await.unwrap();
+    let mcp = Mcp::do_ai_memory().await.unwrap();
     for (resumo, passo) in [("primeiro", "a"), ("segundo", "b")] {
-        ponte
-            .chama(
-                "memory_handoff_begin",
-                json!({
-                    "workspace": escopo.workspace,
-                    "project": escopo.project,
-                    "summary": resumo,
-                    "next_steps": [passo],
-                    "cwd": "/home/eu/terminal",
-                }),
-            )
-            .await
-            .unwrap();
+        mcp.chama(
+            "memory_handoff_begin",
+            json!({
+                "workspace": escopo.workspace,
+                "project": escopo.project,
+                "summary": resumo,
+                "next_steps": [passo],
+                "cwd": "/home/eu/terminal",
+            }),
+        )
+        .await
+        .unwrap();
         // O ai-memory ordena por criação; dois no mesmo instante empatariam.
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -307,5 +308,89 @@ fn so_o_workstream_da_branch_segura_a_partida() {
     assert_eq!(
         AiMemory.segura_a_partida(&partida(cwd, None, false)),
         Duration::ZERO
+    );
+}
+
+#[test]
+fn o_endpoint_sai_do_server_url_do_ai_memory() {
+    let m = Mcp::da_url("http://127.0.0.1:49374", None).unwrap();
+    assert_eq!(
+        (m.host.as_str(), m.porta, m.caminho.as_str()),
+        ("127.0.0.1", 49374, "/mcp")
+    );
+    assert_eq!(
+        Mcp::da_url("http://mem.local/ai/", None).unwrap().caminho,
+        "/ai/mcp"
+    );
+    assert_eq!(Mcp::da_url("http://h:1/mcp", None).unwrap().caminho, "/mcp");
+    assert_eq!(Mcp::da_url("http://h", None).unwrap().porta, 80);
+    assert!(
+        Mcp::da_url("https://h", None).is_err(),
+        "https não é falado aqui"
+    );
+}
+
+#[test]
+fn le_a_resposta_http_inteira_nos_tres_formatos() {
+    let json = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 11\r\n\r\n{\"a\": 1}\n";
+    assert_eq!(corpo_da_resposta(json).unwrap(), json!({"a": 1}));
+
+    let chunked = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n{\"a\"\r\n4\r\n: 1}\r\n0\r\n\r\n";
+    assert_eq!(corpo_da_resposta(chunked).unwrap(), json!({"a": 1}));
+
+    let sse = b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\nevent: message\r\ndata: {\"a\": 1}\r\n\r\n";
+    assert_eq!(corpo_da_resposta(sse).unwrap(), json!({"a": 1}));
+
+    let erro = b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 5\r\n\r\nnope!";
+    let e = corpo_da_resposta(erro).unwrap_err();
+    assert!(format!("{e:#}").contains("401"), "{e:#}");
+}
+
+#[tokio::test]
+async fn chama_a_ferramenta_por_post_no_endpoint() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let escuta = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let porta = escuta.local_addr().unwrap().port();
+    let servidor = tokio::spawn(async move {
+        let (mut c, _) = escuta.accept().await.unwrap();
+        let mut lido = Vec::new();
+        let mut buf = [0u8; 4096];
+        // Lê até o corpo inteiro chegar, pelo Content-Length do cabeçalho.
+        loop {
+            let n = c.read(&mut buf).await.unwrap();
+            lido.extend_from_slice(&buf[..n]);
+            let texto = String::from_utf8_lossy(&lido).into_owned();
+            if let Some((cab, corpo)) = texto.split_once("\r\n\r\n") {
+                let tamanho: usize = cab
+                    .lines()
+                    .find_map(|l| l.strip_prefix("Content-Length: "))
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                if corpo.len() >= tamanho {
+                    break;
+                }
+            }
+        }
+        let corpo = r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"handoff\": null}"}],"isError":false}}"#;
+        let resposta = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{corpo}",
+            corpo.len()
+        );
+        c.write_all(resposta.as_bytes()).await.unwrap();
+        String::from_utf8_lossy(&lido).into_owned()
+    });
+    let mcp = Mcp::da_url(&format!("http://127.0.0.1:{porta}"), Some("segredo".into())).unwrap();
+    let r = mcp
+        .chama("memory_handoff_accept", json!({"project": "x"}))
+        .await
+        .unwrap();
+    assert_eq!(r, json!({"handoff": null}));
+    let pedido = servidor.await.unwrap();
+    assert!(pedido.starts_with("POST /mcp HTTP/1.1\r\n"), "{pedido}");
+    assert!(pedido.contains("Authorization: Bearer segredo"), "{pedido}");
+    assert!(
+        pedido.contains(r#""name":"memory_handoff_accept""#),
+        "{pedido}"
     );
 }

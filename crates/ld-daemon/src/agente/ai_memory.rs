@@ -18,7 +18,8 @@
 //!   uso único: a sessão de uma worktree consumiria o que você deixou no terminal, e vice-versa.
 //!   O ai-memory não tem como restringi-lo a um checkout. Então a sessão da worktree é instruída
 //!   a guardar o "onde parei" numa página da branch, e antes de ela subir o daemon tira da fila os
-//!   handoffs manuais abertos e os devolve depois que ela já passou pelo início.
+//!   handoffs manuais abertos e os devolve depois que ela já passou pelo início, falando MCP por
+//!   HTTP com o servidor do ai-memory.
 //!
 //! O que foi medido para chegar aqui está na decisão 0018.
 
@@ -28,8 +29,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use ld_core::state::Worktree;
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::Command;
 use tracing::{info, warn};
 
 use super::{Guardado, Memoria, PartidaDaMemoria};
@@ -311,11 +311,11 @@ struct Tirados {
 /// um de dentro, então só os manuais (que valem para qualquer cwd) saem. Assim o handoff
 /// automático da própria worktree fica para a sessão dela.
 async fn tira_handoffs(escopo: &Escopo) -> Result<Vec<Value>> {
-    let mut ponte = Ponte::abre().await?;
+    let mcp = Mcp::do_ai_memory().await?;
     let ninguem = format!("/lukadispatch/nenhum/{}", uuid::Uuid::new_v4());
     let mut tirados = Vec::new();
     for _ in 0..TETO_DE_HANDOFFS {
-        let r = ponte
+        let r = mcp
             .chama(
                 "memory_handoff_accept",
                 json!({
@@ -336,7 +336,7 @@ async fn tira_handoffs(escopo: &Escopo) -> Result<Vec<Value>> {
 /// Recria os handoffs tirados, do mais velho para o mais novo, para a ordem entre eles ficar a
 /// mesma.
 async fn devolve_handoffs(escopo: &Escopo, tirados: &[Value]) -> Result<()> {
-    let mut ponte = Ponte::abre().await?;
+    let mcp = Mcp::do_ai_memory().await?;
     for h in tirados.iter().rev() {
         let mut args = json!({
             "workspace": escopo.workspace,
@@ -349,95 +349,194 @@ async fn devolve_handoffs(escopo: &Escopo, tirados: &[Value]) -> Result<()> {
         if let Some(cwd) = h.get("cwd").and_then(Value::as_str) {
             args["cwd"] = json!(cwd);
         }
-        ponte.chama("memory_handoff_begin", args).await?;
+        mcp.chama("memory_handoff_begin", args).await?;
     }
     info!(quantos = tirados.len(), projeto = %escopo.project, "handoffs manuais de volta à fila");
     Ok(())
 }
 
-/// Uma conversa MCP com o servidor do ai-memory pela ponte de stdio dele (`ai-memory
-/// mcp-bridge`). Pela ponte o daemon não precisa saber o endereço do servidor nem falar HTTP: o
-/// próprio ai-memory resolve os dois, como resolve para as sessões.
-struct Ponte {
-    _filho: Child,
-    entrada: ChildStdin,
-    saida: Lines<BufReader<ChildStdout>>,
-    proximo: u64,
+/// O endpoint MCP do servidor do ai-memory, falado por HTTP.
+///
+/// Não pela ponte de stdio (`ai-memory mcp-bridge`): ela exige `CLAUDE_CODE_SESSION_ID` e sai na
+/// hora sem ela ("this bridge must be launched by Claude Code"), e o daemon não é uma sessão do
+/// Claude Code. O endpoint HTTP responde sem sessão (modo sem estado), e cada chamada é uma
+/// requisição.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Mcp {
+    host: String,
+    porta: u16,
+    caminho: String,
+    token: Option<String>,
 }
 
-impl Ponte {
+/// O endpoint resolvido uma vez por vida do daemon: descobrir custa um `ai-memory status`.
+static MCP: tokio::sync::OnceCell<Mcp> = tokio::sync::OnceCell::const_new();
+
+impl Mcp {
     const PRAZO: Duration = Duration::from_secs(10);
 
-    async fn abre() -> Result<Self> {
-        let mut filho = Command::new(PROGRAMA)
-            .arg("mcp-bridge")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .context("chamando ai-memory mcp-bridge")?;
-        let entrada = filho.stdin.take().context("sem stdin na ponte")?;
-        let saida = BufReader::new(filho.stdout.take().context("sem stdout na ponte")?).lines();
-        let mut ponte = Self {
-            _filho: filho,
-            entrada,
-            saida,
-            proximo: 0,
+    /// Onde o servidor escuta, como o próprio ai-memory resolve (`AI_MEMORY_SERVER_URL`, o
+    /// `server_url` do config dele, senão o loopback): quem diz é o `ai-memory status --json`.
+    async fn do_ai_memory() -> Result<&'static Mcp> {
+        MCP.get_or_try_init(|| async {
+            let saida = Command::new(PROGRAMA)
+                .args(["status", "--json"])
+                .output()
+                .await
+                .context("chamando ai-memory status")?;
+            if !saida.status.success() {
+                bail!(
+                    "ai-memory status: {}",
+                    String::from_utf8_lossy(&saida.stderr).trim()
+                );
+            }
+            let status: Value = serde_json::from_slice(&saida.stdout)
+                .context("ai-memory status respondeu fora de JSON")?;
+            let cliente = &status["client"];
+            let url = cliente["server_url"]
+                .as_str()
+                .context("ai-memory status não disse o server_url")?;
+            let token = if cliente["auth"].as_bool() == Some(true) {
+                Some(std::env::var("AI_MEMORY_AUTH_TOKEN").context(
+                    "o servidor do ai-memory pede token, e AI_MEMORY_AUTH_TOKEN não está no ambiente do daemon",
+                )?)
+            } else {
+                None
+            };
+            Mcp::da_url(url, token)
+        })
+        .await
+    }
+
+    /// `http://host[:porta][/prefixo]` vira o endpoint `/mcp` debaixo do prefixo.
+    fn da_url(url: &str, token: Option<String>) -> Result<Self> {
+        let resto = url.strip_prefix("http://").with_context(|| {
+            format!("só sei falar com o ai-memory por http://, e ele está em {url}")
+        })?;
+        let (autoridade, prefixo) = resto.split_once('/').unwrap_or((resto, ""));
+        let (host, porta) = match autoridade.rsplit_once(':') {
+            Some((h, p)) => (h.to_string(), p.parse().context("porta inválida")?),
+            None => (autoridade.to_string(), 80),
         };
-        ponte
-            .pede(
-                "initialize",
-                json!({
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": {"name": "lukadispatch", "version": env!("CARGO_PKG_VERSION")},
-                }),
-            )
-            .await?;
-        ponte
-            .escreve(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}))
-            .await?;
-        Ok(ponte)
+        let prefixo = prefixo.trim_end_matches('/');
+        let caminho = if prefixo.is_empty() {
+            "/mcp".to_string()
+        } else if prefixo.ends_with("mcp") {
+            format!("/{prefixo}")
+        } else {
+            format!("/{prefixo}/mcp")
+        };
+        Ok(Self {
+            host,
+            porta,
+            caminho,
+            token,
+        })
     }
 
     /// Chama uma ferramenta e devolve o JSON que ela respondeu.
-    async fn chama(&mut self, ferramenta: &str, args: Value) -> Result<Value> {
-        let r = self
-            .pede("tools/call", json!({"name": ferramenta, "arguments": args}))
-            .await?;
-        resultado_da_ferramenta(ferramenta, &r)
-    }
-
-    async fn pede(&mut self, metodo: &str, params: Value) -> Result<Value> {
-        self.proximo += 1;
-        let id = self.proximo;
-        self.escreve(&json!({"jsonrpc": "2.0", "id": id, "method": metodo, "params": params}))
-            .await?;
-        loop {
-            let linha = tokio::time::timeout(Self::PRAZO, self.saida.next_line())
-                .await
-                .with_context(|| format!("ai-memory não respondeu a {metodo}"))??
-                .with_context(|| format!("a ponte do ai-memory fechou durante {metodo}"))?;
-            let Ok(msg) = serde_json::from_str::<Value>(&linha) else {
-                continue;
-            };
-            if msg.get("id").and_then(Value::as_u64) != Some(id) {
-                continue; // notificação do servidor, ou resposta de outra coisa
-            }
-            if let Some(erro) = msg.get("error") {
-                bail!("ai-memory recusou {metodo}: {erro}");
-            }
-            return Ok(msg.get("result").cloned().unwrap_or(Value::Null));
+    async fn chama(&self, ferramenta: &str, args: Value) -> Result<Value> {
+        let pedido = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": ferramenta, "arguments": args},
+        });
+        let bruto = tokio::time::timeout(Self::PRAZO, self.post(&serde_json::to_vec(&pedido)?))
+            .await
+            .with_context(|| format!("o ai-memory não respondeu a {ferramenta}"))??;
+        let msg = corpo_da_resposta(&bruto)?;
+        if let Some(erro) = msg.get("error") {
+            bail!("ai-memory recusou {ferramenta}: {erro}");
         }
+        resultado_da_ferramenta(ferramenta, msg.get("result").unwrap_or(&Value::Null))
     }
 
-    async fn escreve(&mut self, msg: &Value) -> Result<()> {
-        let mut linha = serde_json::to_vec(msg)?;
-        linha.push(b'\n');
-        self.entrada.write_all(&linha).await?;
-        self.entrada.flush().await?;
-        Ok(())
+    async fn post(&self, corpo: &[u8]) -> Result<Vec<u8>> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut conexao = tokio::net::TcpStream::connect((self.host.as_str(), self.porta))
+            .await
+            .with_context(|| format!("conectando ao ai-memory em {}:{}", self.host, self.porta))?;
+        let mut cabecalho = format!(
+            "POST {} HTTP/1.1\r\nHost: {}:{}\r\nContent-Type: application/json\r\n\
+             Accept: application/json, text/event-stream\r\nContent-Length: {}\r\n\
+             Connection: close\r\n",
+            self.caminho,
+            self.host,
+            self.porta,
+            corpo.len()
+        );
+        if let Some(t) = &self.token {
+            cabecalho.push_str(&format!("Authorization: Bearer {t}\r\n"));
+        }
+        cabecalho.push_str("\r\n");
+        conexao.write_all(cabecalho.as_bytes()).await?;
+        conexao.write_all(corpo).await?;
+        let mut resposta = Vec::new();
+        conexao.read_to_end(&mut resposta).await?;
+        Ok(resposta)
+    }
+}
+
+/// A mensagem JSON-RPC de uma resposta HTTP inteira: confere o status, desfaz o `chunked` e tira
+/// o JSON de dentro de um evento SSE, que é como o servidor responde quando prefere streaming.
+fn corpo_da_resposta(bruto: &[u8]) -> Result<Value> {
+    let fim = bruto
+        .windows(4)
+        .position(|j| j == b"\r\n\r\n")
+        .context("resposta do ai-memory sem cabeçalho")?;
+    let cabecalho = String::from_utf8_lossy(&bruto[..fim]).to_lowercase();
+    let mut corpo = bruto[fim + 4..].to_vec();
+    let linha_de_status = cabecalho.lines().next().unwrap_or_default().to_string();
+    if !linha_de_status
+        .split_whitespace()
+        .nth(1)
+        .is_some_and(|c| c.starts_with('2'))
+    {
+        bail!(
+            "o ai-memory respondeu {}: {}",
+            linha_de_status,
+            String::from_utf8_lossy(&corpo).trim()
+        );
+    }
+    if cabecalho.contains("transfer-encoding: chunked") {
+        corpo = desfaz_chunked(&corpo)?;
+    }
+    let texto = String::from_utf8_lossy(&corpo);
+    if cabecalho.contains("text/event-stream") {
+        let dados: String = texto
+            .lines()
+            .filter_map(|l| l.strip_prefix("data:"))
+            .map(str::trim)
+            .collect();
+        return serde_json::from_str(&dados).context("evento do ai-memory fora de JSON");
+    }
+    serde_json::from_str(texto.trim()).context("resposta do ai-memory fora de JSON")
+}
+
+fn desfaz_chunked(mut resto: &[u8]) -> Result<Vec<u8>> {
+    let mut saida = Vec::new();
+    loop {
+        let fim = resto
+            .windows(2)
+            .position(|j| j == b"\r\n")
+            .context("pedaço chunked sem tamanho")?;
+        let tamanho = usize::from_str_radix(
+            String::from_utf8_lossy(&resto[..fim])
+                .split(';')
+                .next()
+                .unwrap_or_default()
+                .trim(),
+            16,
+        )
+        .context("tamanho de pedaço chunked inválido")?;
+        resto = &resto[fim + 2..];
+        if tamanho == 0 {
+            return Ok(saida);
+        }
+        let pedaco = resto.get(..tamanho).context("pedaço chunked cortado")?;
+        saida.extend_from_slice(pedaco);
+        resto = resto.get(tamanho + 2..).unwrap_or_default();
     }
 }
 

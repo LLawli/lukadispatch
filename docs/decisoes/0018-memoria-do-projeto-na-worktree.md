@@ -54,15 +54,19 @@ numa coisa diferente. Nada do ai-memory muda (sem PR no upstream). Medido:
 - **Tirar da fila e devolver.** Antes de uma partida numa worktree, o daemon aceita os handoffs
   manuais abertos do projeto (com um cwd que não existe, para os automáticos ficarem de fora) e os
   recria com o mesmo conteúdo, na mesma ordem, depois que o `SessionStart` da sessão chegou (mais
-  5 s, ou em até um minuto). Fala MCP pela ponte de stdio do próprio ai-memory (`ai-memory
-  mcp-bridge`), sem precisar do endereço do servidor.
+  5 s, ou em até um minuto). Fala MCP por HTTP com o endpoint `/mcp` do servidor, no endereço
+  que o `ai-memory status --json` diz (é a resolução do próprio ai-memory). Não pela ponte de
+  stdio (`ai-memory mcp-bridge`): ela exige `CLAUDE_CODE_SESSION_ID` e sai sem ela, e o daemon não
+  é uma sessão do Claude Code. O teste de ponta a ponta tinha passado com a ponte só porque o
+  daemon do teste herdou essa variável do shell que o subiu, dentro de um Claude Code.
 
 ## Consequências
 
 - O handoff manual do terminal sobrevive às sessões do bot. Um terminal que abrir nos poucos
   segundos entre tirar e devolver fica sem ele: aceito.
-- O daemon passa a depender, com o ai-memory ligado, de `ai-memory mcp-bridge`,
-  `ai-memory workstreams --json` e `ai-memory delete-page`. Falha em qualquer um deles vira aviso
+- O daemon passa a depender, com o ai-memory ligado, de `ai-memory status --json`,
+  `ai-memory workstreams --json`, `ai-memory delete-page` e do endpoint `/mcp` por `http://`
+  (com `AI_MEMORY_AUTH_TOKEN` no ambiente se o servidor pedir token). Falha em qualquer um deles vira aviso
   no log, nunca sessão que não sobe.
 - A sessão nova numa worktree recebe do ai-memory o que ainda não viu do registro da branch, e
   isso gasta contexto. "Começar do zero" é uma conversa nova, não uma branch sem passado.

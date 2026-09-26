@@ -47,6 +47,9 @@ Quando um comportamento parecer estranho, procure aqui antes de "consertar".
 - **Derrubar o `ai-memory run` deixa o workstream preso por até 90 s** e perde o fim da conversa
   no registro. `SIGTERM` no agente (o filho dele) faz ele terminar direito; `SIGTERM` nele mesmo,
   não, porque ele só trata `SIGINT`.
+- **`ai-memory mcp-bridge` só roda dentro do Claude Code.** Sem `CLAUDE_CODE_SESSION_ID` ele sai
+  na hora. Teste do daemon que roda de dentro de uma sessão herda a variável e passa, e o serviço
+  falha: suba o daemon de teste sem as variáveis `CLAUDE*`.
 - **Nome de workstream não aceita `/`.** O de uma worktree é a branch com `/` trocada por `-`.
 - **`ai-memory workstreams` recusa `--limit` acima de 100** e responde 404 ("not found in
   workspace") para projeto que ele ainda não viu, em vez de lista vazia.
