@@ -1,0 +1,296 @@
+#!/usr/bin/env python3
+"""Dublê do Claude Code para a suíte e2e.
+
+Faz, do ponto de vista do daemon, o que o Claude Code faz numa sessão do bot, e nada além:
+
+- lê o `--settings` que o daemon passou e dispara os ganchos que estão LÁ, com o JSON que o
+  Claude Code manda no stdin (os `async` em segundo plano, o `Stop` em `asyncRewake`, os de
+  decisão esperando a resposta). Se o daemon gerar um settings errado, é aqui que quebra;
+- tira do prompt de partida o comando do Monitor, como o agente faria lendo as instruções, e
+  roda esse comando, lendo uma mensagem por linha;
+- grava o transcript `.jsonl` onde o Claude Code grava, no formato dele, com a notificação do
+  Monitor como entrada do turno.
+
+O "trabalho" é um eco: `rode <comando>` pede a ferramenta Bash (e passa pelo portão de
+permissão), qualquer outra coisa volta como `eco: <texto>`.
+
+Com `LD_E2E_REGISTRO` no ambiente, anota cada partida e cada fim num arquivo por sessão, para o
+teste saber o que foi lançado e se o processo acabou.
+"""
+
+import json
+import os
+import queue
+import re
+import shlex
+import signal
+import subprocess
+import sys
+import threading
+import time
+import uuid
+
+# ------------------------------------------------------------------ linha de comando
+
+COM_VALOR = {
+    "--session-id",
+    "--resume",
+    "--settings",
+    "--permission-mode",
+    "--model",
+    "--effort",
+    "--mcp-config",
+    "-n",
+}
+
+opcoes = {}
+soltos = []
+args = sys.argv[1:]
+i = 0
+while i < len(args):
+    a = args[i]
+    if a in COM_VALOR and i + 1 < len(args):
+        opcoes[a] = args[i + 1]
+        i += 2
+    elif a.startswith("--"):
+        opcoes[a] = True
+        i += 1
+    else:
+        soltos.append(a)
+        i += 1
+
+SID = opcoes.get("--session-id") or opcoes.get("--resume")
+if not SID:
+    print("dublê: sem --session-id nem --resume", file=sys.stderr)
+    sys.exit(2)
+RETOMADA = "--resume" in opcoes
+PROMPT = soltos[-1] if soltos else ""
+MODO = opcoes.get("--permission-mode", "default")
+MODELO = opcoes.get("--model") or "claude-sonnet-5"
+CWD = os.getcwd()
+
+with open(opcoes["--settings"], encoding="utf-8") as f:
+    SETTINGS = json.load(f)
+
+# O mesmo lugar e a mesma codificação de pasta do Claude Code.
+CLAUDE_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.environ["HOME"], ".claude")
+PASTA = "".join(c if c.isascii() and c.isalnum() else "-" for c in CWD)
+TRANSCRIPT = os.path.join(CLAUDE_DIR, "projects", PASTA, SID + ".jsonl")
+os.makedirs(os.path.dirname(TRANSCRIPT), exist_ok=True)
+
+REGISTRO = os.environ.get("LD_E2E_REGISTRO")
+
+
+def registra(evento, **campos):
+    if not REGISTRO:
+        return
+    os.makedirs(REGISTRO, exist_ok=True)
+    linha = json.dumps({"evento": evento, "pid": os.getpid(), "em": time.time(), **campos})
+    with open(os.path.join(REGISTRO, SID + ".jsonl"), "a", encoding="utf-8") as f:
+        f.write(linha + "\n")
+
+
+# ------------------------------------------------------------------ transcript
+
+
+def grava(tipo, conteudo):
+    linha = {
+        "type": tipo,
+        "uuid": str(uuid.uuid4()),
+        "sessionId": SID,
+        "cwd": CWD,
+        "isSidechain": False,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+        "message": {"role": tipo, "content": conteudo},
+    }
+    with open(TRANSCRIPT, "a", encoding="utf-8") as f:
+        f.write(json.dumps(linha, ensure_ascii=False) + "\n")
+
+
+def fala(texto):
+    grava("assistant", [{"type": "text", "text": texto}])
+
+
+# ------------------------------------------------------------------ ganchos
+
+filas = queue.Queue()
+
+
+def ganchos(evento, ferramenta=None):
+    for grupo in SETTINGS.get("hooks", {}).get(evento, []):
+        matcher = grupo.get("matcher", "")
+        if ferramenta is not None and matcher not in ("", "*"):
+            if not re.fullmatch(matcher, ferramenta):
+                continue
+        yield from grupo.get("hooks", [])
+
+
+def dispara(evento, campos, ferramenta=None):
+    """Roda os ganchos do evento. Devolve as saídas dos que decidem (os que não são async)."""
+    entrada = {
+        "session_id": SID,
+        "transcript_path": TRANSCRIPT,
+        "cwd": CWD,
+        "permission_mode": MODO,
+        "hook_event_name": evento,
+    }
+    entrada.update(campos)
+    bruto = json.dumps(entrada)
+    decisoes = []
+    for g in ganchos(evento, ferramenta):
+        argv = [g["command"], *g.get("args", [])]
+        p = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if g.get("asyncRewake"):
+            threading.Thread(target=acorda_se_pedir, args=(p, bruto), daemon=True).start()
+        elif g.get("async"):
+            threading.Thread(target=p.communicate, args=(bruto,), daemon=True).start()
+        else:
+            saida, _ = p.communicate(bruto, timeout=g.get("timeout", 600))
+            decisoes.append((p.returncode, saida))
+    return decisoes
+
+
+def acorda_se_pedir(p, bruto):
+    """O `asyncRewake`: saída 2 acorda a sessão com o stderr do gancho como lembrete."""
+    _, erro = p.communicate(bruto, timeout=180)
+    if p.returncode == 2:
+        filas.put(("lembrete", erro))
+
+
+def usa_ferramenta(nome, entrada):
+    """PreToolUse, a decisão, PostToolUse. Devolve (permitida, motivo)."""
+    tool_use_id = "toolu_" + uuid.uuid4().hex[:24]
+    campos = {"tool_name": nome, "tool_input": entrada, "tool_use_id": tool_use_id}
+    permitida, motivo = True, ""
+    for _, saida in dispara("PreToolUse", campos, ferramenta=nome):
+        try:
+            d = json.loads(saida).get("hookSpecificOutput", {})
+        except (ValueError, AttributeError):
+            continue
+        if d.get("permissionDecision") == "deny":
+            permitida, motivo = False, d.get("permissionDecisionReason", "")
+    if permitida:
+        dispara("PostToolUse", campos, ferramenta=nome)
+    return permitida, motivo
+
+
+# ------------------------------------------------------------------ o canal (Monitor)
+
+monitor = None
+
+
+def comando_do_monitor(texto):
+    m = re.search(r"command:\s*(\S+ listen --session \S+)", texto)
+    if not m:
+        m = re.search(r'command "(\S+ listen --session \S+)"', texto)
+    return m.group(1) if m else None
+
+
+def arma(comando):
+    global monitor
+    usa_ferramenta("ToolSearch", {"query": "select:Monitor"})
+    permitida, _ = usa_ferramenta(
+        "Monitor",
+        {"command": comando, "description": "mensagens do Telegram", "timeout_ms": 1800000},
+    )
+    if not permitida:
+        return
+    monitor = subprocess.Popen(shlex.split(comando), stdout=subprocess.PIPE, text=True)
+    threading.Thread(target=le_monitor, args=(monitor,), daemon=True).start()
+
+
+def le_monitor(p):
+    for linha in p.stdout:
+        linha = linha.strip()
+        if linha:
+            filas.put(("evento", linha))
+    filas.put(("monitor_acabou", None))
+
+
+def notificacao(evento):
+    # A forma com que o Claude Code entrega um evento do Monitor ao modelo.
+    return (
+        "<task-notification>\n<task-id>b" + uuid.uuid4().hex[:8] + "</task-id>\n"
+        '<summary>Monitor event: "mensagens do Telegram"</summary>\n'
+        "<event>" + evento + "</event>\n"
+        "If this event is something the user would act on now, send a PushNotification. "
+        "Routine or benign output doesn't need one.\n</task-notification>"
+    )
+
+
+def responde(texto):
+    if texto.startswith("rode "):
+        comando = texto[len("rode "):]
+        permitida, motivo = usa_ferramenta(
+            "Bash", {"command": comando, "description": "comando pedido no chat"}
+        )
+        if not permitida:
+            return "negado: " + motivo
+        saida = subprocess.run(comando, shell=True, capture_output=True, text=True).stdout
+        return "rodei: " + saida.strip()
+    return "eco: " + texto
+
+
+def turno(entrada, resposta):
+    grava("user", entrada)
+    dispara("UserPromptSubmit", {"prompt": entrada})
+    texto = resposta() if callable(resposta) else resposta
+    if texto:
+        fala(texto)
+    dispara("Stop", {"stop_hook_active": False, "last_assistant_message": texto or ""})
+
+
+# ------------------------------------------------------------------ vida e morte
+
+
+def encerra(sinal, _quadro):
+    registra("fim", sinal=sinal)
+    dispara("SessionEnd", {"reason": "other"})
+    if monitor and monitor.poll() is None:
+        monitor.terminate()
+    # Os ganchos async saem em thread; um instante para o SessionEnd sair do processo.
+    time.sleep(0.3)
+    os._exit(0)
+
+
+for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+    signal.signal(s, encerra)
+
+registra("partida", argv=sys.argv[1:], cwd=CWD, retomada=RETOMADA)
+dispara(
+    "SessionStart",
+    {"source": "resume" if RETOMADA else "startup", "model": MODELO},
+)
+
+
+def partida():
+    comando = comando_do_monitor(PROMPT)
+    if comando:
+        arma(comando)
+    return ""
+
+
+turno(PROMPT, partida)
+
+while True:
+    tipo, dado = filas.get()
+    if tipo == "evento":
+        try:
+            ev = json.loads(dado)
+        except ValueError:
+            continue
+        if ev.get("kind") != "message":
+            continue
+        turno(notificacao(dado), lambda: responde(ev.get("text", "")))
+    elif tipo == "lembrete":
+        comando = comando_do_monitor(dado)
+        if comando and (monitor is None or monitor.poll() is not None):
+            turno(dado, lambda: arma(comando) or "")
+    elif tipo == "monitor_acabou":
+        registra("monitor_acabou")
