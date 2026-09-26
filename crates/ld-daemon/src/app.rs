@@ -1383,6 +1383,11 @@ impl App {
             // turno sem mensagem nova, mas ele continua o que foi pedido: a resposta é de quem
             // pediu. O que fica de fora é o re-arme do canal e os prompts do daemon.
             let de_fundo = origem == Some(ld_core::transcript::Origem::TarefaDeFundo);
+            // A mensagem que esperou na fila (a sessão surda num restart do daemon, o monitor
+            // caído) entra pelo `listen` sem marcar pedido. A marca não pode ficar para a
+            // entrega da fila: com o monitor voltando por re-arme, ela entra no meio do turno do
+            // re-arme, e o fim daquele turno consumiria a marca da mensagem.
+            let do_canal = origem == Some(ld_core::transcript::Origem::MensagemDoCanal);
             let resposta = self.resposta_do_turno(r, &s);
             info!(
                 sessao = %r.session_id,
@@ -1391,7 +1396,7 @@ impl App {
                 tem_texto = resposta.is_some(),
                 "fim de turno"
             );
-            if (pedida || de_fundo)
+            if (pedida || de_fundo || do_canal)
                 && let Some(texto) = resposta
             {
                 // Texto e arquivo saem na ordem em que o agente os escreveu. Uma resposta que

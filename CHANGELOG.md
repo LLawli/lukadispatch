@@ -39,6 +39,12 @@ versão para as notas do GitHub Release, então escreva para quem vai decidir se
   `"nenhuma"`), e no setup `--memoria`. O config com `envelope = "nenhum"` e a flag `--envelope`
   continuam valendo; o setup, ao gravar, troca a chave velha pela nova.
 
+### Corrigido
+
+- A mensagem mandada enquanto o serviço reiniciava (um deploy, um `systemctl restart`) recebia o
+  aviso de que tinha sido guardada, e a resposta dela não chegava ao chat. Agora ela chega. O
+  mesmo valia para a mensagem que esperou o monitor de uma sessão voltar.
+
 ## [0.2.3] - 2026-09-25
 
 ### Mudado

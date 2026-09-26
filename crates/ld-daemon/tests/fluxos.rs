@@ -1126,6 +1126,29 @@ async fn turno_aberto_por_tarefa_de_fundo_da_sessao_vai_para_o_canal() {
     );
 }
 
+/// A mensagem que chega com a sessão surda (o daemon reiniciando, o monitor caído) espera na
+/// fila, e a fila entra pelo `listen` sem passar pela entrega ao vivo, que é quem marca o pedido.
+/// A resposta ainda é de quem escreveu: o turno foi aberto por uma mensagem do canal.
+#[tokio::test(flavor = "multi_thread")]
+async fn mensagem_guardada_sem_monitor_tem_a_resposta_no_canal() {
+    let c = cena().await;
+    c.trata(c.mensagem("10", "guarda isso", None)).await;
+    assert_eq!(c.app.store.drain(SESSAO).unwrap().len(), 1);
+
+    let transcript = transcript_aberto_por(
+        &c,
+        "<task-notification>\n<task-id>b11znyhr7</task-id>\n<summary>Monitor event: \"mensagens do Telegram\"</summary>\n<event>{\"kind\":\"message\",\"text\":\"guarda isso\",\"from\":\"Luka\",\"at\":1790251993}</event>\n</task-notification>",
+    );
+    let mut r = stop("guardei, e aqui está a resposta");
+    r.transcript_path = Some(transcript);
+    c.app.on_stop(&r).await.unwrap();
+    assert!(
+        textos(&c).iter().any(|t| t.starts_with("guardei, e aqui")),
+        "{:?}",
+        c.fe.chamadas()
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn turno_aberto_pelo_canal_expirando_continua_fora_do_canal() {
     let c = cena().await;
