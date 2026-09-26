@@ -1902,6 +1902,65 @@ async fn new_project_cria_o_repositorio_e_abre_a_sessao_nele() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn projeto_de_mesmo_nome_em_duas_pastas_pergunta_qual_ou_segue_a_pasta_dita() {
+    // Duas pastas de projetos, cada uma com um repositório `api`.
+    let c = cena_montada(Limites::default(), Arc::new(SemMemoria), |cfg, raiz| {
+        for pasta in ["Personal", "Trabalho"] {
+            let repo = raiz.join(pasta).join("api");
+            std::fs::create_dir_all(&repo).unwrap();
+            for args in [
+                &["init", "--quiet", "--initial-branch=master"][..],
+                &["config", "commit.gpgsign", "false"],
+                &["commit", "--quiet", "--allow-empty", "-m", "um"],
+            ] {
+                assert!(
+                    std::process::Command::new("git")
+                        .arg("-C")
+                        .arg(&repo)
+                        .args(args)
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+            }
+        }
+        cfg.projects = Vec::new();
+        cfg.scan.enabled = true;
+        cfg.scan.roots = vec![
+            raiz.join("Personal").to_string_lossy().into_owned(),
+            raiz.join("Trabalho").to_string_lossy().into_owned(),
+        ];
+    })
+    .await;
+
+    c.no_principal("/new api feat").await;
+    assert!(c.falou("Há mais de um"), "{:?}", c.fe.textos());
+    assert_eq!(*c.hospedeiro.lancadas.lock().unwrap(), 0);
+    c.toca("api · Trabalho").await;
+    let trabalho = c.raiz.path().join("Trabalho/api");
+    let w = c
+        .app
+        .store
+        .worktree_da_branch(&trabalho.to_string_lossy(), "feat")
+        .unwrap()
+        .expect("a escolha não levou a branch junto");
+    assert!(c.sessao_em(Path::new(&w.caminho)).is_some());
+
+    // Com a pasta na frente, não pergunta.
+    c.no_principal("/new personal api outra").await;
+    let personal = c.raiz.path().join("Personal/api");
+    assert!(
+        c.app
+            .store
+            .worktree_da_branch(&personal.to_string_lossy(), "outra")
+            .unwrap()
+            .is_some(),
+        "{:?}",
+        c.fe.textos()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn o_cli_abre_na_branch_sem_perguntar_e_recusa_a_principal() {
     let (c, repo) = cena_git().await;
     let p = Project {

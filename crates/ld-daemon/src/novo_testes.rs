@@ -104,3 +104,39 @@ fn pendencias_viram_frases() {
     });
     assert!(t.contains("não consegui conferir"), "{t}");
 }
+
+#[test]
+fn as_palavras_do_new_viram_projeto_e_branch() {
+    let projetos = vec![
+        p("api", "/h/Personal/api"),
+        p("meu site", "/h/Personal/meu site"),
+        p("api", "/h/Trabalho/api"),
+        p("notas", "/h/Personal/notas"),
+    ];
+    assert_eq!(
+        resolve(&projetos, &["notas"]),
+        Some(Alvo::Um(p("notas", "/h/Personal/notas"), None))
+    );
+    assert_eq!(
+        resolve(&projetos, &["notas", "feat/x"]),
+        Some(Alvo::Um(
+            p("notas", "/h/Personal/notas"),
+            Some("feat/x".into())
+        ))
+    );
+    // Nome com espaço: as palavras todas são o nome.
+    assert_eq!(
+        resolve(&projetos, &["meu", "site"]),
+        Some(Alvo::Um(p("meu site", "/h/Personal/meu site"), None))
+    );
+    // O mesmo nome em duas pastas vira pergunta, com a branch junto.
+    match resolve(&projetos, &["api", "feat"]) {
+        Some(Alvo::Varios(c, Some(b))) => {
+            assert_eq!(c.len(), 2);
+            assert_eq!(b, "feat");
+        }
+        outro => panic!("{outro:?}"),
+    }
+    assert_eq!(resolve(&projetos, &["nada"]), None);
+    assert_eq!(pasta_de(&p("api", "/h/Trabalho/api")), "Trabalho");
+}

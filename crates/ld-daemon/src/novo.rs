@@ -44,6 +44,8 @@ enum Escolha {
     Pastas,
     /// Um projeto: mostra as branches (ou abre, se não for repositório com commit).
     Projeto(Project),
+    /// Um projeto e a branch que o `/new` já disse: abre nela.
+    ProjetoEBranch { projeto: Project, branch: String },
     /// Uma branch que já existe: abre na worktree dela.
     Branch { projeto: Project, branch: String },
     /// Uma branch nova a partir de `base`: pergunta o nome.
@@ -189,7 +191,11 @@ pub async fn inicio(app: &Arc<App>) -> anyhow::Result<()> {
     }
 }
 
-/// `/new <palavras>`: projeto, projeto e branch, ou `new-project`. Modelo e esforço já saíram.
+/// `/new <palavras>`: `[pasta] <projeto> [branch]`, ou `new-project`. Modelo e esforço já saíram.
+///
+/// A pasta na frente restringe a busca a ela: o mesmo nome de projeto existe em mais de uma
+/// pasta (`~/Personal/api` e `~/Trabalho/api`). Sem ela, nome que casa em mais de uma pasta vira
+/// pergunta.
 pub async fn direto(
     app: &Arc<App>,
     palavras: &[&str],
@@ -199,32 +205,108 @@ pub async fn direto(
     if palavras == ["new-project"] {
         return mostra_pastas_para_criar(app).await;
     }
-    let projetos = app.cfg.projects_available();
     let com_flags = |mut p: Project| {
         p.model = model.clone().or(p.model);
         p.effort = effort.clone().or(p.effort);
         p
     };
-    if let Some(p) = crate::roteador::achar(&projetos, &palavras.join(" ")) {
-        return mostra_branches(app, com_flags(p)).await;
+    let na_pasta = match palavras {
+        [primeira, resto @ ..] if !resto.is_empty() => pastas(app)
+            .into_iter()
+            .find(|p| p.nome.eq_ignore_ascii_case(primeira))
+            .and_then(|pasta| resolve(&pasta.projetos, resto)),
+        _ => None,
+    };
+    let alvo = na_pasta.or_else(|| resolve(&app.cfg.projects_available(), palavras));
+    match alvo {
+        Some(Alvo::Um(p, None)) => mostra_branches(app, com_flags(p)).await,
+        Some(Alvo::Um(p, Some(branch))) => abre_branch_pelo_nome(app, com_flags(p), &branch).await,
+        Some(Alvo::Varios(candidatos, branch)) => {
+            let nome = candidatos[0].name.clone();
+            let botoes = candidatos
+                .into_iter()
+                .map(|p| {
+                    let rotulo = format!("{} · {}", p.name, pasta_de(&p));
+                    let escolha = match &branch {
+                        Some(b) => Escolha::ProjetoEBranch {
+                            projeto: com_flags(p),
+                            branch: b.clone(),
+                        },
+                        None => Escolha::Projeto(com_flags(p)),
+                    };
+                    Botao::new(rotulo, app.novo.guarda(escolha))
+                })
+                .collect();
+            teclado(
+                app,
+                &format!(
+                    "Há mais de um <b>{}</b>. Qual?\n<i>da próxima vez: <code>/new &lt;pasta&gt; {}</code></i>",
+                    escapa(&nome),
+                    escapa(&palavras.join(" "))
+                ),
+                botoes,
+            )
+            .await
+        }
+        None => {
+            avisa(
+                app,
+                None,
+                &format!(
+                    "Não achei o projeto <b>{}</b>.",
+                    escapa(&palavras.join(" "))
+                ),
+            )
+            .await;
+            Ok(())
+        }
     }
-    // A última palavra é a branch: nome de branch não tem espaço, e nome de projeto pode ter.
+}
+
+/// O que as palavras de um `/new` apontam.
+#[derive(Debug, Clone, PartialEq)]
+enum Alvo {
+    /// Um projeto, e a branch se ela veio.
+    Um(Project, Option<String>),
+    /// Mais de um projeto com o mesmo nome, em pastas diferentes.
+    Varios(Vec<Project>, Option<String>),
+}
+
+/// O projeto (e a branch) que as palavras dizem, entre estes projetos. Primeiro as palavras todas
+/// como nome; depois a última como branch, porque nome de branch não tem espaço e nome de
+/// projeto pode ter. Nome exato ganha de pedaço de nome.
+fn resolve(projetos: &[Project], palavras: &[&str]) -> Option<Alvo> {
+    let mut tentativas = vec![(palavras.join(" "), None)];
     if let [projeto @ .., branch] = palavras
         && !projeto.is_empty()
-        && let Some(p) = crate::roteador::achar(&projetos, &projeto.join(" "))
     {
-        return abre_branch_pelo_nome(app, com_flags(p), branch).await;
+        tentativas.push((projeto.join(" "), Some(branch.to_string())));
     }
-    avisa(
-        app,
-        None,
-        &format!(
-            "Não achei o projeto <b>{}</b>.",
-            escapa(&palavras.join(" "))
-        ),
-    )
-    .await;
-    Ok(())
+    for (nome, branch) in tentativas {
+        let exatos: Vec<Project> = projetos
+            .iter()
+            .filter(|p| p.name.eq_ignore_ascii_case(&nome) || p.path == nome)
+            .cloned()
+            .collect();
+        match exatos.len() {
+            0 => {}
+            1 => return exatos.into_iter().next().map(|p| Alvo::Um(p, branch)),
+            _ => return Some(Alvo::Varios(exatos, branch)),
+        }
+        if let Some(p) = crate::roteador::achar(projetos, &nome) {
+            return Some(Alvo::Um(p, branch));
+        }
+    }
+    None
+}
+
+/// O nome da pasta onde o projeto mora, para distinguir dois de mesmo nome.
+fn pasta_de(p: &Project) -> String {
+    Path::new(&p.path)
+        .parent()
+        .and_then(|d| d.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| p.path.clone())
 }
 
 /// Um toque num botão `e:<n>`.
@@ -250,6 +332,9 @@ pub async fn toque(
         Escolha::Pastas => mostra_pastas(app).await,
         Escolha::Pasta(p) => mostra_projetos(app, p).await,
         Escolha::Projeto(p) => mostra_branches(app, p).await,
+        Escolha::ProjetoEBranch { projeto, branch } => {
+            abre_branch_pelo_nome(app, projeto, &branch).await
+        }
         Escolha::Branch { projeto, branch } => abre_branch(app, projeto, &branch, None).await,
         Escolha::NovaBranch { projeto, base } => pergunta_nome_da_branch(app, projeto, base).await,
         Escolha::GeraNome => {

@@ -651,7 +651,7 @@ async fn no_principal(app: &Arc<App>, texto: &str) -> anyhow::Result<()> {
                 None,
                 "<b>lukadispatch</b>\n\n\
                  /new: abre uma sessão (pasta, projeto, branch)\n\
-                 /new &lt;projeto&gt; [branch] [opus|sonnet|fable] [high|max]: abre direto; branch que não existe é criada\n\
+                 /new [pasta] &lt;projeto&gt; [branch] [opus|sonnet|fable] [high|max]: abre direto; branch que não existe é criada, e a pasta desfaz projeto de mesmo nome\n\
                  /new new-project: cria um projeto e abre a sessão nele\n\
                  /ls: lista as sessões vivas\n\
                  /kill &lt;id&gt;: fecha uma sessão\n\n\
