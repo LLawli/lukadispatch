@@ -31,9 +31,12 @@ pasta de novo e guarda a conversa pelo cwd novo.
   dela, digitado ou gerado (`ld/<data>-<hora>`). Branch em checkout noutro lugar vira base de
   uma nova do mesmo jeito.
 - **Uma sessão por worktree.** Escolher a branch de uma sessão aberta aponta o canal dela.
-- **`/new <projeto> <branch>`** abre direto; branch que não existe nasce da principal.
-  **`/new new-project`** cria o projeto numa das pastas, com `git init` e um commit vazio, e abre
-  a sessão na pasta dele (um projeto recém-nascido não tem checkout de ninguém a proteger).
+- **`/new [pasta] <projeto> <branch>`** abre direto; branch que não existe nasce da principal. A
+  pasta na frente escolhe entre projetos de mesmo nome em pastas diferentes; sem ela, o bot
+  pergunta qual (pedido do Luka no teste pelo Telegram).
+  **`/new new-project`** cria o projeto numa das pastas, com `git init` e um commit vazio, e
+  pergunta o nome da primeira branch, como a branch principal de qualquer projeto. (A primeira
+  versão abria a sessão na master do projeto novo; no teste, o Luka esperava uma branch.)
 - **O commit inicial vai sem assinatura.** A chave de quem assina pode pedir um toque físico, e
   quem pediu está no celular. É o único commit que o bot faz.
 - **Projeto sem git, ou sem commit, abre na pasta**, sem worktree, como antes.
