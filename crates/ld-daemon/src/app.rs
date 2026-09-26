@@ -146,6 +146,10 @@ pub struct App {
     /// que caiu sem soltá-la, antes de subir com uma memória só dela. Um teste troca com
     /// [`App::com_espera_da_memoria`].
     espera_da_memoria: std::time::Duration,
+    /// As sessões que estão sendo relançadas agora. Um segundo relançamento da mesma sessão
+    /// (dois `/model` seguidos) derrubaria o painel que o primeiro acabou de subir, e os dois
+    /// disputariam a mesma conversa e a mesma memória.
+    relancando_agora: Arc<Mutex<std::collections::HashSet<String>>>,
     /// A hora (do hook) do último fim de turno de cada sessão. Evento de ferramenta mais velho
     /// que ele é resto do turno que já acabou, que chegou atrasado porque o hook dele é
     /// assíncrono, e não pode tirar a sessão de "ocioso".
@@ -200,6 +204,7 @@ impl App {
             inicios: Arc::new(Mutex::new(HashMap::new())),
             partidas_em_curso: Default::default(),
             fins_de_turno: Mutex::new(HashMap::new()),
+            relancando_agora: Default::default(),
             entregues: Mutex::new(HashMap::new()),
         }
     }
@@ -729,6 +734,11 @@ impl App {
         effort: Option<&str>,
     ) -> Result<String> {
         let session_id = s.session_id.as_str();
+        let Some(_vez) = Relancando::comeca(&self.relancando_agora, session_id) else {
+            bail!(
+                "a sessão já está sendo reiniciada; espere o aviso de que ela voltou e mande de novo"
+            );
+        };
         let projeto = Project {
             name: s.project.clone(),
             path: s.cwd.clone(),
@@ -1878,6 +1888,37 @@ impl App {
 }
 
 /// O canal opaco guardado no banco, como o tipo que o resto do domínio entende.
+/// A vez de relançar uma sessão: existe uma por sessão, e sai ao terminar, dê certo ou não.
+struct Relancando {
+    em_curso: Arc<Mutex<std::collections::HashSet<String>>>,
+    session_id: String,
+}
+
+impl Relancando {
+    fn comeca(
+        em_curso: &Arc<Mutex<std::collections::HashSet<String>>>,
+        session_id: &str,
+    ) -> Option<Self> {
+        let nova = em_curso
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(session_id.to_string());
+        nova.then(|| Self {
+            em_curso: em_curso.clone(),
+            session_id: session_id.to_string(),
+        })
+    }
+}
+
+impl Drop for Relancando {
+    fn drop(&mut self) {
+        self.em_curso
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.session_id);
+    }
+}
+
 /// Conta uma partida em curso enquanto vive, e desconta ao sair, dê ela certo ou não.
 struct EmCurso(Arc<std::sync::atomic::AtomicUsize>);
 

@@ -2101,3 +2101,24 @@ async fn evento_de_ferramenta_atrasado_nao_prende_a_sessao_trabalhando() {
     c.app.on_event(&ferramenta(true, Some(u64::MAX))).unwrap();
     assert_eq!(status(), "ferramenta");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dois_model_seguidos_nao_relancam_a_mesma_sessao_ao_mesmo_tempo() {
+    let c = cena().await;
+    // Visto no teste pelo Telegram: o segundo /model derrubava o painel que o primeiro acabou de
+    // subir, e os dois disputavam a mesma conversa e a mesma memória.
+    let (a, b) = tokio::join!(
+        c.app.relaunch(SESSAO, Some("opus"), None),
+        c.app.relaunch(SESSAO, Some("sonnet"), None)
+    );
+    let recusado = match (&a, &b) {
+        (Ok(()), Err(e)) | (Err(e), Ok(())) => format!("{e:#}"),
+        outro => panic!("um relança e o outro espera: {outro:?}"),
+    };
+    assert!(recusado.contains("já está sendo reiniciada"), "{recusado}");
+    assert_eq!(*c.hospedeiro.lancadas.lock().unwrap(), 1);
+
+    // Terminado o primeiro, o próximo pedido passa.
+    c.app.relaunch(SESSAO, Some("sonnet"), None).await.unwrap();
+    assert_eq!(*c.hospedeiro.lancadas.lock().unwrap(), 2);
+}
