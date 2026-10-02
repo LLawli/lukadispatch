@@ -35,6 +35,7 @@ uma peça sem reescrever o resto.
 | [0016](decisoes/0016-readocao-depois-do-restart.md) | O daemon relança no mesmo tópico a sessão que caiu com o servidor do herdr |
 | [0017](decisoes/0017-worktree-por-sessao.md) | Cada sessão do bot roda na git worktree da branch dela, fora do repositório |
 | [0018](decisoes/0018-memoria-do-projeto-na-worktree.md) | A sessão numa worktree grava na memória do projeto, e o registro dela é da worktree |
+| [0019](decisoes/0019-jj-como-porta-de-vcs.md) | O controle de versão vira porta, e o jj entra como opção ao lado do git |
 
 ## Como escrever uma decisão nova
 
