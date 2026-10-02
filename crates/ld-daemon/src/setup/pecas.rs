@@ -1,7 +1,7 @@
 //! O passo de setup de cada implementação de cada porta.
 //!
 //! Uma implementação nova (codex, whatsapp, herdr, ai-jail) ganha o passo dela aqui e um braço
-//! no registro da porta ([`frontend`], [`agente`], [`hospedeiro`], [`memoria`]), do mesmo
+//! no registro da porta ([`frontend`], [`agente`], [`hospedeiro`], [`memoria`], [`vcs`]), do mesmo
 //! jeito que se registra no `da_config` da porta. O resto do setup não muda.
 
 use anyhow::{Result, bail};
@@ -66,6 +66,14 @@ pub fn memoria(nome: &str) -> Result<Box<dyn Peca>> {
         "ai-memory" => Ok(Box::new(AiMemory)),
         "nenhuma" | "nenhum" | "none" => Ok(Box::new(Nenhuma)),
         outro => desconhecido("--memoria", outro, crate::agente::MEMORIAS),
+    }
+}
+
+pub fn vcs(nome: &str) -> Result<Box<dyn Peca>> {
+    match nome {
+        "git" => Ok(Box::new(Git)),
+        "jj" | "jujutsu" => Ok(Box::new(Jj)),
+        outro => desconhecido("--vcs", outro, crate::vcs::VCS),
     }
 }
 
@@ -296,4 +304,79 @@ impl Peca for Nenhuma {
 fn poe_memoria(r: &mut Rascunho, memoria: &str) {
     r.tira(Some("agente"), "envelope");
     r.poe(Some("agente"), "memoria", memoria);
+}
+
+struct Git;
+
+#[async_trait(?Send)]
+impl Peca for Git {
+    fn nome(&self) -> &'static str {
+        "git"
+    }
+
+    async fn configura(&self, tela: &mut Tela<'_>, r: &mut Rascunho) -> Result<()> {
+        if (r.tem_programa)("git") {
+            tela.diz("git: ok.");
+        } else {
+            tela.diz(
+                "Aviso: o git não está no PATH, e cada sessão roda numa worktree dele. Sem ele, \
+                 a sessão abre na pasta do projeto.",
+            );
+        }
+        r.poe(None, "vcs", "git");
+        Ok(())
+    }
+}
+
+/// A versão do jj com que o adaptador foi medido (decisão 0019). A CLI do jj muda bastante entre
+/// versões, e o template `self.root()` da lista de workspaces é recente.
+const JJ_MEDIDO: (u32, u32, u32) = (0, 45, 0);
+
+struct Jj;
+
+#[async_trait(?Send)]
+impl Peca for Jj {
+    fn nome(&self) -> &'static str {
+        "jj"
+    }
+
+    async fn configura(&self, tela: &mut Tela<'_>, r: &mut Rascunho) -> Result<()> {
+        if !(r.tem_programa)("jj") {
+            tela.diz(
+                "Aviso: o jj não está no PATH, e cada sessão roda num workspace dele. Instale-o \
+                 (https://jj-vcs.github.io/jj), ou use o git (setup --vcs git).",
+            );
+        } else {
+            match versao_do_jj() {
+                Some(v) if v < JJ_MEDIDO => tela.diz(&format!(
+                    "Aviso: este jj é o {}.{}.{}, e o lukadispatch foi medido com o {}.{}. Se o \
+                     /new falhar, atualize o jj.",
+                    v.0, v.1, v.2, JJ_MEDIDO.0, JJ_MEDIDO.1
+                )),
+                _ => tela.diz("jj: ok."),
+            }
+        }
+        tela.diz(
+            "Cada sessão roda num workspace do jj. Repositório que só tem git ganha o jj colocado \
+             por cima no primeiro /new.",
+        );
+        r.poe(None, "vcs", "jj");
+        Ok(())
+    }
+}
+
+/// `jj 0.45.1` vira `(0, 45, 1)`. O binário do release traz o commit colado
+/// (`jj 0.45.1-7c41cdeb...`), e o das distros, não.
+pub fn le_versao_do_jj(texto: &str) -> Option<(u32, u32, u32)> {
+    let versao = texto.trim().strip_prefix("jj ")?;
+    le_versao(versao.split('-').next()?)
+}
+
+fn versao_do_jj() -> Option<(u32, u32, u32)> {
+    let saida = std::process::Command::new("jj")
+        .arg("--version")
+        .env("JJ_AUTO_INIT", "0")
+        .output()
+        .ok()?;
+    le_versao_do_jj(&String::from_utf8_lossy(&saida.stdout))
 }

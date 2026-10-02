@@ -42,7 +42,10 @@ fn sem_seletor_sao_os_padroes_que_existem() {
         .iter()
         .map(|p| p.nome())
         .collect();
-    assert_eq!(nomes, ["tmux", "claude-code", "ai-memory", "telegram"]);
+    assert_eq!(
+        nomes,
+        ["tmux", "claude-code", "ai-memory", "git", "telegram"]
+    );
 }
 
 fn so_tmux(p: &str) -> bool {
@@ -105,7 +108,7 @@ fn seletores_aceitam_espaco_igual_e_apelido() {
         .iter()
         .map(|p| p.nome())
         .collect();
-    assert_eq!(nomes, ["tmux", "claude-code", "nenhuma", "telegram"]);
+    assert_eq!(nomes, ["tmux", "claude-code", "nenhuma", "git", "telegram"]);
 }
 
 #[test]
@@ -126,6 +129,7 @@ fn implementacao_que_nao_existe_falha_dizendo_as_que_existem() {
         ("--agent codex", "claude-code"),
         ("--session zellij", "tmux, herdr"),
         ("--memoria ai-jail", "ai-memory, nenhuma"),
+        ("--vcs hg", "git, jj"),
     ] {
         let e = pecas(&selecao(arg), None, &so_tmux).err().expect(arg);
         let msg = format!("{e:#}");
@@ -150,14 +154,53 @@ fn sem_flag_vale_o_que_esta_no_config() {
     };
     assert_eq!(
         nomes(&selecao("")),
-        ["tmux", "claude-code", "nenhuma", "telegram"]
+        ["tmux", "claude-code", "nenhuma", "git", "telegram"]
     );
     assert_eq!(
         nomes(&selecao("--memoria ai-memory")),
-        ["tmux", "claude-code", "ai-memory", "telegram"],
+        ["tmux", "claude-code", "ai-memory", "git", "telegram"],
         "a flag manda"
     );
     assert!(selecao("--refazer").refazer);
+}
+
+#[test]
+fn vcs_se_escolhe_por_flag_e_a_versao_do_jj_se_le() {
+    let nomes: Vec<&str> = pecas(&selecao("--vcs jj"), None, &so_tmux)
+        .unwrap()
+        .iter()
+        .map(|p| p.nome())
+        .collect();
+    assert_eq!(
+        nomes,
+        ["tmux", "claude-code", "ai-memory", "jj", "telegram"]
+    );
+    let cfg: Config = toml::from_str("vcs = \"jj\"\n").unwrap();
+    assert_eq!(
+        pecas(&selecao(""), Some(&cfg), &so_tmux).unwrap()[3].nome(),
+        "jj"
+    );
+    assert_eq!(pecas::le_versao_do_jj("jj 0.45.1\n"), Some((0, 45, 1)));
+    assert_eq!(
+        pecas::le_versao_do_jj("jj 0.45.1-7c41cdeb16b6b321c64e789a966b6adf723816a5\n"),
+        Some((0, 45, 1))
+    );
+    assert_eq!(pecas::le_versao_do_jj("0.45.1"), None);
+}
+
+#[tokio::test]
+async fn o_passo_do_jj_grava_a_escolha_e_avisa_sem_o_programa() {
+    let mut r = Rascunho::de(None, None).unwrap();
+    r.tem_programa = Box::new(|_| false);
+    let peca = pecas::vcs("jj").unwrap();
+    let (res, tela) = com_tela("", async |t| peca.configura(t, &mut r).await).await;
+    res.unwrap();
+    assert!(tela.contains("jj não está no PATH"), "{tela}");
+    assert!(
+        r.config_texto().contains("vcs = \"jj\""),
+        "{}",
+        r.config_texto()
+    );
 }
 
 #[test]
@@ -597,6 +640,7 @@ async fn a_conversa_inteira_termina_num_config_que_o_daemon_aceita() {
     crate::sessions::da_config(&cfg).unwrap();
     crate::transcritor::da_config(&cfg.transcricao).unwrap();
     crate::divisor::Divisores::da_config(&cfg.arquivos).unwrap();
+    crate::vcs::da_config(&cfg).unwrap();
 }
 
 /// As peças de verdade do que o config pede, com o Telegram roteirizado no lugar do teloxide.

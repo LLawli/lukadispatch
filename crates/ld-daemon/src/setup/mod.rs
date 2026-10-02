@@ -48,6 +48,7 @@ lukadispatch setup: configura o lukadispatch nesta máquina, conversando.
   --agent <nome>      o agente de código das sessões  (padrão: claude-code)
   --session <nome>    onde cada sessão roda           (padrão: tmux; herdr sem tmux)
   --memoria <nome>    a memória de longo prazo        (padrão: ai-memory; ou nenhuma)
+  --vcs <nome>        a cópia de cada sessão          (padrão: git, numa worktree; ou jj)
   --refazer           pergunta de novo o que já está resolvido (trocar de bot, grupo, motor)
 
 Rodar de novo é seguro: o que está resolvido só é conferido, e só o que falta é perguntado.
@@ -60,6 +61,7 @@ pub struct Selecao {
     pub agente: Option<String>,
     pub hospedeiro: Option<String>,
     pub memoria: Option<String>,
+    pub vcs: Option<String>,
     /// Pergunta de novo o que já está resolvido.
     pub refazer: bool,
 }
@@ -98,6 +100,7 @@ pub fn le_argumentos(args: &[String]) -> Result<Pedido> {
             "--session" | "--sessao" => &mut sel.hospedeiro,
             // `--envelope` é o nome de antes da troca, e pode estar em script de alguém.
             "--memoria" | "--envelope" => &mut sel.memoria,
+            "--vcs" => &mut sel.vcs,
             outro => bail!("opção desconhecida: {outro}\n\n{AJUDA}"),
         };
         *campo = Some(valor);
@@ -127,6 +130,7 @@ pub fn pecas(
         pecas::hospedeiro(&nome(&sel.hospedeiro, &base.hospedeiro))?,
         pecas::agente(&nome(&sel.agente, &base.agente.tipo))?,
         pecas::memoria(&nome(&sel.memoria, &base.agente.memoria))?,
+        pecas::vcs(&nome(&sel.vcs, &base.vcs))?,
         pecas::frontend(&nome(&sel.frontend, &base.frontend))?,
     ])
 }
