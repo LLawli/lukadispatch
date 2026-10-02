@@ -21,7 +21,7 @@ use ld_daemon::app::{App, Portas};
 use ld_daemon::divisor::Divisores;
 use ld_daemon::frontend::Frontend;
 use ld_daemon::frontend::nulo::Nulo;
-use ld_daemon::{roteador, sessions, setup, socket, transcritor};
+use ld_daemon::{roteador, sessions, setup, socket, transcritor, vcs};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -71,12 +71,14 @@ async fn main() -> Result<()> {
 
     let divisores = Divisores::da_config(&cfg.arquivos)?;
     let hospedeiro = sessions::da_config(&cfg)?;
+    let vcs = vcs::da_config(&cfg)?;
     info!(divisores = ?divisores.nomes(), "divisores configurados");
 
     info!(
         agente = pecas.agente.nome(),
         memoria = pecas.memoria.nome(),
         hospedeiro = %cfg.hospedeiro,
+        vcs = vcs.nome(),
         "agente configurado"
     );
 
@@ -90,6 +92,7 @@ async fn main() -> Result<()> {
             transcritor,
             divisores,
             hospedeiro,
+            vcs,
         },
     ));
 

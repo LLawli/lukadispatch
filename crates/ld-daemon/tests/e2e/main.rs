@@ -3,14 +3,14 @@
 //! Tudo roda de verdade menos as duas pontas que não existem no CI: o Telegram (um Bot API de
 //! mentira no próprio teste, [`bot_api`]) e o Claude Code (um dublê que dispara os ganchos do
 //! settings e lê o canal pelo `listen`, `tests/e2e/claude`). No meio estão o binário do daemon, o
-//! adaptador do teloxide, o socket, o CLI dos ganchos, o git e o hospedeiro, que é o tmux ou o
-//! herdr. Cada cenário roda nos dois.
+//! adaptador do teloxide, o socket, o CLI dos ganchos, o git (ou o jj) e o hospedeiro, que é o
+//! tmux ou o herdr. Cada cenário roda nos dois.
 //!
 //! O que os testes de fluxo (`tests/fluxos.rs`) não pegam e este pega: a tradução do Telegram de
 //! ponta a ponta, o settings de ganchos que o daemon gera, o ambiente que chega à sessão, o
 //! hospedeiro de verdade e o restart do daemon.
 //!
-//! Sem tmux, herdr ou python3 na máquina, o cenário é pulado, a não ser com
+//! Sem tmux, herdr, python3 ou jj (no cenário dele) na máquina, o cenário é pulado, a não ser com
 //! `LUKADISPATCH_E2E_EXIGE` no ambiente, que o CI liga.
 
 // O daemon sem o frontend do Telegram não tem com quem o Bot API de mentira falar.
@@ -39,6 +39,7 @@ macro_rules! nos_dois_hospedeiros {
 
 nos_dois_hospedeiros!(
     conversa_numa_worktree_e_kill_apaga_tudo,
+    com_jj_a_sessao_roda_num_workspace_e_kill_abandona,
     trocar_o_modo_relanca_e_a_permissao_vem_pelo_card,
     o_daemon_reinicia_e_a_sessao_continua,
 );
@@ -82,6 +83,34 @@ async fn conversa_numa_worktree_e_kill_apaga_tudo(hospedeiro: &'static str) {
     c.ate("a worktree sumir", || (!wt.exists()).then_some(()))
         .await;
     assert!(!c.existe_branch("feat"), "a branch ficou");
+}
+
+async fn com_jj_a_sessao_roda_num_workspace_e_kill_abandona(hospedeiro: &'static str) {
+    let Some(c) = Cena::sobe_com(hospedeiro, "jj").await else {
+        return;
+    };
+    let topico = abre_e_conversa(&c, "feat").await;
+
+    // O daemon colocou o jj sobre o repositório, que só tinha git, e a sessão roda num workspace:
+    // `.jj` sem `.git`.
+    assert!(c.repo().join(".jj").is_dir(), "o jj não foi colocado");
+    let ws = c.worktree("feat");
+    assert!(ws.join(".jj").is_dir() && !ws.join(".git").exists());
+    let partidas = c.partidas();
+    assert_eq!(partidas[0]["cwd"], ws.to_string_lossy().as_ref());
+    assert!(c.workspaces_jj().contains(&"feat".to_string()));
+
+    // Três saídas no jj; abandonar sem nada a perder não pergunta de novo.
+    c.api.no_topico(topico, "/kill");
+    c.toca("abandonar os commits").await;
+    c.espera_topico_apagado(topico).await;
+    c.espera_fim(partidas[0]["pid"].as_u64().unwrap()).await;
+    c.ate("o workspace sumir", || (!ws.exists()).then_some(()))
+        .await;
+    assert!(
+        !c.workspaces_jj().contains(&"feat".to_string()),
+        "o jj ainda tem o workspace"
+    );
 }
 
 async fn trocar_o_modo_relanca_e_a_permissao_vem_pelo_card(hospedeiro: &'static str) {

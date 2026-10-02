@@ -8,6 +8,7 @@ fn wt(caminho: &str, branch: &str) -> Worktree {
         projeto: "api".into(),
         raiz: "/home/eu/Personal/api".into(),
         branch: branch.into(),
+        vcs: "git".into(),
         criada_em: 0,
         usada_em: 0,
     }

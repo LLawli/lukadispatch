@@ -299,6 +299,7 @@ mod tests {
                 projeto: "api".into(),
                 raiz: "/p/api".into(),
                 branch: "feat".into(),
+                vcs: "git".into(),
                 criada_em: 0,
                 usada_em: 0,
             })

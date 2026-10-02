@@ -61,8 +61,12 @@ fn pedido<'a>(p: &'a Project, chat: &'a DescricaoDoChat) -> PedidoDePartida<'a> 
         wrap_mcp: false,
         chat,
         instrucoes: None,
+        mcp_extra: &SEM_MCP,
     }
 }
+
+static SEM_MCP: std::sync::LazyLock<serde_json::Map<String, serde_json::Value>> =
+    std::sync::LazyLock::new(serde_json::Map::new);
 
 /// O valor que vem logo depois de uma flag na linha de comando.
 fn depois_de<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
@@ -452,6 +456,43 @@ fn servidor_mcp_de_comando_passa_pelo_proxy() {
     std::fs::write(raiz.path().join("claude.json"), "{}").unwrap();
     let inv = cc.invocacao(&ped, ID, &dir).unwrap();
     assert!(!inv.argv.iter().any(|a| a == "--mcp-config"));
+}
+
+#[test]
+fn servidor_extra_da_copia_entra_com_e_sem_o_proxy() {
+    let raiz = tempfile::tempdir().unwrap();
+    std::fs::write(
+        raiz.path().join("claude.json"),
+        r#"{"mcpServers": {"whats": {"command": "wamux", "args": ["mcp"]}}}"#,
+    )
+    .unwrap();
+    let cc = claude(raiz.path());
+    let (p, chat) = (projeto(), telegram());
+    let extra: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(r#"{"jj": {"command": "jj-mcp"}}"#).unwrap();
+    let mut ped = pedido(&p, &chat);
+    ped.mcp_extra = &extra;
+    let dir = raiz.path().join("sessao");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Com o proxy, junto com os do projeto, embrulhado.
+    ped.wrap_mcp = true;
+    let inv = cc.invocacao(&ped, ID, &dir).unwrap();
+    let conteudo = std::fs::read_to_string(depois_de(&inv.argv, "--mcp-config").unwrap()).unwrap();
+    let doc: serde_json::Value = serde_json::from_str(&conteudo).unwrap();
+    assert!(doc["mcpServers"]["whats"].is_object(), "{conteudo}");
+    assert!(conteudo.contains("jj-mcp"), "{conteudo}");
+    assert!(conteudo.contains("/opt/ld/lukadispatch-mcp"), "{conteudo}");
+
+    // Sem o proxy, só o extra num arquivo, e sem strict: os do projeto o Claude Code já carrega.
+    ped.wrap_mcp = false;
+    let inv = cc.invocacao(&ped, ID, &dir).unwrap();
+    let conteudo = std::fs::read_to_string(depois_de(&inv.argv, "--mcp-config").unwrap()).unwrap();
+    assert!(
+        conteudo.contains("jj-mcp") && !conteudo.contains("wamux"),
+        "{conteudo}"
+    );
+    assert!(!inv.argv.iter().any(|a| a == "--strict-mcp-config"));
 }
 
 // ------------------------------------------------------------------ Claude Code: máquina

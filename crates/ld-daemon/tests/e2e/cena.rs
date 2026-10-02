@@ -22,13 +22,15 @@ use crate::bot_api::{BotApi, CHAT, LUKA, Mensagem, TOKEN};
 /// sessão leva os 3 s da espera ao subir mais o que o hospedeiro demorar.
 pub const PRAZO: Duration = Duration::from_secs(45);
 
-/// Com esta variável no ambiente, faltar tmux, herdr ou python3 é falha, e não teste pulado. É o
-/// que o CI liga: lá, pular em silêncio seria um verde que não testou nada.
+/// Com esta variável no ambiente, faltar tmux, herdr, python3 ou jj é falha, e não teste pulado.
+/// É o que o CI liga: lá, pular em silêncio seria um verde que não testou nada.
 const EXIGE: &str = "LUKADISPATCH_E2E_EXIGE";
 
 pub struct Cena {
     pub api: BotApi,
     pub hospedeiro: &'static str,
+    /// O controle de versão do config: `"git"` ou `"jj"`.
+    pub vcs: &'static str,
     dir: tempfile::TempDir,
     daemon: Option<Child>,
 }
@@ -73,8 +75,8 @@ fn git(repo: &Path, args: &[&str]) {
     assert!(ok, "git {args:?}");
 }
 
-/// A máquina de CI não tem identidade no git, e a sua não pode entrar (assinatura de commit com
-/// chave de hardware, por exemplo).
+/// A máquina de CI não tem identidade no git nem no jj, e a sua não pode entrar (assinatura de
+/// commit com chave de hardware, por exemplo).
 fn identidade_git() -> Vec<(&'static str, &'static str)> {
     vec![
         ("GIT_AUTHOR_NAME", "Teste"),
@@ -82,6 +84,8 @@ fn identidade_git() -> Vec<(&'static str, &'static str)> {
         ("GIT_COMMITTER_NAME", "Teste"),
         ("GIT_COMMITTER_EMAIL", "teste@exemplo"),
         ("GIT_CONFIG_NOSYSTEM", "1"),
+        ("JJ_USER", "Teste"),
+        ("JJ_EMAIL", "teste@exemplo"),
     ]
 }
 
@@ -89,8 +93,15 @@ impl Cena {
     /// Sobe o daemon com o hospedeiro pedido e um repositório `repo` nas raízes de varredura.
     /// `None` quando falta programa na máquina e o CI não exigiu (o teste é pulado).
     pub async fn sobe(hospedeiro: &'static str) -> Option<Self> {
+        Self::sobe_com(hospedeiro, "git").await
+    }
+
+    /// Como [`Cena::sobe`], com o controle de versão pedido. O `repo` nasce só com git nos dois
+    /// casos: com o jj, quem o coloca por cima é o daemon, no primeiro `/new`.
+    pub async fn sobe_com(hospedeiro: &'static str, vcs: &'static str) -> Option<Self> {
         let faltam: Vec<&str> = [
             ("git", "--version"),
+            (vcs, "--version"),
             ("python3", "--version"),
             (
                 hospedeiro,
@@ -141,6 +152,7 @@ impl Cena {
             format!(
                 r#"frontend = "telegram"
 hospedeiro = "{hospedeiro}"
+vcs = "{vcs}"
 default_permission_mode = "auto"
 trust_projects = true
 wrap_mcp = false
@@ -170,6 +182,7 @@ ativa = false
         let mut c = Self {
             api: BotApi::sobe().await,
             hospedeiro,
+            vcs,
             dir,
             daemon: None,
         };
@@ -288,8 +301,9 @@ ativa = false
             }
             if std::time::Instant::now() > fim {
                 panic!(
-                    "[{}] esperei {o_que} por {PRAZO:?}\n--- chat\n{}--- daemon\n{}",
+                    "[{} · {}] esperei {o_que} por {PRAZO:?}\n--- chat\n{}--- daemon\n{}",
                     self.hospedeiro,
+                    self.vcs,
                     self.api.le(|c| c.conversa()),
                     self.log()
                 );
@@ -390,6 +404,28 @@ ativa = false
         self.d()
             .join("d/lukadispatch/worktrees/projetos/repo")
             .join(branch)
+    }
+
+    /// Os workspaces do jj no `repo`.
+    pub fn workspaces_jj(&self) -> Vec<String> {
+        let saida = self
+            .comando("jj")
+            .arg("-R")
+            .arg(self.repo())
+            .args([
+                "--ignore-working-copy",
+                "workspace",
+                "list",
+                "-T",
+                "name ++ \"\\n\"",
+            ])
+            .output()
+            .unwrap();
+        assert!(saida.status.success(), "{saida:?}");
+        String::from_utf8_lossy(&saida.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
     }
 
     pub fn existe_branch(&self, nome: &str) -> bool {

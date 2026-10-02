@@ -406,6 +406,7 @@ async fn cena_montada(
             transcritor: Some(Arc::new(TranscritorFalso("roda os testes"))),
             divisores: Divisores::new(vec![Arc::new(DivisorFalso)]),
             hospedeiro: hospedeiro.clone(),
+            vcs: Arc::new(ld_daemon::vcs::git::Git),
         },
     )
     .com_raiz_arquivos(raiz.path().join("arquivos"))
@@ -759,6 +760,7 @@ async fn o_frontend_nulo_sustenta_o_daemon_inteiro() {
             transcritor: None,
             divisores: Divisores::new(vec![]),
             hospedeiro: Arc::new(HospedeiroFalso::default()),
+            vcs: Arc::new(ld_daemon::vcs::git::Git),
         },
     )
     .com_raiz_sessoes(raiz_nulo.path().to_path_buf());
@@ -1389,6 +1391,7 @@ async fn o_claude_code_sobe_dentro_do_ai_memory() {
             transcritor: None,
             divisores: Divisores::new(vec![]),
             hospedeiro: hospedeiro.clone(),
+            vcs: Arc::new(ld_daemon::vcs::git::Git),
         },
     )
     .com_raiz_sessoes(raiz.path().join("sessoes"));
@@ -1479,6 +1482,7 @@ async fn cena_de_worktree() -> (Cena, Arc<MemoriaFalsa>, Project) {
             projeto: "outro".into(),
             raiz: "/tmp/outro".into(),
             branch: "feat".into(),
+            vcs: "git".into(),
             criada_em: 0,
             usada_em: 0,
         })

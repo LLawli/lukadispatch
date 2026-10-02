@@ -6,7 +6,7 @@
 //! precisa querer dizer (matar a sessão, apagar o canal, fechar as perguntas, marcar no banco).
 //!
 //! O `App` não sabe o que é Telegram, WhatsApp ou tmux: ele fala com as portas
-//! ([`Frontend`], [`Transcritor`], [`Divisores`], [`Hospedeiro`]), reunidas em [`Portas`]. Ver
+//! ([`Frontend`], [`Transcritor`], [`Divisores`], [`Hospedeiro`], [`Vcs`]), reunidas em [`Portas`]. Ver
 //! `docs/decisoes/0002-portas-e-adaptadores.md`.
 
 use std::collections::HashMap;
@@ -35,6 +35,7 @@ use crate::panel::Panel;
 use crate::sessions::{self, Hospedeiro, Situacao};
 use crate::status::{Ctx, StatusBoard};
 use crate::transcritor::Transcritor;
+use crate::vcs::{self, Vcs};
 
 /// Por que o portão não abriu card.
 ///
@@ -80,6 +81,8 @@ pub struct Portas {
     pub transcritor: Option<Arc<dyn Transcritor>>,
     pub divisores: Divisores,
     pub hospedeiro: Arc<dyn Hospedeiro>,
+    /// O controle de versão das cópias de trabalho das sessões.
+    pub vcs: Arc<dyn Vcs>,
 }
 
 /// O que [`App::monta_e_lanca`] precisa para montar uma partida, seja de sessão nova ou de
@@ -104,6 +107,7 @@ pub struct App {
     pub transcritor: Option<Arc<dyn Transcritor>>,
     pub divisores: Divisores,
     pub hospedeiro: Arc<dyn Hospedeiro>,
+    pub vcs: Arc<dyn Vcs>,
     /// Raiz de todas as pastas de sessão, onde anexo recebido e parte de arquivo grande moram.
     /// Padrão [`paths::arquivos_base`]; um teste troca por um tempdir com [`App::com_raiz_arquivos`].
     pub raiz_arquivos: PathBuf,
@@ -111,8 +115,8 @@ pub struct App {
     /// Padrão `paths::state_dir().join("sessions")`; um teste troca por um tempdir com
     /// [`App::com_raiz_sessoes`]. Cada sessão vive em `raiz_sessoes/<id>/`.
     pub raiz_sessoes: PathBuf,
-    /// Raiz de todas as worktrees das sessões. Padrão [`crate::worktree::base`]; um teste troca
-    /// por um tempdir com [`App::com_raiz_worktrees`].
+    /// Raiz de todas as cópias de trabalho das sessões. Padrão [`crate::vcs::base`]; um teste
+    /// troca por um tempdir com [`App::com_raiz_worktrees`].
     pub raiz_worktrees: PathBuf,
     pub hub: Hub,
     pub status: StatusBoard,
@@ -187,9 +191,10 @@ impl App {
             transcritor: portas.transcritor,
             divisores: portas.divisores,
             hospedeiro: portas.hospedeiro,
+            vcs: portas.vcs,
             raiz_arquivos: paths::arquivos_base(),
             raiz_sessoes: paths::state_dir().join("sessions"),
-            raiz_worktrees: crate::worktree::base(),
+            raiz_worktrees: crate::vcs::base(),
             hub: Hub::new(),
             status: StatusBoard::new(),
             cards: Cards::new(),
@@ -257,6 +262,11 @@ impl App {
         let dir = self.raiz_sessoes.join(p.session_id);
         std::fs::create_dir_all(&dir).with_context(|| format!("criando {}", dir.display()))?;
         let worktree = self.store.worktree_em(&p.projeto.path).ok().flatten();
+        if let Some(w) = &worktree
+            && let Err(e) = vcs::de(&self.vcs, w).antes_da_partida(w).await
+        {
+            warn!(sessao = %p.session_id, erro = %format!("{e:#}"), "a cópia de trabalho não se preparou para a partida");
+        }
         let base = PartidaDaMemoria {
             session_id: p.session_id,
             cwd: Path::new(&p.projeto.path),
@@ -300,6 +310,13 @@ impl App {
             renderiza_markdown: self.frontend.renderiza_markdown(),
         };
         let raiz = worktree.map_or(p.projeto.path.as_str(), |w| w.raiz.as_str());
+        let (instrucoes_vcs, mcp_vcs) = match worktree {
+            Some(w) => {
+                let vcs = vcs::de(&self.vcs, w);
+                (vcs.instrucoes(w).await, vcs.servidores_mcp())
+            }
+            None => (None, Default::default()),
+        };
         let comeco = tokio::time::Instant::now();
         let mut isolada = false;
         loop {
@@ -309,7 +326,12 @@ impl App {
                 worktree,
                 isolada,
             };
-            let instrucoes = self.memoria.instrucoes(&memoria);
+            // A cópia vem antes da memória: a memória fala da branch, e a cópia diz o que ela é.
+            let instrucoes = [instrucoes_vcs.clone(), self.memoria.instrucoes(&memoria)]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("\n\n");
             let pedido = PedidoDePartida {
                 projeto: p.projeto,
                 raiz,
@@ -320,7 +342,8 @@ impl App {
                 retomada: p.retomada,
                 wrap_mcp: self.cfg.wrap_mcp,
                 chat: &chat,
-                instrucoes: instrucoes.as_deref(),
+                instrucoes: (!instrucoes.is_empty()).then_some(instrucoes.as_str()),
+                mcp_extra: &mcp_vcs,
             };
             let invocacao = self.agente.invocacao(&pedido, p.session_id, dir)?;
             let argv = self.memoria.embrulha(&memoria, invocacao.argv).await?;

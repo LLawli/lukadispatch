@@ -4,7 +4,8 @@
 //! engano): ele vem sempre de `LUKADISPATCH_TELEGRAM_TOKEN`, carregado do `.env` do serviço.
 //!
 //! A lista de projetos é a soma das duas fontes que o usuário pediu: os fixados no arquivo,
-//! na ordem em que ele escreveu, e a varredura automática das raízes por diretórios com `.git`.
+//! na ordem em que ele escreveu, e a varredura automática das raízes por repositórios (`.git` ou
+//! `.jj`).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -27,6 +28,12 @@ pub struct Config {
     pub hospedeiro: String,
     /// Opções do hospedeiro herdr, lidas só quando `hospedeiro = "herdr"`.
     pub herdr: Herdr,
+    /// O controle de versão das cópias de trabalho de cada sessão. Cada valor corresponde a uma
+    /// implementação da trait `Vcs` do daemon: `"git"` (git worktree) ou `"jj"` (workspace do
+    /// Jujutsu). Ver `docs/decisoes/0019-jj-como-porta-de-vcs.md`.
+    pub vcs: String,
+    /// Opções do jj, lidas só quando `vcs = "jj"`.
+    pub jj: Jj,
     /// Qual agente de código roda nas sessões, e com que memória de longo prazo.
     pub agente: Agente,
     pub telegram: Telegram,
@@ -74,6 +81,8 @@ impl Default for Config {
             frontend: "telegram".into(),
             hospedeiro: "tmux".into(),
             herdr: Herdr::default(),
+            vcs: "git".into(),
+            jj: Jj::default(),
             agente: Agente::default(),
             telegram: Telegram::default(),
             scan: Scan::default(),
@@ -100,6 +109,22 @@ impl Default for Config {
             usuario: None,
         }
     }
+}
+
+/// Opções do adaptador jj.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Jj {
+    /// Servidores MCP que toda sessão num workspace do jj recebe, além dos do projeto: o nome e a
+    /// entrada no formato do `.mcp.json` (`command`, `args`, `env`, ou `type` e `url`). Vazio por
+    /// padrão.
+    ///
+    /// ```toml
+    /// [jj.mcp.jj]
+    /// command = "jj-mcp"
+    /// ```
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub mcp: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -387,7 +412,8 @@ pub fn expand_tilde(caminho: &str) -> PathBuf {
     PathBuf::from(caminho)
 }
 
-/// Diretórios com `.git` sob as raízes, até a profundidade pedida, em ordem alfabética.
+/// Repositórios sob as raízes, até a profundidade pedida, em ordem alfabética. Repositório é a
+/// pasta com `.git` ou com `.jj`: um repositório jj não colocado não tem `.git`.
 fn scan_repos(scan: &Scan) -> Vec<PathBuf> {
     let mut achados = BTreeSet::new();
     for raiz in &scan.roots {
@@ -416,7 +442,7 @@ fn varre(dir: &Path, profundidade: usize, achados: &mut BTreeSet<PathBuf>) {
         {
             continue;
         }
-        if caminho.join(".git").exists() {
+        if caminho.join(".git").exists() || caminho.join(".jj").is_dir() {
             achados.insert(caminho);
             continue; // repositório achado: não desce para submódulo.
         }
@@ -559,6 +585,7 @@ permission_mode = "bypassPermissions"
         std::fs::create_dir_all(dir.path().join("projA/.git")).unwrap();
         std::fs::create_dir_all(dir.path().join("naorepo")).unwrap();
         std::fs::create_dir_all(dir.path().join(".escondido/.git")).unwrap();
+        std::fs::create_dir_all(dir.path().join("projJ/.jj")).unwrap();
 
         let scan = Scan {
             enabled: true,
@@ -566,8 +593,32 @@ permission_mode = "bypassPermissions"
             depth: 1,
         };
         let achados = scan_repos(&scan);
-        assert_eq!(achados.len(), 1);
+        assert_eq!(
+            achados.len(),
+            2,
+            "o repositório jj sem .git também é projeto"
+        );
         assert!(achados[0].ends_with("projA"));
+        assert!(achados[1].ends_with("projJ"));
+    }
+
+    #[test]
+    fn vcs_padrao_e_git_e_o_mcp_do_jj_e_lido() {
+        let c: Config = toml::from_str("").unwrap();
+        assert_eq!(c.vcs, "git");
+        assert!(c.jj.mcp.is_empty());
+        let c: Config = toml::from_str(
+            r#"
+vcs = "jj"
+[jj.mcp.jj]
+command = "jj-mcp"
+args = ["--stdio"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(c.vcs, "jj");
+        assert_eq!(c.jj.mcp["jj"]["command"], "jj-mcp");
+        assert_eq!(c.jj.mcp["jj"]["args"][0], "--stdio");
     }
 
     #[test]

@@ -190,17 +190,17 @@ impl Memoria for AiMemory {
     fn instrucoes(&self, partida: &PartidaDaMemoria<'_>) -> Option<String> {
         let w = partida.worktree?;
         Some(format!(
-            "Esta sessão roda numa git worktree própria, na branch `{branch}` do projeto {projeto} \
-             (o repositório principal está em {raiz}). Outras sessões podem estar em outras \
-             branches do mesmo projeto, cada uma na sua worktree.\n\n\
-             A memória de longo prazo (ai-memory) é a do projeto, a mesma de todas as worktrees. \
+            "Esta sessão roda numa cópia de trabalho própria, na branch `{branch}` do projeto \
+             {projeto} (o repositório principal está em {raiz}). Outras sessões podem estar em \
+             outras branches do mesmo projeto, cada uma na sua cópia.\n\n\
+             A memória de longo prazo (ai-memory) é a do projeto, a mesma de todas as cópias. \
              O estado desta branch mora na página `{pagina}` dela: quando chegar o primeiro pedido, \
              antes de trabalhar nele, leia essa página com memory_read_page (se ela não existir, \
              a branch é nova). Reescreva-a com memory_write_page ao fechar um trabalho ou quando \
              pedirem para salvar o contexto: onde parou, o que falta, o que se decidiu nesta \
              branch. NÃO use memory_handoff_begin nesta sessão, mesmo que uma instrução geral \
              mande fazer handoff ao encerrar: o handoff manual vale para o projeto inteiro e \
-             seria consumido pela próxima sessão de outra worktree. Aqui, a página da branch faz \
+             seria consumido pela próxima sessão de outra cópia. Aqui, a página da branch faz \
              esse papel.",
             branch = w.branch,
             projeto = w.projeto,

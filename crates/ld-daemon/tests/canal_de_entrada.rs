@@ -83,6 +83,7 @@ async fn sobe_daemon(dir: &std::path::Path) -> Arc<App> {
             transcritor: None,
             divisores: Divisores::new(vec![]),
             hospedeiro: Arc::new(Tmux),
+            vcs: Arc::new(ld_daemon::vcs::git::Git),
         },
     ));
 
