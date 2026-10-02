@@ -2,8 +2,9 @@
 //!
 //! O `/new` sem argumento é uma conversa em etapas: a pasta que junta projetos (as raízes do
 //! `[scan]`, mais os fixados no config), o projeto, a branch, e por fim continuar a conversa
-//! anterior ou começar do zero. Cada branch abre na worktree dela ([`crate::worktree`]); a
-//! branch principal nunca: escolhê-la pede o nome de uma branch nova a partir dela.
+//! anterior ou começar do zero. Cada branch abre na cópia de trabalho dela ([`crate::vcs`]: uma
+//! git worktree, ou um workspace do jj); a branch principal nunca: escolhê-la pede o nome de uma
+//! branch nova a partir dela.
 //!
 //! Com argumento: `/new <projeto> <branch>` pula direto para a branch (criando se não existir),
 //! e `/new new-project` cria um projeto numa das pastas.
@@ -26,7 +27,7 @@ use crate::app::App;
 use crate::frontend::formato::escapa;
 use crate::frontend::{Botao, Canal, MsgId};
 use crate::roteador::{TTL_RESPOSTA, TTL_TECLADO};
-use crate::worktree;
+use crate::vcs::{self, Pendencias};
 
 /// Quanto uma escolha ou uma pergunta vale. É o tempo de vida do teclado que a mostrou.
 const VALIDADE: Duration = Duration::from_secs(TTL_TECLADO);
@@ -64,10 +65,14 @@ enum Escolha {
     NovoProjeto,
     /// Fecha a sessão e mantém a worktree para continuar depois.
     FechaMantendo(String),
-    /// Fecha a sessão e apaga a worktree e a branch, perguntando antes se houver o que perder.
+    /// Fecha a sessão e apaga a cópia. No git leva a branch junto, e pergunta antes se houver o
+    /// que perder; no jj os commits ficam, e não há o que perguntar.
     FechaApagando(String),
+    /// Fecha a sessão, apaga a cópia e abandona os commits que são só dela (no jj), perguntando
+    /// antes se houver o que perder.
+    FechaAbandonando(String),
     /// Já perguntou: apaga mesmo.
-    ApagaMesmo(String),
+    ApagaMesmo { sessao: String, abandona: bool },
 }
 
 /// Uma pergunta que espera texto no canal principal.
@@ -341,7 +346,7 @@ pub async fn toque(
             let Some((Espera::NomeDaBranch { projeto, base }, _)) = app.novo.tira_espera() else {
                 return Ok(());
             };
-            let nome = nome_gerado(Path::new(&projeto.path)).await;
+            let nome = nome_gerado(app, Path::new(&projeto.path)).await;
             abre_branch(app, projeto, &nome, Some(&base)).await
         }
         Escolha::Cancela => {
@@ -355,8 +360,15 @@ pub async fn toque(
         Escolha::NovoProjeto => mostra_pastas_para_criar(app).await,
         Escolha::NovoProjetoEm(pasta) => pergunta_nome_do_projeto(app, pasta).await,
         Escolha::FechaMantendo(id) => fecha(app, &id).await,
-        Escolha::FechaApagando(id) => apaga_ou_pergunta(app, &id, canal).await,
-        Escolha::ApagaMesmo(id) => fecha_e_apaga(app, &id).await,
+        Escolha::FechaApagando(id) => {
+            if app.vcs.apagar_preserva_commits() {
+                fecha_e_apaga(app, &id, false).await
+            } else {
+                apaga_ou_pergunta(app, &id, canal, true).await
+            }
+        }
+        Escolha::FechaAbandonando(id) => apaga_ou_pergunta(app, &id, canal, true).await,
+        Escolha::ApagaMesmo { sessao, abandona } => fecha_e_apaga(app, &sessao, abandona).await,
     }
 }
 
@@ -372,7 +384,7 @@ pub async fn texto(app: &Arc<App>, texto: &str) -> anyhow::Result<bool> {
     match espera {
         Espera::NomeDaBranch { projeto, base } => {
             let raiz = Path::new(&projeto.path);
-            if !worktree::nome_valido(raiz, nome).await {
+            if !vcs::nome_valido(nome) {
                 app.novo
                     .espera(Espera::NomeDaBranch { projeto, base }, pergunta);
                 avisa(
@@ -386,7 +398,7 @@ pub async fn texto(app: &Arc<App>, texto: &str) -> anyhow::Result<bool> {
                 .await;
                 return Ok(true);
             }
-            if worktree::existe_branch(raiz, nome).await {
+            if app.vcs.existe(raiz, nome).await {
                 app.novo
                     .espera(Espera::NomeDaBranch { projeto, base }, pergunta);
                 avisa(
@@ -420,7 +432,8 @@ pub async fn texto(app: &Arc<App>, texto: &str) -> anyhow::Result<bool> {
     Ok(true)
 }
 
-/// `/kill` de uma sessão: pergunta o que fazer com a worktree, se ela roda numa; senão fecha.
+/// `/kill` de uma sessão: pergunta o que fazer com a cópia de trabalho, se ela roda numa; senão
+/// fecha.
 ///
 /// A pergunta vai no canal da sessão quando o `/kill` veio de lá, e no principal quando veio
 /// com o id.
@@ -428,20 +441,31 @@ pub async fn kill(app: &Arc<App>, s: &Session, canal: Option<&Canal>) -> anyhow:
     let Some(w) = app.store.worktree_em(&s.cwd)? else {
         return fecha(app, &s.session_id).await;
     };
-    let botoes = vec![
-        Botao::new(
-            "🗂 Fechar e manter a worktree",
-            app.novo
-                .guarda(Escolha::FechaMantendo(s.session_id.clone())),
-        ),
-        Botao::new(
-            "🗑 Fechar e apagar worktree e branch",
-            app.novo
-                .guarda(Escolha::FechaApagando(s.session_id.clone())),
-        ),
-    ];
+    let vcs = vcs::de(&app.vcs, &w);
+    let t = vcs.termos();
+    let id = || s.session_id.clone();
+    let mut botoes = vec![Botao::new(
+        format!("🗂 Fechar e manter {}", t.a),
+        app.novo.guarda(Escolha::FechaMantendo(id())),
+    )];
+    if vcs.apagar_preserva_commits() {
+        botoes.push(Botao::new(
+            format!("🗑 Fechar e apagar {} (os commits ficam)", t.a),
+            app.novo.guarda(Escolha::FechaApagando(id())),
+        ));
+        botoes.push(Botao::new(
+            "💥 Apagar e abandonar os commits só dele",
+            app.novo.guarda(Escolha::FechaAbandonando(id())),
+        ));
+    } else {
+        botoes.push(Botao::new(
+            format!("🗑 Fechar e apagar {} e branch", t.nome),
+            app.novo.guarda(Escolha::FechaApagando(id())),
+        ));
+    }
     let texto = format!(
-        "Esta sessão roda na worktree de <b>{}</b>.\n<i>Mantida, dá para continuar nela pelo /new.</i>",
+        "Esta sessão roda {} de <b>{}</b>.\n<i>Mantida, dá para continuar nela pelo /new.</i>",
+        t.na,
         escapa(&w.branch)
     );
     if let Ok(m) = app.frontend.envia(canal, &texto, &botoes, None).await {
@@ -487,21 +511,46 @@ async fn mostra_projetos(app: &Arc<App>, pasta: Pasta) -> anyhow::Result<()> {
     .await
 }
 
-/// As branches do projeto. Repositório sem commit (ou pasta sem git) não tem de onde tirar
-/// worktree: a sessão abre na pasta, como antes.
+/// Deixa o repositório pronto para o controle de versão em uso (o jj se coloca sobre um que só
+/// tem git). Falha vira aviso no canal, e `false`.
+async fn prepara(app: &Arc<App>, p: &Project) -> bool {
+    match app.vcs.prepara(Path::new(&p.path)).await {
+        Ok(()) => true,
+        Err(e) => {
+            avisa(
+                app,
+                None,
+                &format!(
+                    "❌ Não consegui preparar <b>{}</b>: {}",
+                    escapa(&p.name),
+                    escapa(&format!("{e:#}"))
+                ),
+            )
+            .await;
+            false
+        }
+    }
+}
+
+/// As branches do projeto. Repositório sem commit (ou pasta sem repositório) não tem de onde
+/// tirar uma cópia: a sessão abre na pasta, como antes.
 async fn mostra_branches(app: &Arc<App>, p: Project) -> anyhow::Result<()> {
     let raiz = PathBuf::from(&p.path);
-    if !worktree::tem_commit(&raiz).await {
+    if !prepara(app, &p).await {
+        return Ok(());
+    }
+    if !app.vcs.tem_commit(&raiz).await {
         return escolhe_retomada(app, p).await;
     }
-    let principal = worktree::principal(&raiz).await;
-    let branches = worktree::branches(&raiz).await?;
+    let principal = app.vcs.principal(&raiz).await;
+    let ramos = app.vcs.ramos(&raiz).await?;
     let nossas: Vec<Worktree> = app
         .store
         .worktrees_de(&p.path)?
         .into_iter()
         .filter(|w| Path::new(&w.caminho).exists())
         .collect();
+    let t = app.vcs.termos();
 
     let mut botoes = Vec::new();
     for w in &nossas {
@@ -511,38 +560,50 @@ async fn mostra_branches(app: &Arc<App>, p: Project) -> anyhow::Result<()> {
             .ok()
             .flatten()
             .is_some();
+        // Uma cópia de antes da troca de controle de versão continua abrindo, e diz o que é.
+        let outro_vcs = if w.vcs != app.vcs.nome() {
+            format!(" · {}", w.vcs)
+        } else {
+            String::new()
+        };
         botoes.push(Botao::new(
-            format!("🌿 {}{}", w.branch, if aberta { " 🟢" } else { "" }),
+            format!(
+                "🌿 {}{outro_vcs}{}",
+                w.branch,
+                if aberta { " 🟢" } else { "" }
+            ),
             app.novo.guarda(Escolha::Branch {
                 projeto: p.clone(),
                 branch: w.branch.clone(),
             }),
         ));
     }
-    for b in &branches {
+    for r in &ramos {
         if botoes.len() >= TETO_DE_BRANCHES {
             break;
         }
-        if Some(&b.nome) == principal.as_ref() || nossas.iter().any(|w| w.branch == b.nome) {
+        if Some(&r.nome) == principal.as_ref() || nossas.iter().any(|w| w.branch == r.nome) {
             continue;
         }
-        // Em checkout noutro lugar (a pasta do repositório, ou uma worktree que não é do bot):
-        // o git não deixa a mesma branch em duas worktrees, então ela vira base de uma nova.
-        let (rotulo, escolha) = match &b.em_checkout {
-            Some(_) => (
-                format!("🔀 {} (em uso: nova a partir dela)", b.nome),
+        // No git, a branch em checkout noutro lugar (a pasta do repositório, ou uma worktree que
+        // não é do bot) não abre direto: o git não deixa a mesma branch em duas worktrees. No
+        // jj, todo bookmark é base de um workspace novo.
+        let (rotulo, escolha) = if r.so_como_base {
+            (
+                format!("🔀 {} ({})", r.nome, t.so_base),
                 Escolha::NovaBranch {
                     projeto: p.clone(),
-                    base: b.nome.clone(),
+                    base: r.nome.clone(),
                 },
-            ),
-            None => (
-                b.nome.clone(),
+            )
+        } else {
+            (
+                r.nome.clone(),
                 Escolha::Branch {
                     projeto: p.clone(),
-                    branch: b.nome.clone(),
+                    branch: r.nome.clone(),
                 },
-            ),
+            )
         };
         botoes.push(Botao::new(rotulo, app.novo.guarda(escolha)));
     }
@@ -558,8 +619,10 @@ async fn mostra_branches(app: &Arc<App>, p: Project) -> anyhow::Result<()> {
     teclado(
         app,
         &format!(
-            "<b>{}</b>: em qual branch?\n<i>cada branch abre na worktree dela; 🌿 já tem uma, 🟢 tem sessão aberta</i>",
-            escapa(&p.name)
+            "<b>{}</b>: em qual branch?\n<i>cada branch abre {} dela; 🌿 já tem {}, 🟢 tem sessão aberta</i>",
+            escapa(&p.name),
+            t.na,
+            if t.a.starts_with("o ") { "um" } else { "uma" }
         ),
         botoes,
     )
@@ -567,15 +630,19 @@ async fn mostra_branches(app: &Arc<App>, p: Project) -> anyhow::Result<()> {
 }
 
 /// `/new <projeto> <branch>`: a branch principal pede nome de branch nova; a que existe abre;
-/// a que não existe é criada a partir da principal.
+/// a que não existe é criada a partir da base que o controle de versão diz (a principal, ou no
+/// jj o bookmark de mesmo nome).
 async fn abre_branch_pelo_nome(app: &Arc<App>, p: Project, branch: &str) -> anyhow::Result<()> {
     let raiz = PathBuf::from(&p.path);
-    if !worktree::tem_commit(&raiz).await {
+    if !prepara(app, &p).await {
+        return Ok(());
+    }
+    if !app.vcs.tem_commit(&raiz).await {
         avisa(
             app,
             None,
             &format!(
-                "<b>{}</b> não é um repositório git com commit: não há branch para abrir. \
+                "<b>{}</b> não é um repositório com commit: não há branch para abrir. \
                  Mande só <code>/new {}</code>.",
                 escapa(&p.name),
                 escapa(&p.name)
@@ -584,14 +651,14 @@ async fn abre_branch_pelo_nome(app: &Arc<App>, p: Project, branch: &str) -> anyh
         .await;
         return Ok(());
     }
-    let principal = worktree::principal(&raiz).await;
+    let principal = app.vcs.principal(&raiz).await;
     if principal.as_deref() == Some(branch) {
         return pergunta_nome_da_branch(app, p, branch.to_string()).await;
     }
-    if worktree::existe_branch(&raiz, branch).await {
+    if app.vcs.existe(&raiz, branch).await {
         return abre_branch(app, p, branch, None).await;
     }
-    if !worktree::nome_valido(&raiz, branch).await {
+    if !vcs::nome_valido(branch) {
         avisa(
             app,
             None,
@@ -600,7 +667,7 @@ async fn abre_branch_pelo_nome(app: &Arc<App>, p: Project, branch: &str) -> anyh
         .await;
         return Ok(());
     }
-    let Some(base) = principal else {
+    let Some(base) = app.vcs.base_para(&raiz, branch, principal).await else {
         avisa(app, None, "Não achei a branch principal do repositório.").await;
         return Ok(());
     };
@@ -626,7 +693,7 @@ async fn pergunta_nome_da_branch(app: &Arc<App>, p: Project, base: String) -> an
     Ok(())
 }
 
-/// Garante a worktree da branch e segue para a escolha de continuar ou começar do zero. Branch
+/// Garante a cópia da branch e segue para a escolha de continuar ou começar do zero. Branch
 /// com sessão aberta não ganha outra: você é mandado para a que já existe.
 async fn abre_branch(
     app: &Arc<App>,
@@ -656,7 +723,8 @@ async fn abre_branch(
                 app,
                 None,
                 &format!(
-                    "❌ Não consegui preparar a worktree de <b>{}</b>: {}",
+                    "❌ Não consegui preparar {} de <b>{}</b>: {}",
+                    app.vcs.termos().a,
                     escapa(branch),
                     escapa(&format!("{e:#}"))
                 ),
@@ -672,7 +740,7 @@ async fn abre_branch(
     escolhe_retomada(app, na_worktree).await
 }
 
-/// A worktree da branch, criada se ainda não existe. Registrada no banco nos dois casos, para a
+/// A cópia da branch, criada se ainda não existe. Registrada no banco nos dois casos, para a
 /// ordem do `/new` seguir o uso.
 async fn garante_worktree(
     app: &App,
@@ -681,15 +749,7 @@ async fn garante_worktree(
     base: Option<&str>,
 ) -> anyhow::Result<Worktree> {
     let raiz = PathBuf::from(&p.path);
-    let caminho = worktree::caminho(&app.raiz_worktrees, &ld_core::paths::home(), &raiz, branch);
-    let registro = Worktree {
-        caminho: caminho.to_string_lossy().into_owned(),
-        projeto: p.name.clone(),
-        raiz: p.path.clone(),
-        branch: branch.to_string(),
-        criada_em: 0,
-        usada_em: 0,
-    };
+    let caminho = vcs::caminho(&app.raiz_worktrees, &ld_core::paths::home(), &raiz, branch);
 
     // A que o banco conhece e ainda está no disco.
     if let Some(w) = app.store.worktree_da_branch(&p.path, branch)? {
@@ -700,23 +760,17 @@ async fn garante_worktree(
         app.store.esquece_worktree(&w.caminho)?;
     }
 
-    let existente = worktree::branches(&raiz)
-        .await?
-        .into_iter()
-        .find(|b| b.nome == branch);
-    match existente.as_ref().and_then(|b| b.em_checkout.as_ref()) {
-        // Já está em checkout exatamente onde a queremos (o banco a esqueceu, o git não).
-        Some(onde) if *onde == caminho => {}
-        Some(onde) => anyhow::bail!("a branch está em checkout em {}", onde.display()),
-        None => {
-            let base = if existente.is_some() { None } else { base };
-            if existente.is_none() && base.is_none() {
-                anyhow::bail!("a branch não existe e não há de onde criá-la");
-            }
-            worktree::cria(&raiz, &caminho, branch, base).await?;
-            info!(projeto = %p.name, branch, caminho = %caminho.display(), "worktree criada");
-        }
-    }
+    app.vcs.garante(&raiz, &caminho, branch, base).await?;
+    info!(projeto = %p.name, branch, caminho = %caminho.display(), vcs = app.vcs.nome(), "cópia de trabalho pronta");
+    let registro = Worktree {
+        caminho: caminho.to_string_lossy().into_owned(),
+        projeto: p.name.clone(),
+        raiz: p.path.clone(),
+        branch: branch.to_string(),
+        vcs: app.vcs.nome().to_string(),
+        criada_em: 0,
+        usada_em: 0,
+    };
     app.store.registra_worktree(&registro)?;
     Ok(app
         .store
@@ -768,7 +822,7 @@ pub async fn escolhe_retomada(app: &Arc<App>, p: Project) -> anyhow::Result<()> 
 
 /// `lukadispatch new <projeto> --branch <b>`: o mesmo que `/new <projeto> <b>`, sem perguntar
 /// nada. A branch principal é recusada (não há a quem perguntar o nome da nova), e a que não
-/// existe nasce dela.
+/// existe nasce da base que o controle de versão diz.
 pub async fn abre_na_branch(
     app: &Arc<App>,
     p: Project,
@@ -776,10 +830,11 @@ pub async fn abre_na_branch(
     continuar: bool,
 ) -> anyhow::Result<()> {
     let raiz = PathBuf::from(&p.path);
-    if !worktree::tem_commit(&raiz).await {
-        anyhow::bail!("{} não é um repositório git com commit", p.name);
+    app.vcs.prepara(&raiz).await?;
+    if !app.vcs.tem_commit(&raiz).await {
+        anyhow::bail!("{} não é um repositório com commit", p.name);
     }
-    let principal = worktree::principal(&raiz).await;
+    let principal = app.vcs.principal(&raiz).await;
     if principal.as_deref() == Some(branch) {
         anyhow::bail!(
             "{branch} é a branch principal, e ela não abre direto: passe o nome de uma branch nova"
@@ -790,13 +845,13 @@ pub async fn abre_na_branch(
     {
         anyhow::bail!("já há uma sessão aberta em {branch}");
     }
-    let base = if worktree::existe_branch(&raiz, branch).await {
+    let base = if app.vcs.existe(&raiz, branch).await {
         None
     } else {
-        if !worktree::nome_valido(&raiz, branch).await {
+        if !vcs::nome_valido(branch) {
             anyhow::bail!("{branch} não serve para nome de branch");
         }
-        principal
+        app.vcs.base_para(&raiz, branch, principal).await
     };
     let w = garante_worktree(app, &p, branch, base.as_deref()).await?;
     let retomar = continuar
@@ -825,7 +880,7 @@ pub async fn abre_na_branch(
 }
 
 /// Um nome livre para branch nova: `ld/<data>-<hora>`, com sufixo se já existir.
-async fn nome_gerado(raiz: &Path) -> String {
+async fn nome_gerado(app: &App, raiz: &Path) -> String {
     let agora =
         time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
     let base = format!(
@@ -838,7 +893,7 @@ async fn nome_gerado(raiz: &Path) -> String {
     );
     let mut nome = base.clone();
     let mut n = 2;
-    while worktree::existe_branch(raiz, &nome).await {
+    while app.vcs.existe(raiz, &nome).await {
         nome = format!("{base}-{n}");
         n += 1;
     }
@@ -923,7 +978,7 @@ fn nome_de_projeto_valido(pasta: &Path, nome: &str) -> Result<(), String> {
 /// qualquer projeto, e a branch principal fica intocada.
 async fn cria_projeto(app: &Arc<App>, pasta: &Path, nome: &str) -> anyhow::Result<()> {
     let caminho = pasta.join(nome);
-    if let Err(e) = worktree::inicia_projeto(&caminho).await {
+    if let Err(e) = app.vcs.inicia_projeto(&caminho).await {
         avisa(
             app,
             None,
@@ -944,7 +999,9 @@ async fn cria_projeto(app: &Arc<App>, pasta: &Path, nome: &str) -> anyhow::Resul
         model: None,
         effort: None,
     };
-    let base = worktree::principal(&caminho)
+    let base = app
+        .vcs
+        .principal(&caminho)
         .await
         .unwrap_or_else(|| "master".into());
     pergunta_nome_da_branch(app, p, base).await
@@ -966,11 +1023,13 @@ async fn fecha(app: &Arc<App>, session_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Apagar sem perguntar quando não há nada a perder; senão, diz o que se perderia e pergunta.
+/// Apagar (abandonando o que é só da cópia) sem perguntar quando não há nada a perder; senão,
+/// diz o que se perderia e pergunta.
 async fn apaga_ou_pergunta(
     app: &Arc<App>,
     session_id: &str,
     canal: Option<&Canal>,
+    abandona: bool,
 ) -> anyhow::Result<()> {
     let Some(s) = app.store.get(session_id)? else {
         return Ok(());
@@ -978,25 +1037,27 @@ async fn apaga_ou_pergunta(
     let Some(w) = app.store.worktree_em(&s.cwd)? else {
         return fecha(app, session_id).await;
     };
-    let principal = worktree::principal(Path::new(&w.raiz)).await;
-    let pendencias = match worktree::pendencias(Path::new(&w.caminho), principal.as_deref()).await {
+    let pendencias = match vcs::de(&app.vcs, &w).pendencias(&w).await {
         Ok(p) => p,
         // Sem conseguir contar, não dá para dizer que não há nada a perder.
         Err(e) => {
-            warn!(erro = %format!("{e:#}"), "não consegui contar as pendências da worktree");
-            worktree::Pendencias {
+            warn!(erro = %format!("{e:#}"), "não consegui contar as pendências da cópia de trabalho");
+            Pendencias {
                 sem_commit: usize::MAX,
                 sem_push: 0,
             }
         }
     };
     if pendencias.nenhuma() {
-        return fecha_e_apaga(app, session_id).await;
+        return fecha_e_apaga(app, session_id, abandona).await;
     }
     let botoes = vec![
         Botao::new(
             "🗑 Apagar mesmo assim",
-            app.novo.guarda(Escolha::ApagaMesmo(session_id.to_string())),
+            app.novo.guarda(Escolha::ApagaMesmo {
+                sessao: session_id.to_string(),
+                abandona,
+            }),
         ),
         Botao::new(
             "🗂 Fechar e manter",
@@ -1015,7 +1076,7 @@ async fn apaga_ou_pergunta(
     Ok(())
 }
 
-fn descreve_pendencias(p: worktree::Pendencias) -> String {
+fn descreve_pendencias(p: Pendencias) -> String {
     let mut linhas = Vec::new();
     if p.sem_commit == usize::MAX {
         linhas.push("• não consegui conferir o que há sem commit".to_string());
@@ -1035,20 +1096,23 @@ fn descreve_pendencias(p: worktree::Pendencias) -> String {
 }
 
 /// Fecha a sessão e só então apaga: com o agente ainda rodando, a pasta sumiria debaixo dele.
-async fn fecha_e_apaga(app: &Arc<App>, session_id: &str) -> anyhow::Result<()> {
+async fn fecha_e_apaga(app: &Arc<App>, session_id: &str, abandona: bool) -> anyhow::Result<()> {
     let Some(s) = app.store.get(session_id)? else {
         return Ok(());
     };
     let Some(w) = app.store.worktree_em(&s.cwd)? else {
         return fecha(app, session_id).await;
     };
+    let vcs = vcs::de(&app.vcs, &w);
+    let t = vcs.termos();
     app.end_session(session_id, true).await?;
-    if let Err(e) = worktree::apaga(Path::new(&w.raiz), Path::new(&w.caminho), &w.branch).await {
+    if let Err(e) = vcs.apaga(&w, abandona).await {
         avisa(
             app,
             None,
             &format!(
-                "Fechei a sessão, mas não consegui apagar a worktree de <b>{}</b>: {}",
+                "Fechei a sessão, mas não consegui apagar {} de <b>{}</b>: {}",
+                t.a,
                 escapa(&w.branch),
                 escapa(&format!("{e:#}"))
             ),
@@ -1058,16 +1122,18 @@ async fn fecha_e_apaga(app: &Arc<App>, session_id: &str) -> anyhow::Result<()> {
     }
     app.store.esquece_worktree(&w.caminho)?;
     if let Err(e) = app.memoria.worktree_apagada(&w).await {
-        warn!(branch = %w.branch, erro = %format!("{e:#}"), "a memória não esqueceu a worktree apagada");
+        warn!(branch = %w.branch, erro = %format!("{e:#}"), "a memória não esqueceu a cópia apagada");
     }
-    info!(branch = %w.branch, caminho = %w.caminho, "worktree e branch apagadas");
+    info!(branch = %w.branch, caminho = %w.caminho, vcs = vcs.nome(), abandona, "cópia de trabalho apagada");
+    let feito = match (vcs.apagar_preserva_commits(), abandona) {
+        (false, _) => format!("apaguei {} e a branch", t.a),
+        (true, false) => format!("apaguei {}; os commits dele continuam no repositório", t.a),
+        (true, true) => format!("apaguei {} e abandonei os commits só dele", t.a),
+    };
     avisa(
         app,
         None,
-        &format!(
-            "🗑 Fechei a sessão e apaguei a worktree e a branch <b>{}</b>.",
-            escapa(&w.branch)
-        ),
+        &format!("🗑 Fechei a sessão e {feito}: <b>{}</b>.", escapa(&w.branch)),
     )
     .await;
     Ok(())

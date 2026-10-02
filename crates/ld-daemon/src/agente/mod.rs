@@ -84,8 +84,12 @@ pub struct PedidoDePartida<'a> {
     /// Passar os servidores MCP pelo proxy do lukadispatch.
     pub wrap_mcp: bool,
     pub chat: &'a DescricaoDoChat,
-    /// O que a memória de longo prazo quer que o agente saiba ao começar ([`Memoria::instrucoes`]).
+    /// O que a cópia de trabalho e a memória de longo prazo querem que o agente saiba ao começar
+    /// ([`crate::vcs::Vcs::instrucoes`], [`Memoria::instrucoes`]).
     pub instrucoes: Option<&'a str>,
+    /// Servidores MCP que a sessão recebe além dos do projeto
+    /// ([`crate::vcs::Vcs::servidores_mcp`]), no formato do `.mcp.json`.
+    pub mcp_extra: &'a serde_json::Map<String, serde_json::Value>,
 }
 
 /// Como chamar o agente: programa, argumentos e o prompt inicial.

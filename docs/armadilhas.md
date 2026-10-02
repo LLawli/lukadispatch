@@ -60,6 +60,33 @@ Quando um comportamento parecer estranho, procure aqui antes de "consertar".
   tempo é esperar: a partida tem o rótulo de uma sessão ainda encerrada no banco, e a varredura
   de órfãs da reconciliação fica parada enquanto houver partida em curso.
 
+## jj
+
+Medido no jj 0.45.1 ([0019](decisoes/0019-jj-como-porta-de-vcs.md)).
+
+- **Leitura sem `--ignore-working-copy` faz snapshot** do checkout onde roda e grava uma operação.
+  O daemon lê o repositório em que você trabalha: toda leitura dele vai com a flag.
+- **O `workspace add` recusa `--ignore-working-copy`** ("This command must be able to update the
+  working copy"). Criar um workspace faz o snapshot do repositório principal, como qualquer
+  comando seu faria.
+- **O workspace não tem `.git`.** O `git` falha lá dentro, o Claude Code roda com `Is a git
+  repository: false`, e o `gh` só funciona com `--repo` (e, no `pr create`, `--head`, `--title` e
+  `--body`). Build script que chame `git rev-parse` quebra ali.
+- **`workspace forget` não apaga nada.** A pasta fica (sem uso: "No working copy") e os commits
+  com conteúdo continuam no repositório; só o `@` vazio some. Apagar a pasta é à parte, e o que o
+  agente deixou sem commit precisa de um snapshot antes (`jj util snapshot`), senão some com ela.
+- **`abandon` apaga os bookmarks** que apontavam para os commits abandonados.
+- **`trunk()` só resolve bookmark remoto.** Sem remoto ele é o `root()`, e "o que não está na
+  principal" vira o histórico inteiro. A principal precisa do fallback para os bookmarks locais.
+- **Nome com `-` ou `/` num revset é lido como conta.** `ld/2026-10-02-1530` sem aspas não é o
+  bookmark; com aspas é (`"ld/2026-10-02-1530"`, e o workspace, `"feat/x"@`).
+- **Padrão de arquivo relativo depende do cwd.** `files("a.txt")` com `-R` de fora do repositório
+  falha com "Invalid file pattern"; `files(root:"a.txt")` não.
+- **A data de commit tem resolução de segundos.** O `committer_date(after:)` que separa o trabalho
+  de um workspace da base dele precisa de folga.
+- **O wrapper do jj que inicializa sozinho** (`JJ_AUTO_INIT`) agiria em qualquer chamada do daemon
+  num repositório só-git. O daemon roda o jj com `JJ_AUTO_INIT=0`, e coloca o jj só quando pede.
+
 ## Telegram
 
 - **Toda mensagem de tópico de fórum vem com `reply_to_message`** apontando para a raiz do

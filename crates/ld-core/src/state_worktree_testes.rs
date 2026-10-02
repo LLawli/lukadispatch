@@ -8,6 +8,7 @@ fn wt(raiz: &str, branch: &str) -> Worktree {
         projeto: raiz.trim_start_matches('/').into(),
         raiz: raiz.into(),
         branch: branch.into(),
+        vcs: "git".into(),
         criada_em: 0,
         usada_em: 0,
     }
@@ -83,4 +84,27 @@ fn banco_de_antes_das_worktrees_ganha_a_tabela_ao_abrir() {
     let st = Store::open(&caminho).unwrap();
     st.registra_worktree(&wt("/api", "a")).unwrap();
     assert_eq!(st.kv_get("painel").unwrap().as_deref(), Some("42"));
+}
+
+#[test]
+fn worktree_de_antes_do_jj_e_git() {
+    // A tabela nasceu sem a coluna `vcs`: as linhas que já existiam são de git worktrees.
+    let dir = tempfile::tempdir().unwrap();
+    let caminho = dir.path().join("state.db");
+    {
+        let c = rusqlite::Connection::open(&caminho).unwrap();
+        c.execute_batch(
+            "CREATE TABLE worktrees (caminho TEXT PRIMARY KEY, projeto TEXT NOT NULL, \
+             raiz TEXT NOT NULL, branch TEXT NOT NULL, criada_em INTEGER NOT NULL, \
+             usada_em INTEGER NOT NULL);
+             INSERT INTO worktrees VALUES ('/wt/api/a', 'api', '/api', 'a', 1, 1);",
+        )
+        .unwrap();
+    }
+    let st = Store::open(&caminho).unwrap();
+    assert_eq!(st.worktree_em("/wt/api/a").unwrap().unwrap().vcs, "git");
+    let mut nova = wt("/api", "b");
+    nova.vcs = "jj".into();
+    st.registra_worktree(&nova).unwrap();
+    assert_eq!(st.worktree_em(&nova.caminho).unwrap().unwrap().vcs, "jj");
 }

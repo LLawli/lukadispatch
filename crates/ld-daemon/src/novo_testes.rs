@@ -90,7 +90,7 @@ fn o_dado_do_botao_cabe_no_teto_do_telegram() {
 
 #[test]
 fn pendencias_viram_frases() {
-    let t = descreve_pendencias(worktree::Pendencias {
+    let t = descreve_pendencias(crate::vcs::Pendencias {
         sem_commit: 2,
         sem_push: 1,
     });
@@ -98,7 +98,7 @@ fn pendencias_viram_frases() {
         t.contains("2 arquivo(s)") && t.contains("1 commit(s)"),
         "{t}"
     );
-    let t = descreve_pendencias(worktree::Pendencias {
+    let t = descreve_pendencias(crate::vcs::Pendencias {
         sem_commit: usize::MAX,
         sem_push: 0,
     });

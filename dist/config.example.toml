@@ -35,6 +35,11 @@ depth = 1
 # [herdr]
 # sessao = "lukadispatch"         # sessão do herdr; esta é a padrão; "default" põe ao lado das suas
 #
+# vcs = "git"                     # ou "jj": cada sessão num workspace do jj, não numa worktree
+#
+# [jj.mcp.jj]                     # opcional: servidor MCP que toda sessão num workspace recebe
+# command = "jj-mcp"
+#
 # [agente]
 # tipo = "claude-code"
 # memoria = "ai-memory"           # "nenhuma" roda o claude direto, sem o ai-memory

@@ -26,10 +26,12 @@ pub struct Guardada {
     pub files: Vec<String>,
 }
 
-/// Uma git worktree que o bot abriu para uma branch de um projeto.
+/// Uma cópia de trabalho que o bot abriu para uma branch de um projeto: uma git worktree, ou um
+/// workspace do jj, em que a "branch" é o nome do workspace.
 ///
-/// O git já sabe quais worktrees existem; o que só o bot sabe é quais são dele, de que projeto
-/// (pelo nome que o seletor mostra) e quando foram usadas por último, que é a ordem do `/new`.
+/// O controle de versão já sabe quais existem; o que só o bot sabe é quais são dele, de que
+/// projeto (pelo nome que o seletor mostra) e quando foram usadas por último, que é a ordem do
+/// `/new`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Worktree {
     /// Onde a worktree mora. É o cwd das sessões dela, e por isso não muda nunca: o `--resume`
@@ -40,6 +42,9 @@ pub struct Worktree {
     /// Caminho do repositório principal.
     pub raiz: String,
     pub branch: String,
+    /// O controle de versão que a criou (`"git"`, `"jj"`): é ele quem sabe apagá-la. Uma worktree
+    /// git de antes da troca para o jj continua sendo git.
+    pub vcs: String,
     pub criada_em: i64,
     pub usada_em: i64,
 }
@@ -124,10 +129,12 @@ CREATE TABLE IF NOT EXISTS worktrees (
     projeto   TEXT NOT NULL,
     raiz      TEXT NOT NULL,
     branch    TEXT NOT NULL,
+    vcs       TEXT NOT NULL DEFAULT 'git',
     criada_em INTEGER NOT NULL,
     usada_em  INTEGER NOT NULL
 );
--- O git não deixa a mesma branch em duas worktrees; o banco repete a regra.
+-- O git não deixa a mesma branch em duas worktrees, nem o jj dois workspaces com o mesmo nome;
+-- o banco repete a regra.
 CREATE UNIQUE INDEX IF NOT EXISTS worktrees_por_branch ON worktrees(raiz, branch);
 "#;
 
@@ -152,6 +159,11 @@ fn migra(conn: &Connection) {
     // a tabela, e o SQLite embutido (`bundled`) sempre o tem; em banco novo a coluna velha não
     // existe e o erro é o caminho normal, como acima. Veja a decisão 0014.
     let _ = conn.execute("ALTER TABLE sessions RENAME COLUMN tmux TO hospedagem", []);
+    // Antes da decisão 0019 toda worktree era git.
+    let _ = conn.execute(
+        "ALTER TABLE worktrees ADD COLUMN vcs TEXT NOT NULL DEFAULT 'git'",
+        [],
+    );
 }
 
 fn agora() -> i64 {
@@ -557,10 +569,10 @@ impl Store {
     pub fn registra_worktree(&self, w: &Worktree) -> Result<()> {
         let agora = agora();
         self.conn().execute(
-            "INSERT INTO worktrees (caminho, projeto, raiz, branch, criada_em, usada_em)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
-             ON CONFLICT(caminho) DO UPDATE SET usada_em = ?5",
-            params![w.caminho, w.projeto, w.raiz, w.branch, agora],
+            "INSERT INTO worktrees (caminho, projeto, raiz, branch, vcs, criada_em, usada_em)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+             ON CONFLICT(caminho) DO UPDATE SET usada_em = ?6",
+            params![w.caminho, w.projeto, w.raiz, w.branch, w.vcs, agora],
         )?;
         Ok(())
     }
@@ -569,7 +581,7 @@ impl Store {
     pub fn worktree_da_branch(&self, raiz: &str, branch: &str) -> Result<Option<Worktree>> {
         let c = self.conn();
         Ok(c.query_row(
-            "SELECT caminho, projeto, raiz, branch, criada_em, usada_em
+            "SELECT caminho, projeto, raiz, branch, vcs, criada_em, usada_em
              FROM worktrees WHERE raiz = ?1 AND branch = ?2",
             params![raiz, branch],
             linha_para_worktree,
@@ -581,7 +593,7 @@ impl Store {
     pub fn worktree_em(&self, caminho: &str) -> Result<Option<Worktree>> {
         let c = self.conn();
         Ok(c.query_row(
-            "SELECT caminho, projeto, raiz, branch, criada_em, usada_em
+            "SELECT caminho, projeto, raiz, branch, vcs, criada_em, usada_em
              FROM worktrees WHERE caminho = ?1",
             [caminho],
             linha_para_worktree,
@@ -593,7 +605,7 @@ impl Store {
     pub fn worktrees_de(&self, raiz: &str) -> Result<Vec<Worktree>> {
         let c = self.conn();
         let mut stmt = c.prepare(
-            "SELECT caminho, projeto, raiz, branch, criada_em, usada_em
+            "SELECT caminho, projeto, raiz, branch, vcs, criada_em, usada_em
              FROM worktrees WHERE raiz = ?1 ORDER BY usada_em DESC, branch",
         )?;
         let linhas = stmt.query_map([raiz], linha_para_worktree)?;
@@ -664,8 +676,9 @@ fn linha_para_worktree(row: &rusqlite::Row<'_>) -> rusqlite::Result<Worktree> {
         projeto: row.get(1)?,
         raiz: row.get(2)?,
         branch: row.get(3)?,
-        criada_em: row.get(4)?,
-        usada_em: row.get(5)?,
+        vcs: row.get(4)?,
+        criada_em: row.get(5)?,
+        usada_em: row.get(6)?,
     })
 }
 

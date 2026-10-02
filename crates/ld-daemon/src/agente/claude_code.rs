@@ -330,13 +330,15 @@ impl Agente for ClaudeCode {
 
         // Configuração de MCP própria, com cada servidor de stdio passando pelo proxy. Precisa
         // vir com `--strict-mcp-config`, senão o original subiria junto com o embrulhado, e o
-        // servidor apareceria duas vezes na sessão.
+        // servidor apareceria duas vezes na sessão. Os extras (os da cópia de trabalho) entram
+        // por cima dos do projeto, embrulhados do mesmo jeito.
         if pedido.wrap_mcp {
-            let servidores = ld_core::mcp::servidores_do_projeto(
+            let mut servidores = ld_core::mcp::servidores_do_projeto(
                 &self.locais.claude_json,
                 pedido.raiz,
                 &pedido.projeto.path,
             );
+            servidores.extend(pedido.mcp_extra.clone());
             if !servidores.is_empty() {
                 let arquivo = dir.join("mcp.json");
                 let conteudo = ld_core::mcp::config_embrulhada(
@@ -350,6 +352,15 @@ impl Agente for ClaudeCode {
                 argv.push(arquivo.to_string_lossy().into_owned());
                 argv.push("--strict-mcp-config".into());
             }
+        } else if !pedido.mcp_extra.is_empty() {
+            // Sem o proxy, os do projeto o Claude Code carrega sozinho: só os extras vão num
+            // arquivo, e sem `--strict-mcp-config`, que apagaria os outros.
+            let arquivo = dir.join("mcp-extra.json");
+            let conteudo = serde_json::json!({ "mcpServers": pedido.mcp_extra });
+            std::fs::write(&arquivo, serde_json::to_string_pretty(&conteudo)?)
+                .with_context(|| format!("escrevendo {}", arquivo.display()))?;
+            argv.push("--mcp-config".into());
+            argv.push(arquivo.to_string_lossy().into_owned());
         }
 
         argv.push("-n".into());

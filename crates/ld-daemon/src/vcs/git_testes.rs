@@ -1,4 +1,4 @@
-//! O módulo de worktree contra repositórios de verdade num tempdir.
+//! O adaptador git contra repositórios de verdade num tempdir.
 
 use super::*;
 
@@ -18,41 +18,37 @@ async fn repo(dir: &Path) -> PathBuf {
     raiz
 }
 
-#[test]
-fn o_caminho_segue_o_projeto_a_partir_do_home() {
-    let base = Path::new("/b");
-    let home = Path::new("/home/eu");
-    assert_eq!(
-        caminho(base, home, Path::new("/home/eu/Personal/api"), "feat/login"),
-        Path::new("/b/Personal/api/feat/login")
-    );
-    // Dois projetos de mesmo nome em raízes diferentes não dividem pasta.
-    assert_ne!(
-        pasta_do_projeto(base, home, Path::new("/home/eu/Trabalho/api")),
-        pasta_do_projeto(base, home, Path::new("/home/eu/Personal/api"))
-    );
-    assert_eq!(
-        pasta_do_projeto(base, home, Path::new("/srv/api")),
-        Path::new("/b/raiz/srv/api")
-    );
+fn registro(raiz: &Path, caminho: &Path, branch: &str) -> Worktree {
+    Worktree {
+        caminho: caminho.to_string_lossy().into_owned(),
+        projeto: "api".into(),
+        raiz: raiz.to_string_lossy().into_owned(),
+        branch: branch.into(),
+        vcs: "git".into(),
+        criada_em: 0,
+        usada_em: 0,
+    }
 }
 
 #[tokio::test]
 async fn cria_worktree_de_branch_nova_e_da_que_ja_existe() {
     let dir = tempfile::tempdir().unwrap();
     let raiz = repo(dir.path()).await;
-    assert!(tem_commit(&raiz).await);
-    assert_eq!(principal(&raiz).await.as_deref(), Some("master"));
+    assert!(Git.tem_commit(&raiz).await);
+    assert_eq!(Git.principal(&raiz).await.as_deref(), Some("master"));
 
     let nova = dir.path().join("wt/feat/login");
-    cria(&raiz, &nova, "feat/login", Some("master"))
+    Git.garante(&raiz, &nova, "feat/login", Some("master"))
         .await
         .unwrap();
     assert!(nova.join(".git").is_file(), "worktree tem .git em arquivo");
 
     git(&raiz, &["branch", "velha"]).await.unwrap();
     let velha = dir.path().join("wt/velha");
-    cria(&raiz, &velha, "velha", None).await.unwrap();
+    // A branch que existe abre sem base, mesmo que uma seja passada.
+    Git.garante(&raiz, &velha, "velha", Some("master"))
+        .await
+        .unwrap();
 
     let lista = branches(&raiz).await.unwrap();
     let achar = |n: &str| lista.iter().find(|b| b.nome == n).unwrap().clone();
@@ -62,6 +58,30 @@ async fn cria_worktree_de_branch_nova_e_da_que_ja_existe() {
         Some(nova.as_path())
     );
     assert_eq!(achar("velha").em_checkout.as_deref(), Some(velha.as_path()));
+
+    // Garantir de novo onde ela já está não é erro; noutro lugar é.
+    Git.garante(&raiz, &velha, "velha", None).await.unwrap();
+    let outro = dir.path().join("wt/outro");
+    assert!(Git.garante(&raiz, &outro, "velha", None).await.is_err());
+    assert!(
+        Git.garante(&raiz, &outro, "nao-existe", None)
+            .await
+            .is_err(),
+        "branch que não existe sem base"
+    );
+}
+
+#[tokio::test]
+async fn ramo_em_checkout_noutro_lugar_so_serve_de_base() {
+    let dir = tempfile::tempdir().unwrap();
+    let raiz = repo(dir.path()).await;
+    git(&raiz, &["branch", "livre"]).await.unwrap();
+    let ramos = Git.ramos(&raiz).await.unwrap();
+    let achar = |n: &str| ramos.iter().find(|r| r.nome == n).unwrap().clone();
+    assert!(achar("master").so_como_base, "em checkout no repositório");
+    assert!(!achar("livre").so_como_base);
+    assert!(Git.existe(&raiz, "livre").await);
+    assert!(!Git.existe(&raiz, "nada").await);
 }
 
 #[tokio::test]
@@ -69,14 +89,15 @@ async fn pendencias_contam_o_que_se_perderia() {
     let dir = tempfile::tempdir().unwrap();
     let raiz = repo(dir.path()).await;
     let wt = dir.path().join("wt/x");
-    cria(&raiz, &wt, "x", Some("master")).await.unwrap();
-    assert!(pendencias(&wt, Some("master")).await.unwrap().nenhuma());
+    Git.garante(&raiz, &wt, "x", Some("master")).await.unwrap();
+    let w = registro(&raiz, &wt, "x");
+    assert!(Git.pendencias(&w).await.unwrap().nenhuma());
 
     std::fs::write(wt.join("a.txt"), "a").unwrap();
-    assert_eq!(pendencias(&wt, Some("master")).await.unwrap().sem_commit, 1);
+    assert_eq!(Git.pendencias(&w).await.unwrap().sem_commit, 1);
     git(&wt, &["add", "."]).await.unwrap();
     git(&wt, &["commit", "--quiet", "-m", "a"]).await.unwrap();
-    let p = pendencias(&wt, Some("master")).await.unwrap();
+    let p = Git.pendencias(&w).await.unwrap();
     assert_eq!((p.sem_commit, p.sem_push), (0, 1));
 }
 
@@ -85,24 +106,16 @@ async fn apagar_tira_a_pasta_e_a_branch() {
     let dir = tempfile::tempdir().unwrap();
     let raiz = repo(dir.path()).await;
     let wt = dir.path().join("wt/x");
-    cria(&raiz, &wt, "x", Some("master")).await.unwrap();
+    Git.garante(&raiz, &wt, "x", Some("master")).await.unwrap();
     std::fs::write(wt.join("sujo.txt"), "a").unwrap();
+    let w = registro(&raiz, &wt, "x");
 
-    apaga(&raiz, &wt, "x").await.unwrap();
+    assert!(!Git.apagar_preserva_commits());
+    Git.apaga(&w, false).await.unwrap();
     assert!(!wt.exists());
-    assert!(!existe_branch(&raiz, "x").await);
+    assert!(!Git.existe(&raiz, "x").await);
     // De novo: o que já foi não é erro.
-    apaga(&raiz, &wt, "x").await.unwrap();
-}
-
-#[tokio::test]
-async fn nome_de_branch_segue_o_git_e_nao_sobe_de_pasta() {
-    let dir = tempfile::tempdir().unwrap();
-    let raiz = repo(dir.path()).await;
-    assert!(nome_valido(&raiz, "feat/login").await);
-    for ruim in ["", "-x", "a..b", "../fora", "com espaço", "fim/"] {
-        assert!(!nome_valido(&raiz, ruim).await, "{ruim:?}");
-    }
+    Git.apaga(&w, false).await.unwrap();
 }
 
 #[tokio::test]
@@ -117,10 +130,10 @@ async fn projeto_novo_nasce_com_commit_e_nao_sobrescreve() {
         std::env::set_var("GIT_COMMITTER_NAME", "Teste");
         std::env::set_var("GIT_COMMITTER_EMAIL", "teste@exemplo");
     }
-    inicia_projeto(&pasta).await.unwrap();
-    assert!(tem_commit(&pasta).await);
+    Git.inicia_projeto(&pasta).await.unwrap();
+    assert!(Git.tem_commit(&pasta).await);
     assert!(
-        inicia_projeto(&pasta).await.is_err(),
+        Git.inicia_projeto(&pasta).await.is_err(),
         "pasta que existe fica"
     );
 }
