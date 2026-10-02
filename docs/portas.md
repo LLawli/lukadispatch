@@ -11,6 +11,7 @@ O daemon fala com o mundo por traits. Cada uma tem implementações prontas, esc
 | voz para texto | `transcritor::Transcritor` | `processo` (qualquer programa local) | `[transcricao] motor = "processo"` |
 | arquivo grande | `divisor::Divisor` | `video` (ffmpeg), `7z`, `rar` | `[arquivos] divisor = "7z"`, `cortar_video = true` |
 | onde a sessão roda | `sessions::Hospedeiro` | `tmux`, `herdr` | `hospedeiro = "tmux"`, `[herdr] sessao` |
+| cópia de trabalho de cada sessão | `vcs::Vcs` | `git` (worktree), `jj` (workspace) | `vcs = "git"`, `[jj.mcp.<nome>]` |
 
 Elas são montadas em `main.rs` e chegam ao `App` num `Portas`:
 
@@ -22,6 +23,7 @@ let app = App::new(cfg, store, Portas {
     transcritor,  // Option<Arc<dyn Transcritor>>, None = transcrição desligada
     divisores,    // Divisores, a cadeia ordenada
     hospedeiro,   // Arc<dyn Hospedeiro>
+    vcs,          // Arc<dyn Vcs>
 });
 ```
 
@@ -33,7 +35,8 @@ está em [decisoes/0002](decisoes/0002-portas-e-adaptadores.md).
 `lukadispatch setup` escolhe uma implementação por porta, com os mesmos nomes do config:
 
 ```text
-lukadispatch setup --frontend telegram --agent claude-code --session tmux --memoria ai-memory
+lukadispatch setup --frontend telegram --agent claude-code --session tmux --memoria ai-memory \
+  --vcs git
 ```
 
 Cada implementação traz o próprio passo de setup, a trait `Peca` em
@@ -42,10 +45,10 @@ o que faltar e escreve no rascunho do config e do `.env`; `ativa`, opcional, rod
 gravar (é onde o Claude Code instala os hooks). Uma implementação nova se registra em dois
 lugares, do mesmo jeito:
 
-1. no `da_config` da porta (e na lista de nomes dela: `AGENTES`, `MEMORIAS`, `HOSPEDEIROS`), para
-   o daemon subir com ela;
-2. no registro da porta em `setup/pecas.rs` (`frontend`, `agente`, `hospedeiro`, `memoria`), para
-   o setup saber configurá-la.
+1. no `da_config` da porta (e na lista de nomes dela: `AGENTES`, `MEMORIAS`, `HOSPEDEIROS`,
+   `VCS`), para o daemon subir com ela;
+2. no registro da porta em `setup/pecas.rs` (`frontend`, `agente`, `hospedeiro`, `memoria`,
+   `vcs`), para o setup saber configurá-la.
 
 O passo do Telegram é o modelo para um frontend: a API fica atrás de uma trait (`ApiDoBot`), e o
 teste roteiriza um bot de mentira que passa por todos os laços (token errado, privacidade ligada,
@@ -299,3 +302,39 @@ Duas coisas que qualquer hospedeiro tem de preservar, porque o resto do sistema 
 
 O hospedeiro sai da chave `hospedeiro` do config, e um nome novo se registra em
 `sessions::da_config` e na lista `HOSPEDEIROS`.
+
+---
+
+## Controle de versão: a cópia de trabalho de cada sessão
+
+**Onde:** `crates/ld-daemon/src/vcs/`, trait `Vcs`. Contrato na doc de `vcs/mod.rs`; o porquê
+em [decisoes/0017](decisoes/0017-worktree-por-sessao.md) e
+[0019](decisoes/0019-jj-como-porta-de-vcs.md).
+
+Cada sessão do bot roda numa cópia própria do repositório, numa pasta que não muda nunca (o
+agente acha a conversa anterior pelo cwd). O `git` faz uma worktree por branch; o `jj`, um
+workspace por branch, em que a "branch" é o nome do workspace. O domínio fala "branch" com você
+nos dois casos, e as palavras que mudam (a worktree, o workspace) vêm de `termos`.
+
+A escolha é global, no setup (`--vcs jj`). Cada cópia registrada guarda o vcs que a criou (coluna
+`vcs` da tabela `worktrees`), e `vcs::de` devolve o adaptador dela: uma worktree git aberta antes
+da troca para o jj continua sendo apagada pelo git.
+
+O que uma implementação responde, na ordem em que o `/new` pergunta:
+
+- `prepara`: deixar a pasta pronta (o jj se coloca sobre um repositório que só tem git);
+- `tem_commit`, `principal`, `ramos`: se há de onde tirar cópia, qual é a branch principal (que
+  nunca abre direto) e o que o seletor oferece. Um `Ramo` com `so_como_base` vira "nova a partir
+  dele" em vez de abrir: no git, a branch em checkout noutro lugar; no jj, todo bookmark;
+- `existe` e `base_para`: se um nome digitado abre direto, e de onde nasce se não existe;
+- `garante`: a cópia na pasta pedida, criando se precisar, e erro se a branch está em uso noutro
+  lugar;
+- `pendencias`, `apagar_preserva_commits`, `apaga`: o que se perderia, e como o `/kill` apaga. No
+  jj, apagar o workspace não perde commit (não pergunta), e abandonar é uma terceira saída;
+- `antes_da_partida`, `instrucoes`, `servidores_mcp`: o que a sessão precisa ao subir. O jj roda
+  `update-stale`, ensina o agente que ali não há git, e injeta os servidores do `[jj.mcp]`.
+
+Três cuidados que valem para qualquer implementação nova (um adaptador de Mercurial, Sapling):
+leitura nunca muda o checkout de quem trabalha no repositório; nada pede interação nem assinatura
+com toque (quem pediu está no celular); e o teste roda contra o binário de verdade num tempdir,
+porque a CLI desses programas muda entre versões e só o programa real diz o que mudou.

@@ -57,12 +57,13 @@ dirige cada cenário pelo Telegram, com updates na forma em que ele os manda. As
 não existem no CI são trocadas: o Telegram por um Bot API de mentira que sobe no próprio teste (o
 adaptador do teloxide fala com ele por `LUKADISPATCH_TELEGRAM_API`), e o Claude Code pelo dublê
 `tests/e2e/claude`, um script Python que dispara os ganchos do `--settings` e lê o canal pelo
-`listen`. O resto é real: socket, CLI dos ganchos, git, worktree e hospedeiro. Cada cenário roda
-no tmux e no herdr. O daemon sobe com HOME, XDG, socket, tmux e herdr num tempdir, então a suíte
-não toca no seu tmux, no seu herdr nem no serviço instalado.
+`listen`. O resto é real: socket, CLI dos ganchos, git ou jj, a cópia de trabalho e o hospedeiro.
+Cada cenário roda no tmux e no herdr. O daemon sobe com HOME, XDG, socket, tmux e herdr num
+tempdir, então a suíte não toca no seu tmux, no seu herdr nem no serviço instalado.
 
-Ela precisa de `tmux`, `herdr` e `python3`. Sem eles, o cenário é pulado; com
-`LUKADISPATCH_E2E_EXIGE=1` (o CI liga), faltar um deles é falha. Para rodar só ela:
+Ela precisa de `tmux`, `herdr` e `python3`, e o cenário do jj, de `jj`. Sem eles, o cenário é
+pulado; com `LUKADISPATCH_E2E_EXIGE=1` (o CI liga), faltar um deles é falha (o mesmo vale para
+os testes do adaptador jj, em `crates/ld-daemon/src/vcs/jj_testes.rs`). Para rodar só ela:
 
 ```bash
 cargo test -p ld-daemon --test e2e

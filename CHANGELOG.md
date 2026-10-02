@@ -6,6 +6,25 @@ versão para as notas do GitHub Release, então escreva para quem vai decidir se
 
 ## [Unreleased]
 
+### Adicionado
+
+- O jj (Jujutsu) como opção ao git para a cópia de cada sessão: com `vcs = "jj"` (ou
+  `lukadispatch setup --vcs jj`), cada branch roda num workspace do jj, e não numa git worktree. Um
+  repositório que só tem git ganha o jj colocado por cima no primeiro `/new`, sem perguntar. O bot
+  não cria bookmark: todo bookmark é base de um workspace novo, e o agente cria o seu ao publicar.
+- O `/kill` num workspace do jj tem três saídas: manter, apagar o workspace (os commits continuam
+  no repositório) ou apagar abandonando os commits que são só dele, com confirmação quando há o
+  que perder.
+- `[jj.mcp.<nome>]` no config injeta um servidor MCP em toda sessão num workspace do jj.
+- A varredura de projetos reconhece repositório jj sem `.git`.
+
+### Mudado
+
+- O texto que a memória de longo prazo põe no prompt de partida fala em "cópia de trabalho", e não
+  mais em git worktree, porque a cópia pode ser um workspace do jj.
+- As worktrees git que o bot abriu antes de trocar para o jj continuam funcionando e são apagadas
+  pelo git; o `/new` as marca com `· git`.
+
 ## [0.3.0] - 2026-09-26
 
 ### Adicionado
